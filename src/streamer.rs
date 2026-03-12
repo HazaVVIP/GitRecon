@@ -4,11 +4,11 @@
 //! Output: StreamResult with all findings + intel.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Instant;
 use regex::Regex;
 use lazy_static::lazy_static;
-use tokio::sync::Semaphore;
+use futures::StreamExt;
 
 use crate::http_client::HttpClient;
 use crate::git_parser::{ObjectParser, obj_path};
@@ -40,7 +40,7 @@ lazy_static! {
     static ref PATTERNS: Vec<Pattern> = vec![
         // Cloud
         pat!("aws_key_id",  "CRITICAL", "AWS Access Key ID",
-             r"(?<![A-Z0-9])(AKIA|ABIA|ACCA|ASIA)[A-Z0-9]{16}(?![A-Z0-9])"),
+             r"\b(AKIA|ABIA|ACCA|ASIA)[A-Z0-9]{16}\b"),
         pat!("aws_secret",  "CRITICAL", "AWS Secret Access Key",
              r#"(?i)aws[_\-\s]?secret[_\-\s]?[a-z]*\s*[=:]\s*['"]?([A-Za-z0-9/+=]{40})['"]?"#),
         pat!("gcp_sa",      "CRITICAL", "GCP Service Account",
@@ -259,9 +259,24 @@ struct State {
     blobs_scanned:   usize,
     blobs_failed:    usize,
     bytes_scanned:   usize,
-    seen:            HashSet<String>,
-    sha1_to_file:    HashMap<String, String>,
-    current_blobs:   HashSet<String>,
+}
+
+// Result sent back from each worker task via channel
+enum WorkerResult {
+    BlobScanned {
+        findings: Vec<Finding>,
+        tech:     Vec<String>,
+        bytes:    usize,
+    },
+    BlobFailed,
+    CommitProcessed {
+        email: String,
+        name:  String,
+    },
+    TreeProcessed {
+        file_techs: Vec<(String, String)>,  // (sha1, filename)
+    },
+    Skipped,
 }
 
 // ════════════════════════════════════════════════
@@ -294,32 +309,27 @@ impl Streamer {
         let t0 = Instant::now();
         let git_url = git_url.trim_end_matches('/').to_string();
 
-        let state = Arc::new(Mutex::new(State::default()));
-
-        // Build lookup: sha1 → filename (from index)
-        {
-            let mut s = state.lock().unwrap();
-            for entry in &map_result.index_entries {
-                s.sha1_to_file.insert(entry.sha1.clone(), entry.filename.clone());
-            }
-            s.current_blobs = map_result.blob_sha1s.clone();
+        // Build sha1→filename lookup and current-blob set upfront
+        let mut sha1_to_file: HashMap<String, String> = HashMap::with_capacity(map_result.index_entries.len());
+        for entry in &map_result.index_entries {
+            sha1_to_file.insert(entry.sha1.clone(), entry.filename.clone());
         }
+        let current_blobs = map_result.blob_sha1s.clone();
+        let sha1_to_file = Arc::new(sha1_to_file);
+        let current_blobs = Arc::new(current_blobs);
 
         // Priority: blobs from index first (sensitive), then commit graph
         let mut priority_blobs: Vec<String> = map_result.blob_sha1s.iter().cloned().collect();
         let other_sha1s: Vec<String> = map_result.commit_sha1s.iter().cloned().collect();
 
-        // Sort: sensitive files first
-        {
-            let s = state.lock().unwrap();
-            priority_blobs.sort_by_key(|sha1| {
-                if is_sensitive_file(s.sha1_to_file.get(sha1).map(|f| f.as_str()).unwrap_or("")) {
-                    0
-                } else {
-                    1
-                }
-            });
-        }
+        // Sort: sensitive files first (no lock needed — sha1_to_file is immutable here)
+        priority_blobs.sort_by_key(|sha1| {
+            if is_sensitive_file(sha1_to_file.get(sha1).map(|f| f.as_str()).unwrap_or("")) {
+                0
+            } else {
+                1
+            }
+        });
 
         let all_sha1s: Vec<String> = priority_blobs.into_iter().chain(other_sha1s).collect();
         let total = all_sha1s.len();
@@ -333,157 +343,165 @@ impl Streamer {
             );
         }
 
-        // Process in batches to control memory
-        let batch_size = 200.min((self.mem_limit / (50 * 1024)).max(50));
         let done_counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let semaphore = Arc::new(Semaphore::new(self.workers));
 
-        let mut handles = Vec::new();
-
-        for sha1 in &all_sha1s {
-            // Skip already-seen
-            {
-                let mut s = state.lock().unwrap();
-                if s.seen.contains(sha1) {
-                    done_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    continue;
+        // Use FuturesUnordered with buffer_unordered for bounded concurrency
+        // Each future returns a WorkerResult; aggregation is single-threaded (no lock contention).
+        let workers = self.workers;
+        let stream = futures::stream::iter(all_sha1s)
+            .map(|sha1| {
+                let client = self.client.clone();
+                let git_url = git_url.clone();
+                let sha1_to_file = sha1_to_file.clone();
+                let current_blobs = current_blobs.clone();
+                async move {
+                    fetch_and_process(&client, &git_url, &sha1, &sha1_to_file, &current_blobs).await
                 }
-                s.seen.insert(sha1.clone());
+            })
+            .buffer_unordered(workers);
+
+        let mut state = State::default();
+
+        futures::pin_mut!(stream);
+        while let Some(result) = stream.next().await {
+            let done = done_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            if let Some(ref cb) = progress_cb {
+                cb(done, total);
             }
-
-            let permit = semaphore.clone().acquire_owned().await.unwrap();
-            let client = self.client.clone();
-            let git_url = git_url.clone();
-            let sha1 = sha1.clone();
-            let state = state.clone();
-            let done_counter = done_counter.clone();
-            let progress_cb = progress_cb.clone();
-            let total = total;
-
-            let handle = tokio::spawn(async move {
-                let _permit = permit;
-                process_sha1(&client, &git_url, &sha1, state).await;
-                let done = done_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                if let Some(ref cb) = progress_cb {
-                    cb(done, total);
+            match result {
+                WorkerResult::BlobScanned { findings, tech, bytes } => {
+                    state.blobs_scanned += 1;
+                    state.bytes_scanned += bytes;
+                    state.findings.extend(findings);
+                    for t in tech {
+                        state.tech_stack.insert(t);
+                    }
                 }
-            });
-            handles.push(handle);
-
-            // Yield every batch_size to avoid overwhelming memory
-            if handles.len() % batch_size == 0 {
-                // Let spawned tasks run
-                tokio::task::yield_now().await;
+                WorkerResult::BlobFailed => {
+                    state.blobs_failed += 1;
+                }
+                WorkerResult::CommitProcessed { email, name } => {
+                    state.commit_count += 1;
+                    if !email.is_empty() {
+                        state.contributors.entry(email).or_insert(name);
+                    }
+                }
+                WorkerResult::TreeProcessed { file_techs } => {
+                    for (_sha1, filename) in file_techs {
+                        detect_tech(&filename, &mut state.tech_stack);
+                    }
+                }
+                WorkerResult::Skipped => {}
             }
-        }
-
-        for h in handles {
-            let _ = h.await;
         }
 
         let elapsed = t0.elapsed().as_secs_f64();
-        let s = state.lock().unwrap();
+        let mut ts: Vec<_> = state.tech_stack.iter().cloned().collect();
+        ts.sort();
 
         StreamResult {
-            findings:       s.findings.clone(),
-            contributors:   s.contributors.iter()
+            findings:      state.findings,
+            contributors:  state.contributors.iter()
                              .map(|(email, name)| Contributor { name: name.clone(), email: email.clone() })
                              .collect(),
-            tech_stack:     {
-                let mut ts: Vec<_> = s.tech_stack.iter().cloned().collect();
-                ts.sort();
-                ts
-            },
-            commit_count:   s.commit_count,
-            blobs_scanned:  s.blobs_scanned,
-            blobs_failed:   s.blobs_failed,
-            bytes_scanned:  s.bytes_scanned,
-            elapsed_s:      elapsed,
+            tech_stack:    ts,
+            commit_count:  state.commit_count,
+            blobs_scanned: state.blobs_scanned,
+            blobs_failed:  state.blobs_failed,
+            bytes_scanned: state.bytes_scanned,
+            elapsed_s:     elapsed,
         }
     }
 }
 
 // ════════════════════════════════════════════════
-// PER-SHA1 PROCESSING (async)
+// PER-SHA1 PROCESSING (async, lock-free)
 // ════════════════════════════════════════════════
 
-async fn process_sha1(
+/// Max blob content size to scan (4 MB). Larger blobs are skipped.
+const MAX_SCAN_BYTES: usize = 4 * 1024 * 1024;
+
+async fn fetch_and_process(
     client: &HttpClient,
     git_url: &str,
     sha1: &str,
-    state: Arc<Mutex<State>>,
-) {
+    sha1_to_file: &HashMap<String, String>,
+    current_blobs: &HashSet<String>,
+) -> WorkerResult {
     let url  = format!("{}/{}", git_url, obj_path(sha1));
     let resp = client.get(&url).await;
 
     if !resp.ok() {
-        state.lock().unwrap().blobs_failed += 1;
-        return;
+        return WorkerResult::BlobFailed;
     }
 
     let parser = ObjectParser;
     let obj = match parser.parse(&resp.body, sha1) {
         Some(o) => o,
-        None    => return,
+        None    => return WorkerResult::Skipped,
     };
 
-    {
-        state.lock().unwrap().bytes_scanned += resp.body.len();
-    }
+    let raw_bytes = resp.body.len();
 
     match obj.obj_type.as_str() {
         "blob" => {
-            scan_blob(&obj, state);
+            // Fast binary detection: check first 8 KB for null bytes
+            let probe = &obj.data[..obj.data.len().min(8192)];
+            let null_count = probe.iter().filter(|&&b| b == 0).count();
+            if null_count > 10 {
+                // Binary file — skip scanning, still count bytes
+                return WorkerResult::BlobScanned {
+                    findings: vec![],
+                    tech: vec![],
+                    bytes: raw_bytes,
+                };
+            }
+
+            // Skip blobs that exceed the scan size limit
+            if obj.data.len() > MAX_SCAN_BYTES {
+                return WorkerResult::BlobScanned {
+                    findings: vec![],
+                    tech: vec![],
+                    bytes: raw_bytes,
+                };
+            }
+
+            let filename = sha1_to_file.get(sha1)
+                .cloned()
+                .unwrap_or_else(|| format!("[blob:{}]", &sha1[..8]));
+            let is_deleted = !current_blobs.contains(sha1);
+
+            let mut tech = Vec::new();
+            collect_tech(&filename, &mut tech);
+
+            let content = match std::str::from_utf8(&obj.data) {
+                Ok(s)  => s.to_string(),
+                Err(_) => String::from_utf8_lossy(&obj.data).into_owned(),
+            };
+
+            let findings = scan_content(&content, &filename, sha1, is_deleted);
+
+            WorkerResult::BlobScanned { findings, tech, bytes: raw_bytes }
         }
         "commit" => {
             if let Some(commit) = parser.parse_commit(&obj) {
-                let mut s = state.lock().unwrap();
-                s.commit_count += 1;
-                if !commit.author_email.is_empty() {
-                    s.contributors.entry(commit.author_email).or_insert(commit.author);
+                WorkerResult::CommitProcessed {
+                    email: commit.author_email,
+                    name:  commit.author,
                 }
+            } else {
+                WorkerResult::Skipped
             }
         }
         "tree" => {
             let entries = parser.parse_tree(&obj);
-            let mut s = state.lock().unwrap();
-            for entry in entries {
-                if entry.is_blob() {
-                    s.sha1_to_file.entry(entry.sha1.clone()).or_insert(entry.name.clone());
-                    detect_tech(&entry.name, &mut s.tech_stack);
-                }
-            }
+            let file_techs: Vec<(String, String)> = entries.into_iter()
+                .filter(|e| e.is_blob())
+                .map(|e| (e.sha1, e.name))
+                .collect();
+            WorkerResult::TreeProcessed { file_techs }
         }
-        _ => {}
-    }
-}
-
-fn scan_blob(obj: &crate::git_parser::GitObject, state: Arc<Mutex<State>>) {
-    let content = match std::str::from_utf8(&obj.data) {
-        Ok(s)  => s.to_string(),
-        Err(_) => String::from_utf8_lossy(&obj.data).into_owned(),
-    };
-
-    // Skip binary files (many NUL bytes)
-    if content.chars().filter(|&c| c == '\x00').count() > 20 {
-        return;
-    }
-
-    let (filename, is_deleted) = {
-        let mut s = state.lock().unwrap();
-        s.blobs_scanned += 1;
-        let fname = s.sha1_to_file.get(&obj.sha1)
-            .cloned()
-            .unwrap_or_else(|| format!("[blob:{}]", &obj.sha1[..8]));
-        let del = !s.current_blobs.contains(&obj.sha1);
-        detect_tech(&fname, &mut s.tech_stack);
-        (fname, del)
-    };
-
-    let findings = scan_content(&content, &filename, &obj.sha1, is_deleted);
-
-    if !findings.is_empty() {
-        state.lock().unwrap().findings.extend(findings);
+        _ => WorkerResult::Skipped,
     }
 }
 
@@ -494,9 +512,8 @@ fn scan_content(
     is_deleted: bool,
 ) -> Vec<Finding> {
     let mut findings = Vec::new();
-    let lines: Vec<&str> = content.lines().collect();
 
-    for (lineno, line) in lines.iter().enumerate() {
+    for (lineno, line) in content.lines().enumerate() {
         if line.len() > 2000 {
             continue;
         }
@@ -556,6 +573,16 @@ fn scan_content(
 // HELPERS
 // ════════════════════════════════════════════════
 
+/// Collect matching tech stack entries into a Vec (lock-free variant for worker tasks).
+fn collect_tech(filename: &str, out: &mut Vec<String>) {
+    for (tech, rx) in TECH_PATTERNS.iter() {
+        if rx.is_match(filename) {
+            out.push(tech.to_string());
+        }
+    }
+}
+
+/// Mutate a HashSet directly (used by the aggregator after receiving results).
 fn detect_tech(filename: &str, stack: &mut HashSet<String>) {
     for (tech, rx) in TECH_PATTERNS.iter() {
         if rx.is_match(filename) {
@@ -620,5 +647,51 @@ mod tests {
     #[test]
     fn test_low_entropy() {
         assert!(!high_entropy("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+    }
+
+    #[test]
+    fn test_binary_detection_byte_level() {
+        // A byte slice with >10 null bytes in the first 8 KB should be treated as binary
+        let binary: Vec<u8> = (0u8..20).flat_map(|_| vec![b'A', 0u8]).collect();
+        let probe = &binary[..binary.len().min(8192)];
+        let null_count = probe.iter().filter(|&&b| b == 0).count();
+        assert!(null_count > 10, "Should detect binary data");
+
+        // Normal text should not exceed the threshold
+        let text = b"hello world, this is a test file with no null bytes";
+        let probe = &text[..text.len().min(8192)];
+        let null_count = probe.iter().filter(|&&b| b == 0).count();
+        assert!(null_count <= 10, "Plain text should not be detected as binary");
+    }
+
+    #[test]
+    fn test_scan_content_finds_aws_key() {
+        // AKIA + exactly 16 uppercase/digit chars, no placeholder substrings
+        let content = "AWS_KEY=AKIAZ9XYZMNOP1234567";
+        let findings = scan_content(content, "config.sh", "a".repeat(40).as_str(), false);
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "aws_key_id"),
+            "Should detect AWS key ID pattern"
+        );
+    }
+
+    #[test]
+    fn test_scan_content_skips_long_lines() {
+        let long_line = "A".repeat(2001);
+        let findings = scan_content(&long_line, "file.txt", "a".repeat(40).as_str(), false);
+        // Long lines should be skipped — no findings
+        assert!(findings.is_empty(), "Lines >2000 chars should be skipped");
+    }
+
+    #[test]
+    fn test_collect_tech_python() {
+        let mut tech = Vec::new();
+        collect_tech("requirements.txt", &mut tech);
+        assert!(tech.contains(&"Python".to_string()));
+    }
+
+    #[test]
+    fn test_max_scan_bytes_constant() {
+        assert_eq!(MAX_SCAN_BYTES, 4 * 1024 * 1024);
     }
 }

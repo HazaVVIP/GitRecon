@@ -22,21 +22,27 @@ const META_FILES: &[&str] = &[
     "COMMIT_EDITMSG",
     "ORIG_HEAD",
     "FETCH_HEAD",
+    "MERGE_HEAD",
+    "CHERRY_PICK_HEAD",
     "refs/heads/master",
     "refs/heads/main",
     "refs/heads/develop",
     "refs/heads/dev",
     "refs/heads/staging",
     "refs/heads/production",
+    "refs/heads/release",
+    "refs/heads/hotfix",
     "refs/remotes/origin/HEAD",
     "refs/remotes/origin/master",
     "refs/remotes/origin/main",
+    "refs/remotes/origin/develop",
     "refs/stash",
     "logs/refs/heads/master",
     "logs/refs/heads/main",
     "logs/refs/heads/develop",
     "logs/refs/remotes/origin/HEAD",
     "objects/info/packs",
+    "info/refs",
     "refs/wip/index/refs/heads/master",
     "refs/wip/wtree/refs/heads/master",
 ];
@@ -184,10 +190,10 @@ impl Mapper {
             result.remote_urls = cfg_parser.remote_urls(&cfg);
             result.branches = cfg_parser.branches(&cfg);
 
-            // Fetch refs for each branch
+            // Fetch refs for each branch — all concurrently
             let branch_paths: Vec<(String, String)> = result.branches
                 .iter()
-                .take(15)
+                .take(20)
                 .flat_map(|br| {
                     vec![
                         format!("refs/heads/{}", br),
@@ -198,10 +204,21 @@ impl Mapper {
                 .map(|p| (p.clone(), format!("{}/{}", git_url, p)))
                 .collect();
 
+            let mut branch_handles = Vec::new();
             for (p, url) in branch_paths {
-                let r = self.client.get(&url).await;
-                if r.ok() && !r.body.is_empty() {
-                    meta.insert(p, r.body.to_vec());
+                let client = self.client.clone();
+                branch_handles.push(tokio::spawn(async move {
+                    let r = client.get(&url).await;
+                    if r.ok() && !r.body.is_empty() {
+                        Some((p, r.body.to_vec()))
+                    } else {
+                        None
+                    }
+                }));
+            }
+            for h in branch_handles {
+                if let Ok(Some((p, body))) = h.await {
+                    meta.insert(p, body);
                 }
             }
         }
@@ -242,13 +259,17 @@ impl Mapper {
             }
         }
 
-        // 7. Extract SHA1s from ref files
+        // 7. Extract SHA1s from ref files and info/refs
         for (path, body) in &meta {
             if path.starts_with("refs/") {
                 let text = String::from_utf8_lossy(body).trim().to_string();
                 if SHA40_RE.is_match(&text) {
                     sha1s.insert(text);
                 }
+            } else if path == "info/refs" {
+                // info/refs lists all refs as "<sha1>\t<refname>"
+                let text = String::from_utf8_lossy(body);
+                sha1s.extend(extract_sha1s(&text));
             }
         }
 
@@ -258,13 +279,24 @@ impl Mapper {
             let packs = parse_info_packs(&text);
             result.pack_sha1s = packs.clone();
 
+            // Fetch all pack indexes concurrently
+            let mut pack_handles = Vec::new();
             for pack_sha1 in &packs {
-                let idx_path = format!("objects/pack/pack-{}.idx", pack_sha1);
-                let r = self.client.get(&format!("{}/{}", git_url, idx_path)).await;
-                if r.ok() && !r.body.is_empty() {
+                let client = self.client.clone();
+                let idx_url = format!("{}/objects/pack/pack-{}.idx", git_url, pack_sha1);
+                pack_handles.push(tokio::spawn(async move {
+                    let r = client.get(&idx_url).await;
+                    if r.ok() && !r.body.is_empty() {
+                        Some(r.body.to_vec())
+                    } else {
+                        None
+                    }
+                }));
+            }
+            for h in pack_handles {
+                if let Ok(Some(body)) = h.await {
                     let parser = PackIndexParser;
-                    let pack_sha1s = parser.parse(&r.body);
-                    sha1s.extend(pack_sha1s);
+                    sha1s.extend(parser.parse(&body));
                 }
             }
         }
@@ -285,5 +317,44 @@ impl Mapper {
         };
 
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_map_result_all_sha1s_union() {
+        let mut r = MapResult::default();
+        r.blob_sha1s.insert("blob1111blob1111blob1111blob1111blob1111b".to_string());
+        r.commit_sha1s.insert("comm1111comm1111comm1111comm1111comm1111c".to_string());
+        let all = r.all_sha1s();
+        assert_eq!(all.len(), 2);
+        assert!(all.contains("blob1111blob1111blob1111blob1111blob1111b"));
+        assert!(all.contains("comm1111comm1111comm1111comm1111comm1111c"));
+    }
+
+    #[test]
+    fn test_map_result_size_human() {
+        let mut r = MapResult::default();
+        r.estimated_bytes = 500;
+        assert!(r.size_human().ends_with("B"));
+
+        r.estimated_bytes = 2048;
+        assert!(r.size_human().contains("KB"));
+
+        r.estimated_bytes = 2 * 1024 * 1024;
+        assert!(r.size_human().contains("MB"));
+    }
+
+    #[test]
+    fn test_meta_files_contains_info_refs() {
+        assert!(META_FILES.contains(&"info/refs"));
+    }
+
+    #[test]
+    fn test_meta_files_contains_merge_head() {
+        assert!(META_FILES.contains(&"MERGE_HEAD"));
     }
 }
