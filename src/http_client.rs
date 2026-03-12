@@ -49,11 +49,14 @@ impl Default for HttpConfig {
 /// An HTTP response.
 #[derive(Debug)]
 pub struct Response {
+    #[allow(dead_code)]
     pub url: String,
     pub status: u16,
     pub body: bytes::Bytes,
     pub headers: std::collections::HashMap<String, String>,
+    #[allow(dead_code)]
     pub elapsed_ms: f64,
+    #[allow(dead_code)]
     pub error: Option<String>,
 }
 

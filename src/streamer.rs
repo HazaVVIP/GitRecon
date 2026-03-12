@@ -209,6 +209,7 @@ pub struct StreamResult {
     pub tech_stack:     Vec<String>,
     pub commit_count:   usize,
     pub blobs_scanned:  usize,
+    #[allow(dead_code)]
     pub blobs_failed:   usize,
     pub bytes_scanned:  usize,
     pub elapsed_s:      f64,
@@ -286,6 +287,7 @@ enum WorkerResult {
 pub struct Streamer {
     client:      HttpClient,
     workers:     usize,
+    #[allow(dead_code)]
     mem_limit:   usize,
     verbose:     bool,
 }

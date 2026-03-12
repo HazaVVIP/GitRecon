@@ -34,9 +34,13 @@ const MIN_CONFIDENCE: u32 = 20;
 
 #[derive(Debug, Clone)]
 pub struct ProbeDetail {
+    #[allow(dead_code)]
     pub path: String,
+    #[allow(dead_code)]
     pub status: u16,
+    #[allow(dead_code)]
     pub accessible: bool,
+    #[allow(dead_code)]
     pub valid: bool,
 }
 
@@ -50,7 +54,9 @@ pub struct DetectResult {
     pub server: String,
     pub branch: Option<String>,
     pub remote_url: Option<String>,
+    #[allow(dead_code)]
     pub head_sha1: Option<String>,
+    #[allow(dead_code)]
     pub probes: Vec<ProbeDetail>,
 }
 

@@ -9,6 +9,7 @@ use crate::mapper::MapResult;
 use crate::streamer::StreamResult;
 
 pub struct Reporter {
+    #[allow(dead_code)]
     pub no_color: bool,
 }
 
