@@ -1,0 +1,66 @@
+[package]
+name = "gitrecon"
+version = "2.0.0"
+edition = "2021"
+description = "GitRecon — Streaming Git Exposure Scanner (Rust rewrite)"
+authors = ["GitRecon Contributors"]
+license = "MIT"
+
+[[bin]]
+name = "gitrecon"
+path = "src/main.rs"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.44", features = ["full"] }
+futures = "0.3"
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json", "socks", "rustls-tls", "gzip", "deflate"], default-features = false }
+bytes = "1.11"
+
+# Error handling
+anyhow = "1.0"
+
+# CLI
+clap = { version = "4.5", features = ["derive"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Regex
+regex = "1.11"
+lazy_static = "1.5"
+
+# Compression
+flate2 = "1.1"
+
+# Hashing
+sha1 = "0.10"
+hex = "0.4"
+
+# Terminal colors
+colored = "3.0"
+
+# Progress bar
+indicatif = "0.17"
+
+# Random
+rand = "0.9"
+
+# Date/time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Parallel iteration
+rayon = "1.10"
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
