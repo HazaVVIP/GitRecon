@@ -29,6 +29,9 @@ const PATH_VARIANTS: &[&str] = &[
     "src/.git", "portal/.git", "wp-content/.git",
 ];
 
+/// Minimum confidence score to report a DetectResult.
+const MIN_CONFIDENCE: u32 = 20;
+
 #[derive(Debug, Clone)]
 pub struct ProbeDetail {
     pub path: String,
@@ -171,7 +174,7 @@ async fn probe_one_path(
     let score = score.min(100);
 
     let server  = detect_server(client, base_url).await;
-    let listing = if score >= 20 { check_listing(client, &git_url).await } else { false };
+    let listing = if score >= MIN_CONFIDENCE { check_listing(client, &git_url).await } else { false };
 
     Some(DetectResult {
         url: base_url.to_string(),
@@ -194,23 +197,34 @@ pub async fn run(
     base_url: &str,
     fuzz: bool,
 ) -> Option<DetectResult> {
-    let base_url    = base_url.trim_end_matches('/');
-    let candidates  = if fuzz { PATH_VARIANTS } else { &PATH_VARIANTS[..1] };
-    let mut best: Option<DetectResult> = None;
+    let base_url = base_url.trim_end_matches('/');
 
-    for &git_path in candidates {
-        let result = probe_one_path(client, base_url, git_path).await;
-        if let Some(r) = result {
+    if !fuzz {
+        // Fast path: only check the default `.git` location
+        return probe_one_path(client, base_url, ".git").await
+            .filter(|b| b.confidence >= MIN_CONFIDENCE);
+    }
+
+    // Fuzz mode: probe all path variants concurrently for speed
+    let mut handles = Vec::new();
+    for &git_path in PATH_VARIANTS {
+        let client = client.clone();
+        let base_url = base_url.to_string();
+        let git_path = git_path.to_string();
+        handles.push(tokio::spawn(async move {
+            probe_one_path(&client, &base_url, &git_path).await
+        }));
+    }
+
+    let mut best: Option<DetectResult> = None;
+    for h in handles {
+        if let Ok(Some(r)) = h.await {
             let better = best.as_ref().map_or(true, |b: &DetectResult| r.confidence > b.confidence);
             if better {
-                let confirmed = r.label == "CONFIRMED";
                 best = Some(r);
-                if confirmed {
-                    break;
-                }
             }
         }
     }
 
-    best.filter(|b| b.confidence >= 20)
+    best.filter(|b| b.confidence >= MIN_CONFIDENCE)
 }
