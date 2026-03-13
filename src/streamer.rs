@@ -6,6 +6,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Instant;
 use regex::Regex;
 use lazy_static::lazy_static;
@@ -18,6 +19,46 @@ use crate::mapper::MapResult;
 // ════════════════════════════════════════════════
 // SECRET PATTERNS
 // ════════════════════════════════════════════════
+
+/// A secret-detection pattern loaded at runtime (e.g. from `--patterns FILE`).
+#[derive(Clone)]
+pub struct DynPattern {
+    pub id:    String,
+    pub sev:   String,
+    pub desc:  String,
+    pub regex: Regex,
+}
+
+/// Load custom detection patterns from a JSON file.
+///
+/// Expected format:
+/// ```json
+/// {"patterns": [{"id": "my_token", "severity": "CRITICAL", "description": "...", "regex": "..."}]}
+/// ```
+pub fn load_patterns_from_file(path: &str) -> anyhow::Result<Vec<DynPattern>> {
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("Cannot read patterns file '{}': {}", path, e))?;
+    let json: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| anyhow::anyhow!("Invalid JSON in patterns file '{}': {}", path, e))?;
+    let arr = json["patterns"].as_array()
+        .ok_or_else(|| anyhow::anyhow!("Patterns file must contain a top-level 'patterns' array"))?;
+
+    let mut result = Vec::with_capacity(arr.len());
+    for (i, p) in arr.iter().enumerate() {
+        let id      = p["id"].as_str()
+            .ok_or_else(|| anyhow::anyhow!("Pattern #{}: missing 'id' field", i))?;
+        let sev     = p["severity"].as_str()
+            .ok_or_else(|| anyhow::anyhow!("Pattern #{}: missing 'severity' field", i))?;
+        let desc    = p["description"].as_str()
+            .ok_or_else(|| anyhow::anyhow!("Pattern #{}: missing 'description' field", i))?;
+        let rx_str  = p["regex"].as_str()
+            .ok_or_else(|| anyhow::anyhow!("Pattern #{}: missing 'regex' field", i))?;
+        let regex = Regex::new(rx_str)
+            .map_err(|e| anyhow::anyhow!("Pattern #{} '{}': invalid regex '{}': {}", i, id, rx_str, e))?;
+        result.push(DynPattern { id: id.into(), sev: sev.into(), desc: desc.into(), regex });
+    }
+    Ok(result)
+}
 
 struct Pattern {
     id:    &'static str,
@@ -233,6 +274,80 @@ lazy_static! {
              r"\bNRAL-[A-Za-z0-9]{32,}\b"),
         pat!("grafana_token","HIGH", "Grafana Service Account Token",
              r"\bglsa_[A-Za-z0-9]{32}_[A-Za-z0-9]{8}\b"),
+        // Cloud — Oracle
+        pat!("oracle_oci_fingerprint", "CRITICAL", "Oracle Cloud API Key Fingerprint",
+             r"fingerprint\s*=\s*([0-9a-f]{2}:){15}[0-9a-f]{2}"),
+        // Cloud — Alibaba
+        pat!("alibaba_key_id",  "CRITICAL", "Alibaba Cloud Access Key ID",
+             r"\bLTAI[A-Za-z0-9]{12,20}\b"),
+        pat!("alibaba_secret",  "CRITICAL", "Alibaba Cloud Access Key Secret",
+             r#"(?i)alibaba[_\-]?(cloud[_\-]?)?access[_\-]?key[_\-]?secret\s*[=:]\s*['"]?([A-Za-z0-9]{30})"#),
+        // Cloud — IBM
+        pat!("ibm_cloud_key",   "CRITICAL", "IBM Cloud API Key",
+             r#"(?i)ibm[_\-]?cloud[_\-]?api[_\-]?key\s*[=:]\s*['"]?([A-Za-z0-9_\-]{44})"#),
+        // Cloud — Linode
+        pat!("linode_token",    "CRITICAL", "Linode / Akamai Cloud PAT",
+             r#"(?i)linode[_\-]?(token|api[_\-]?key)\s*[=:]\s*['"]?([A-Za-z0-9]{64})"#),
+        // Cloud — Vultr
+        pat!("vultr_api_key",   "CRITICAL", "Vultr API Key",
+             r#"(?i)vultr[_\-]?(api[_\-]?key|token)\s*[=:]\s*['"]?([A-Za-z0-9\-]{36,})"#),
+        // Cloud — Hetzner
+        pat!("hetzner_token",   "CRITICAL", "Hetzner Cloud API Token",
+             r#"(?i)hcloud[_\-]?token\s*[=:]\s*['"]?([A-Za-z0-9_\-]{64})"#),
+        // Cloud — Scaleway
+        pat!("scaleway_secret_key", "CRITICAL", "Scaleway Secret Key",
+             r"SCW_SECRET_KEY=[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"),
+        // Cloud — Fly.io
+        pat!("flyio_token",     "CRITICAL", "Fly.io API Token",
+             r"\bfo1_[A-Za-z0-9_\-]{40,}\b"),
+        // Cloud — Render
+        pat!("render_api_key",  "HIGH",     "Render API Key",
+             r"\brnd_[A-Za-z0-9]{32}\b"),
+        // CI/CD — CircleCI
+        pat!("circleci_token",  "CRITICAL", "CircleCI API Token",
+             r#"(?i)circle[_\-]?(?:ci[_\-]?)?token\s*[=:]\s*['"]?([0-9a-f]{40})"#),
+        // CI/CD — Travis CI
+        pat!("travis_token",    "HIGH",     "Travis CI Token",
+             r#"(?i)travis[_\-]?token\s*[=:]\s*['"]?([A-Za-z0-9_\-]{20,50})"#),
+        // CI/CD — Jenkins
+        pat!("jenkins_api_token","HIGH",    "Jenkins API Token",
+             r#"(?i)jenkins[_\-]?api[_\-]?token\s*[=:]\s*['"]?([0-9a-f]{32})"#),
+        // Database — Upstash Redis
+        pat!("upstash_redis",   "CRITICAL", "Upstash Redis Connection URL",
+             r"rediss?://[^@:]+:[A-Za-z0-9+/=_\-]{32,}@[a-z0-9\-]+\.upstash\.io"),
+        // Database — Fauna
+        pat!("fauna_secret",    "CRITICAL", "Fauna Database Secret",
+             r"\bfn[A-Za-z0-9]{40,}\b"),
+        // Database — Xata
+        pat!("xata_api_key",    "CRITICAL", "Xata API Key",
+             r"\bxau_[A-Za-z0-9_]{48}\b"),
+        // Database — Turso
+        pat!("turso_token",     "CRITICAL", "Turso Database Auth Token",
+             r#"(?i)TURSO_AUTH_TOKEN\s*=\s*['"]?([A-Za-z0-9_\-=.]{40,})"#),
+        // Payment — Square
+        pat!("square_api_key",  "CRITICAL", "Square API Key / Access Token",
+             r"sq0csp-[A-Za-z0-9\-_]{43}|EAAAAA[A-Za-z0-9_\-]{55,}"),
+        // Payment — Adyen
+        pat!("adyen_api_key",   "CRITICAL", "Adyen API Key",
+             r#"(?i)adyen[_\-]?(api[_\-]?key|ws[_\-]?key)\s*[=:]\s*['"]?(AQE[A-Za-z0-9/+=]{56,})"#),
+        // Payment — Razorpay
+        pat!("razorpay_key",    "CRITICAL", "Razorpay API Key",
+             r"\brzp_(live|test)_[A-Za-z0-9]{14,}\b"),
+        // Payment — Braintree
+        pat!("braintree_token", "CRITICAL", "Braintree Access Token",
+             r"access_token\$(?:production|sandbox)\$[a-z0-9]+_[a-z0-9_]+\$[a-f0-9]+"),
+        // Payment — Coinbase
+        pat!("coinbase_secret", "HIGH",     "Coinbase API Key / Secret",
+             r#"(?i)coinbase[_\-]?(api[_\-]?key|secret|api[_\-]?secret)\s*[=:]\s*['"]?([A-Za-z0-9_\-]{32,})"#),
+        // Maps — Mapbox
+        pat!("mapbox_token",    "HIGH",     "Mapbox Access Token",
+             r"\bpk\.eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\b"),
+        // Blockchain / Web3
+        pat!("infura_key",      "HIGH",     "Infura Project Key",
+             r#"(?i)infura[_\-]?(project[_\-]?id|api[_\-]?key|secret)\s*[=:]\s*['"]?([A-Za-z0-9]{32})"#),
+        // Platform
+        pat!("railway_token",   "HIGH",     "Railway API Token",
+             r#"(?i)railway[_\-]?token\s*[=:]\s*['"]?([A-Za-z0-9_\-]{40,})"#),
     ];
 
     static ref PLACEHOLDERS: Vec<&'static str> = vec![
@@ -292,6 +407,43 @@ lazy_static! {
         ("Pulumi",      Regex::new(r"Pulumi\.ya?ml|Pulumi\..*\.ya?ml").unwrap()),
         ("CDK",         Regex::new(r"cdk\.json|aws-cdk").unwrap()),
     ];
+}
+
+// ════════════════════════════════════════════════
+// CONTENT-BASED TECH DETECTION (supplements filenames)
+// ════════════════════════════════════════════════
+
+lazy_static! {
+    static ref TECH_CONTENT_PATTERNS: Vec<(&'static str, Regex)> = vec![
+        ("Flask",      Regex::new(r"(?-u)from flask import|import flask\b").unwrap()),
+        ("Django",     Regex::new(r"(?-u)from django\b|DJANGO_SETTINGS_MODULE|django\.conf").unwrap()),
+        ("FastAPI",    Regex::new(r"(?-u)from fastapi import|import fastapi\b").unwrap()),
+        ("Celery",     Regex::new(r"(?-u)from celery import|Celery\(").unwrap()),
+        ("SQLAlchemy", Regex::new(r"(?-u)from sqlalchemy|import sqlalchemy").unwrap()),
+        ("Express",    Regex::new(r#"require\(['"]express['"]\)|from ['"]express['"]\b"#).unwrap()),
+        ("React",      Regex::new(r#"from ['"]react['"]|import React\b"#).unwrap()),
+        ("Vue",        Regex::new(r#"from ['"]vue['"]|createApp\(|new Vue\("#).unwrap()),
+        ("Angular",    Regex::new(r#"@NgModule\(|@Component\(|from ['"]@angular"#).unwrap()),
+        ("NestJS",     Regex::new(r"@Module\(|@Controller\(|@Injectable\(").unwrap()),
+        ("Redux",      Regex::new(r"createStore\(|configureStore\(|createSlice\(").unwrap()),
+        ("Prisma",     Regex::new(r#"from ['"]@prisma/client['"]|new PrismaClient"#).unwrap()),
+        ("GraphQL",    Regex::new(r"gql`|ApolloServer|graphene\.ObjectType|strawberry\.type").unwrap()),
+        ("Spring",     Regex::new(r"@SpringBootApplication|import org\.springframework").unwrap()),
+        ("Laravel",    Regex::new(r"use Illuminate\\|namespace App\\Http").unwrap()),
+        ("Rails",      Regex::new(r#"require ['"]rails['"]|include Rails\b"#).unwrap()),
+    ];
+
+    // Regex for entropy-based secret detection (keyword context check).
+    // Uses word-boundary anchors to avoid false positives (e.g. "monkey" ≠ "key").
+    static ref ENTROPY_CONTEXT_RE: Regex = Regex::new(
+        r#"(?i)\b(key|secret|token|password|passwd|pass|auth|credential|api|private)\b"#
+    ).unwrap();
+
+    // Captures a quoted value that is at least 20 characters long and uses the
+    // base64 / alphanumeric / punctuation character set common to real secrets.
+    static ref ENTROPY_VALUE_RE: Regex = Regex::new(
+        r#"['"]([A-Za-z0-9+/=_\-\.!@#$%^&*]{20,})['"]"#
+    ).unwrap();
 }
 
 // ════════════════════════════════════════════════
@@ -380,6 +532,30 @@ impl StreamResult {
         }
         c
     }
+
+    /// Returns one finding per unique `(pattern_id, match_str)` pair.
+    /// Useful for deduplicating the same secret found across multiple blobs.
+    #[allow(dead_code)]
+    pub fn unique_findings(&self) -> Vec<&Finding> {
+        let mut seen = HashSet::new();
+        self.findings.iter()
+            .filter(|f| {
+                let key = (f.pattern_id.as_str(), &f.match_str[..f.match_str.len().min(80)]);
+                seen.insert(key)
+            })
+            .collect()
+    }
+
+    /// Count of unique secrets (may be less than `findings.len()` when the same
+    /// secret appears in multiple blobs).
+    #[allow(dead_code)]
+    pub fn unique_count(&self) -> usize {
+        let mut seen = HashSet::new();
+        for f in &self.findings {
+            seen.insert((f.pattern_id.as_str(), &f.match_str[..f.match_str.len().min(80)]));
+        }
+        seen.len()
+    }
 }
 
 // ════════════════════════════════════════════════
@@ -423,20 +599,36 @@ enum WorkerResult {
 // ════════════════════════════════════════════════
 
 pub struct Streamer {
-    client:      HttpClient,
-    workers:     usize,
-    #[allow(dead_code)]
-    mem_limit:   usize,
-    verbose:     bool,
+    client:           HttpClient,
+    workers:          usize,
+    mem_limit:        usize,
+    verbose:          bool,
+    /// Stop after collecting this many findings (0 = unlimited).
+    max_findings:     usize,
+    /// Stop as soon as the first CRITICAL finding is encountered.
+    stop_on_critical: bool,
+    /// Runtime-loaded extra patterns (from `--patterns FILE`).
+    extra_patterns:   Arc<Vec<DynPattern>>,
 }
 
 impl Streamer {
-    pub fn new(client: HttpClient, workers: usize, mem_limit_mb: usize, verbose: bool) -> Self {
+    pub fn new(
+        client:           HttpClient,
+        workers:          usize,
+        mem_limit_mb:     usize,
+        verbose:          bool,
+        max_findings:     usize,
+        stop_on_critical: bool,
+        extra_patterns:   Vec<DynPattern>,
+    ) -> Self {
         Self {
             client,
             workers,
             mem_limit: mem_limit_mb * 1024 * 1024,
             verbose,
+            max_findings,
+            stop_on_critical,
+            extra_patterns: Arc::new(extra_patterns),
         }
     }
 
@@ -462,23 +654,25 @@ impl Streamer {
             sha1_to_file.insert(entry.sha1.clone(), entry.filename.clone());
         }
         let current_blobs = map_result.blob_sha1s.clone();
-        let sha1_to_file = Arc::new(sha1_to_file);
+        let sha1_to_file  = Arc::new(sha1_to_file);
         let current_blobs = Arc::new(current_blobs);
 
         // Priority: blobs from index first (sensitive), then commit graph
         let mut priority_blobs: Vec<String> = map_result.blob_sha1s.iter().cloned().collect();
-        let other_sha1s: Vec<String> = map_result.commit_sha1s.iter().cloned().collect();
+        let other_sha1s: Vec<String>        = map_result.commit_sha1s.iter().cloned().collect();
 
-        // Sort: sensitive files first (no lock needed — sha1_to_file is immutable here)
+        // Sort: sensitive files first
         priority_blobs.sort_by_key(|sha1| {
-            if is_sensitive_file(sha1_to_file.get(sha1).map(|f| f.as_str()).unwrap_or("")) {
-                0
-            } else {
-                1
-            }
+            if is_sensitive_file(sha1_to_file.get(sha1).map(|f| f.as_str()).unwrap_or("")) { 0 } else { 1 }
         });
 
-        let all_sha1s: Vec<String> = priority_blobs.into_iter().chain(other_sha1s).collect();
+        // Deduplicate — the union of blob + commit sets can overlap after MapResult processing
+        let all_sha1s: Vec<String> = {
+            let mut seen = HashSet::with_capacity(priority_blobs.len() + other_sha1s.len());
+            priority_blobs.into_iter().chain(other_sha1s)
+                .filter(|s| seen.insert(s.clone()))
+                .collect()
+        };
         let total = all_sha1s.len();
 
         if self.verbose {
@@ -490,20 +684,31 @@ impl Streamer {
             );
         }
 
-        let done_counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let done_counter    = Arc::new(AtomicUsize::new(0));
+        let stop_flag       = Arc::new(AtomicBool::new(false));
+        let bytes_in_flight = Arc::new(AtomicUsize::new(0));
 
-        // Use FuturesUnordered with buffer_unordered for bounded concurrency
-        // Each future returns a WorkerResult; aggregation is single-threaded (no lock contention).
-        let workers = self.workers;
+        let workers      = self.workers;
+        let mem_limit    = self.mem_limit;
+        let extra_pat    = self.extra_patterns.clone();
+
         let stream = futures::stream::iter(all_sha1s)
             .map(|sha1| {
-                let client = self.client.clone();
-                let git_url = git_url.clone();
-                let sha1_to_file = sha1_to_file.clone();
-                let current_blobs = current_blobs.clone();
-                let save_dir = save_dir_arc.clone();
+                let client          = self.client.clone();
+                let git_url         = git_url.clone();
+                let sha1_to_file    = sha1_to_file.clone();
+                let current_blobs   = current_blobs.clone();
+                let save_dir        = save_dir_arc.clone();
+                let extra_patterns  = extra_pat.clone();
+                let stop_flag       = stop_flag.clone();
+                let bytes_in_flight = bytes_in_flight.clone();
                 async move {
-                    fetch_and_process(&client, &git_url, &sha1, &sha1_to_file, &current_blobs, save_dir).await
+                    fetch_and_process(
+                        &client, &git_url, &sha1,
+                        &sha1_to_file, &current_blobs,
+                        save_dir, extra_patterns,
+                        stop_flag, mem_limit, bytes_in_flight,
+                    ).await
                 }
             })
             .buffer_unordered(workers);
@@ -512,7 +717,7 @@ impl Streamer {
 
         futures::pin_mut!(stream);
         while let Some(result) = stream.next().await {
-            let done = done_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            let done = done_counter.fetch_add(1, Ordering::Relaxed) + 1;
             if let Some(ref cb) = progress_cb {
                 cb(done, total);
             }
@@ -546,6 +751,22 @@ impl Streamer {
                 }
                 WorkerResult::Skipped => {}
             }
+
+            // Check early-stop conditions
+            let hit_limit    = self.max_findings > 0 && state.findings.len() >= self.max_findings;
+            let hit_critical = self.stop_on_critical
+                && state.findings.iter().rev().take(20).any(|f| f.severity == "CRITICAL");
+            if hit_limit || hit_critical {
+                stop_flag.store(true, Ordering::Relaxed);
+                if self.verbose {
+                    if hit_limit {
+                        println!("\n  [!] Reached --max-findings limit ({}). Stopping scan.", self.max_findings);
+                    } else {
+                        println!("\n  [!] --stop-on-critical triggered. Stopping scan.");
+                    }
+                }
+                break;
+            }
         }
 
         let elapsed = t0.elapsed().as_secs_f64();
@@ -576,18 +797,32 @@ impl Streamer {
 /// Max blob content size to scan (4 MB). Larger blobs are skipped.
 const MAX_SCAN_BYTES: usize = 4 * 1024 * 1024;
 
+#[allow(clippy::too_many_arguments)]
 async fn fetch_and_process(
-    client: &HttpClient,
-    git_url: &str,
-    sha1: &str,
-    sha1_to_file: &HashMap<String, String>,
-    current_blobs: &HashSet<String>,
-    save_dir: Option<Arc<PathBuf>>,
+    client:          &HttpClient,
+    git_url:         &str,
+    sha1:            &str,
+    sha1_to_file:    &HashMap<String, String>,
+    current_blobs:   &HashSet<String>,
+    save_dir:        Option<Arc<PathBuf>>,
+    extra_patterns:  Arc<Vec<DynPattern>>,
+    stop_flag:       Arc<AtomicBool>,
+    mem_limit:       usize,
+    bytes_in_flight: Arc<AtomicUsize>,
 ) -> WorkerResult {
+    // Bail immediately if a stop condition was already triggered
+    if stop_flag.load(Ordering::Relaxed) {
+        return WorkerResult::Skipped;
+    }
+
     let url  = format!("{}/{}", git_url, obj_path(sha1));
     let resp = client.get(&url).await;
 
     if !resp.ok() {
+        // 404 → loose object simply not present (expected for pack-only repos); not a failure
+        if resp.status == 404 {
+            return WorkerResult::Skipped;
+        }
         return WorkerResult::BlobFailed;
     }
 
@@ -602,44 +837,73 @@ async fn fetch_and_process(
     match obj.obj_type.as_str() {
         "blob" => {
             // Fast binary detection: check first 8 KB for null bytes
-            let probe = &obj.data[..obj.data.len().min(8192)];
+            let probe      = &obj.data[..obj.data.len().min(8192)];
             let null_count = probe.iter().filter(|&&b| b == 0).count();
             if null_count > 10 {
-                // Binary file — skip scanning, still count bytes
                 return WorkerResult::BlobScanned {
-                    findings:    vec![],
-                    tech:        vec![],
-                    bytes:       raw_bytes,
-                    save_result: None,
+                    findings: vec![], tech: vec![], bytes: raw_bytes, save_result: None,
                 };
             }
 
-            // Skip blobs that exceed the scan size limit
-            if obj.data.len() > MAX_SCAN_BYTES {
+            // Skip blobs that exceed the per-blob scan size limit
+            let blob_size      = obj.data.len();
+            let per_blob_limit = if mem_limit > 0 {
+                // At most a quarter of the total memory budget per individual blob
+                (mem_limit / 4).min(MAX_SCAN_BYTES)
+            } else {
+                MAX_SCAN_BYTES
+            };
+            if blob_size > per_blob_limit {
                 return WorkerResult::BlobScanned {
-                    findings:    vec![],
-                    tech:        vec![],
-                    bytes:       raw_bytes,
-                    save_result: None,
+                    findings: vec![], tech: vec![], bytes: raw_bytes, save_result: None,
                 };
             }
 
-            let filename = sha1_to_file.get(sha1)
+            // Track in-flight bytes for overall memory budget enforcement
+            if mem_limit > 0 {
+                let prev = bytes_in_flight.fetch_add(blob_size, Ordering::Relaxed);
+                if prev + blob_size > mem_limit {
+                    bytes_in_flight.fetch_sub(blob_size, Ordering::Relaxed);
+                    return WorkerResult::BlobScanned {
+                        findings: vec![], tech: vec![], bytes: raw_bytes, save_result: None,
+                    };
+                }
+            }
+
+            let filename   = sha1_to_file.get(sha1)
                 .cloned()
                 .unwrap_or_else(|| format!("[blob:{}]", &sha1[..8]));
             let is_deleted = !current_blobs.contains(sha1);
 
-            let mut tech = Vec::new();
-            collect_tech(&filename, &mut tech);
+            // Collect tech tags from filename
+            let mut tech_set: HashSet<String> = HashSet::new();
+            {
+                let mut v = Vec::new();
+                collect_tech(&filename, &mut v);
+                tech_set.extend(v);
+            }
 
             let content = match std::str::from_utf8(&obj.data) {
                 Ok(s)  => s.to_string(),
                 Err(_) => String::from_utf8_lossy(&obj.data).into_owned(),
             };
 
-            let findings = scan_content(&content, &filename, sha1, is_deleted);
+            // Supplement with content-based tech detection
+            detect_tech_from_content(&content, &mut tech_set);
+            let tech: Vec<String> = tech_set.into_iter().collect();
 
-            // Optionally write blob to disk (--save integration: avoids a second download pass)
+            // Primary line-by-line scan (patterns + entropy)
+            let mut findings = scan_content(&content, &filename, sha1, is_deleted, &extra_patterns);
+
+            // Multi-line YAML next-line secret detection
+            findings.extend(scan_yaml_nextline_secrets(&content, &filename, sha1, is_deleted));
+
+            // Release in-flight budget
+            if mem_limit > 0 {
+                bytes_in_flight.fetch_sub(blob_size, Ordering::Relaxed);
+            }
+
+            // Optionally persist blob to disk (avoids a second download pass when --save is active)
             let save_result = if let Some(ref dir) = save_dir {
                 if let Some(actual_name) = sha1_to_file.get(sha1) {
                     Some(write_blob_to_disk(actual_name, &obj.data, dir))
@@ -679,20 +943,28 @@ fn scan_content(
     filename: &str,
     sha1: &str,
     is_deleted: bool,
+    extra_patterns: &[DynPattern],
 ) -> Vec<Finding> {
-    let mut findings = Vec::new();
+    let lines: Vec<&str> = content.lines().collect();
+    let mut findings     = Vec::new();
+    let is_js            = is_js_file(filename);
 
-    for (lineno, line) in content.lines().enumerate() {
+    for (lineno, &line) in lines.iter().enumerate() {
         if line.len() > 2000 {
+            // For minified JS/TS try scanning segments split at statement boundaries
+            if is_js && line.len() <= 50_000 {
+                scan_minified_segments(line, lineno, filename, sha1, is_deleted, &mut findings);
+            }
             continue;
         }
 
+        let mut line_has_finding = false;
+
+        // Static patterns
         for pat in PATTERNS.iter() {
             for m in pat.regex.find_iter(line) {
                 let val = m.as_str().to_string();
-                if is_placeholder(&val) {
-                    continue;
-                }
+                if is_placeholder(&val) { continue; }
                 findings.push(Finding {
                     filename:    filename.to_string(),
                     line:        lineno + 1,
@@ -700,11 +972,38 @@ fn scan_content(
                     description: pat.desc.to_string(),
                     severity:    pat.sev.to_string(),
                     match_str:   val,
-                    context:     line.trim().to_string(),
+                    context:     build_context_window(&lines, lineno, 2),
                     is_deleted,
                     commit_sha1: Some(sha1.to_string()),
                 });
+                line_has_finding = true;
             }
+        }
+
+        // Runtime / custom patterns
+        for pat in extra_patterns.iter() {
+            for m in pat.regex.find_iter(line) {
+                let val = m.as_str().to_string();
+                if is_placeholder(&val) { continue; }
+                findings.push(Finding {
+                    filename:    filename.to_string(),
+                    line:        lineno + 1,
+                    pattern_id:  pat.id.clone(),
+                    description: pat.desc.clone(),
+                    severity:    pat.sev.clone(),
+                    match_str:   val,
+                    context:     build_context_window(&lines, lineno, 2),
+                    is_deleted,
+                    commit_sha1: Some(sha1.to_string()),
+                });
+                line_has_finding = true;
+            }
+        }
+
+        // Shannon-entropy scan — only fires when no specific pattern matched the line
+        // (avoids redundant/noisy entries for already-identified secrets)
+        if !line_has_finding {
+            scan_entropy_line(line, lineno, filename, sha1, is_deleted, &lines, &mut findings);
         }
     }
 
@@ -764,6 +1063,166 @@ fn is_placeholder(s: &str) -> bool {
     PLACEHOLDERS.iter().any(|p| s.contains(p))
 }
 
+// ── New helpers ────────────────────────────────────────────────
+
+/// Returns true for JavaScript / TypeScript file extensions where minified lines are common.
+fn is_js_file(filename: &str) -> bool {
+    matches!(
+        filename.rsplit('.').next().unwrap_or(""),
+        "js" | "ts" | "jsx" | "tsx" | "mjs" | "cjs"
+    )
+}
+
+/// Compute the Shannon entropy (bits per character) of `s`.
+/// Returns 0.0 for strings shorter than 4 characters.
+pub fn shannon_entropy(s: &str) -> f64 {
+    if s.len() < 4 { return 0.0; }
+    let len = s.len() as f64;
+    let mut freq = [0u32; 256];
+    for b in s.bytes() {
+        freq[b as usize] += 1;
+    }
+    freq.iter()
+        .filter(|&&c| c > 0)
+        .map(|&c| { let p = c as f64 / len; -p * p.log2() })
+        .sum()
+}
+
+/// Attempt to detect secrets in a minified JS/TS line by splitting at common
+/// statement-level separators and scanning each resulting segment.
+/// Limits processing to the first 200 segments to bound worst-case latency.
+fn scan_minified_segments(
+    line:       &str,
+    lineno:     usize,
+    filename:   &str,
+    sha1:       &str,
+    is_deleted: bool,
+    out:        &mut Vec<Finding>,
+) {
+    for segment in line.split(|c| c == ';' || c == '{' || c == '}' || c == ',').take(200) {
+        let seg = segment.trim();
+        if seg.is_empty() || seg.len() > 2000 || seg.len() < 10 { continue; }
+        for pat in PATTERNS.iter() {
+            for m in pat.regex.find_iter(seg) {
+                let val = m.as_str().to_string();
+                if is_placeholder(&val) { continue; }
+                out.push(Finding {
+                    filename:    filename.to_string(),
+                    line:        lineno + 1,
+                    pattern_id:  pat.id.to_string(),
+                    description: pat.desc.to_string(),
+                    severity:    pat.sev.to_string(),
+                    match_str:   val,
+                    context:     format!("[minified] {}", &seg[..seg.len().min(200)]),
+                    is_deleted,
+                    commit_sha1: Some(sha1.to_string()),
+                });
+            }
+        }
+    }
+}
+
+/// Build a context string from lines surrounding `center` (within `radius` lines).
+/// Lines are joined with ` | ` after trimming whitespace.
+fn build_context_window(lines: &[&str], center: usize, radius: usize) -> String {
+    let start = center.saturating_sub(radius);
+    let end   = (center + radius + 1).min(lines.len());
+    lines[start..end]
+        .iter()
+        .map(|l| l.trim())
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
+/// Shannon-entropy based secret scan for a single line.
+/// Only fires when ENTROPY_CONTEXT_RE matches the line (keyword context),
+/// to keep the false-positive rate low.
+fn scan_entropy_line(
+    line:       &str,
+    lineno:     usize,
+    filename:   &str,
+    sha1:       &str,
+    is_deleted: bool,
+    all_lines:  &[&str],
+    out:        &mut Vec<Finding>,
+) {
+    if !ENTROPY_CONTEXT_RE.is_match(line) { return; }
+
+    for m in ENTROPY_VALUE_RE.find_iter(line) {
+        let quoted = m.as_str();
+        // Strip the enclosing quotes
+        let inner = &quoted[1..quoted.len() - 1];
+        if is_placeholder(inner) { continue; }
+        let ent = shannon_entropy(inner);
+        if ent < 3.5 { continue; }
+        let sev = if ent >= 4.5 { "HIGH" } else { "MEDIUM" };
+        out.push(Finding {
+            filename:    filename.to_string(),
+            line:        lineno + 1,
+            pattern_id:  "high_entropy_secret".to_string(),
+            description: format!("High-entropy secret ({:.2} bits/char)", ent),
+            severity:    sev.to_string(),
+            match_str:   inner.to_string(),
+            context:     build_context_window(all_lines, lineno, 2),
+            is_deleted,
+            commit_sha1: Some(sha1.to_string()),
+        });
+    }
+}
+
+/// Detect secrets where the value appears on the line *following* a bare YAML key
+/// (no inline value), e.g.:
+/// ```yaml
+/// db_password:
+///   actual_secret_value
+/// ```
+fn scan_yaml_nextline_secrets(
+    content:    &str,
+    filename:   &str,
+    sha1:       &str,
+    is_deleted: bool,
+) -> Vec<Finding> {
+    lazy_static! {
+        static ref YAML_KEY_ONLY: Regex = Regex::new(
+            r#"(?i)^\s*(password|db_pass|secret|api_key|api_secret|access_token|auth_token|private_key|signing_key|encryption_key|jwt_secret|client_secret)\s*:\s*$"#
+        ).unwrap();
+    }
+
+    let lines: Vec<&str> = content.lines().collect();
+    let mut findings = Vec::new();
+
+    for (i, &line) in lines.iter().enumerate() {
+        if !YAML_KEY_ONLY.is_match(line) { continue; }
+        let Some(&next_line) = lines.get(i + 1) else { continue };
+        let value = next_line.trim();
+        if value.is_empty() || value.starts_with('#') { continue; }
+        if value.len() < 8 { continue; }
+        if is_placeholder(value) { continue; }
+        if shannon_entropy(value) < 2.5 { continue; }
+        findings.push(Finding {
+            filename:    filename.to_string(),
+            line:        i + 2,  // value is on line i+1 (1-indexed = i+2)
+            pattern_id:  "yaml_nextline_secret".to_string(),
+            description: "Secret value on line following YAML key".to_string(),
+            severity:    "HIGH".to_string(),
+            match_str:   value.to_string(),
+            context:     format!("{} | {}", line.trim(), value),
+            is_deleted,
+            commit_sha1: Some(sha1.to_string()),
+        });
+    }
+    findings
+}
+
+/// Supplement the filename-based tech stack with content-based signals.
+fn detect_tech_from_content(content: &str, stack: &mut HashSet<String>) {
+    for (tech, rx) in TECH_CONTENT_PATTERNS.iter() {
+        if rx.is_match(content) {
+            stack.insert(tech.to_string());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -794,7 +1253,7 @@ mod tests {
     fn test_scan_content_finds_aws_key() {
         // AKIA + exactly 16 uppercase/digit chars, no placeholder substrings
         let content = "AWS_KEY=AKIAZ9XYZMNOP1234567";
-        let findings = scan_content(content, "config.sh", "a".repeat(40).as_str(), false);
+        let findings = scan_content(content, "config.sh", "a".repeat(40).as_str(), false, &[]);
         assert!(
             findings.iter().any(|f| f.pattern_id == "aws_key_id"),
             "Should detect AWS key ID pattern"
@@ -804,7 +1263,7 @@ mod tests {
     #[test]
     fn test_scan_content_skips_long_lines() {
         let long_line = "A".repeat(2001);
-        let findings = scan_content(&long_line, "file.txt", "a".repeat(40).as_str(), false);
+        let findings = scan_content(&long_line, "file.txt", "a".repeat(40).as_str(), false, &[]);
         // Long lines should be skipped — no findings
         assert!(findings.is_empty(), "Lines >2000 chars should be skipped");
     }
@@ -812,7 +1271,7 @@ mod tests {
     #[test]
     fn test_scan_content_finds_wp_define_credential() {
         let content = r#"define('DB_PASSWORD', 'supersecret123');"#;
-        let findings = scan_content(content, "wp-config.php", "a".repeat(40).as_str(), false);
+        let findings = scan_content(content, "wp-config.php", "a".repeat(40).as_str(), false, &[]);
         assert!(
             findings.iter().any(|f| f.pattern_id == "wp_define"),
             "Should detect WordPress define() credential"
@@ -822,7 +1281,7 @@ mod tests {
     #[test]
     fn test_scan_content_finds_wp_define_auth_key() {
         let content = r#"define( 'AUTH_KEY', 'put your unique phrase here' );"#;
-        let findings = scan_content(content, "wp-config.php", "a".repeat(40).as_str(), false);
+        let findings = scan_content(content, "wp-config.php", "a".repeat(40).as_str(), false, &[]);
         // "put your" is not in PLACEHOLDERS, but we verify the pattern matches at all
         assert!(
             findings.iter().any(|f| f.pattern_id == "wp_define"),
@@ -833,7 +1292,7 @@ mod tests {
     #[test]
     fn test_scan_content_finds_django_secret_key() {
         let content = r#"SECRET_KEY = 'django-insecure-abcdefghijklmnopqrstuvwxyz1234567890!@#'"#;
-        let findings = scan_content(content, "settings.py", "a".repeat(40).as_str(), false);
+        let findings = scan_content(content, "settings.py", "a".repeat(40).as_str(), false, &[]);
         assert!(
             findings.iter().any(|f| f.pattern_id == "django_secret"),
             "Should detect Django SECRET_KEY"
@@ -844,7 +1303,7 @@ mod tests {
     fn test_scan_content_finds_google_api_key() {
         // AIza + exactly 35 alphanumeric/dash/underscore chars
         let content = "GOOGLE_KEY=AIzaSyC1234567890abcdefghijklmnop123456";
-        let findings = scan_content(content, "config.js", "a".repeat(40).as_str(), false);
+        let findings = scan_content(content, "config.js", "a".repeat(40).as_str(), false, &[]);
         assert!(
             findings.iter().any(|f| f.pattern_id == "gcp_api_key"),
             "Should detect Google/GCP API Key"
@@ -854,7 +1313,7 @@ mod tests {
     #[test]
     fn test_scan_content_finds_laravel_app_key() {
         let content = "APP_KEY=base64:SomeBase64EncodedKeyHereThatIsLongEnoughToMatch==";
-        let findings = scan_content(content, ".env", "a".repeat(40).as_str(), false);
+        let findings = scan_content(content, ".env", "a".repeat(40).as_str(), false, &[]);
         assert!(
             findings.iter().any(|f| f.pattern_id == "laravel_app_key"),
             "Should detect Laravel APP_KEY"
@@ -865,7 +1324,7 @@ mod tests {
     fn test_no_private_ip_false_positive() {
         // Private IPs no longer trigger any finding
         let content = "db_host = 192.168.1.100";
-        let findings = scan_content(content, "config.ini", "a".repeat(40).as_str(), false);
+        let findings = scan_content(content, "config.ini", "a".repeat(40).as_str(), false, &[]);
         assert!(
             !findings.iter().any(|f| f.pattern_id == "private_ip"),
             "Private IP should not be flagged"
@@ -876,7 +1335,7 @@ mod tests {
     fn test_no_s3_url_false_positive() {
         // S3 URLs no longer trigger a MEDIUM finding
         let content = "endpoint = https://mybucket.s3.amazonaws.com";
-        let findings = scan_content(content, "config.ini", "a".repeat(40).as_str(), false);
+        let findings = scan_content(content, "config.ini", "a".repeat(40).as_str(), false, &[]);
         assert!(
             !findings.iter().any(|f| f.pattern_id == "s3_url"),
             "S3 URL should not be flagged"
@@ -887,7 +1346,7 @@ mod tests {
     fn test_no_entropy_medium_finding() {
         // Entropy check is removed; quoted high-entropy strings should not produce MEDIUM findings
         let content = r#"some_field = "R2l0UmVjb25Jc0F3ZXNvbWVUb29sRm9yU2VjdXJpdHk=""#;
-        let findings = scan_content(content, "file.txt", "a".repeat(40).as_str(), false);
+        let findings = scan_content(content, "file.txt", "a".repeat(40).as_str(), false, &[]);
         assert!(
             !findings.iter().any(|f| f.severity == "MEDIUM"),
             "Entropy check should not produce MEDIUM findings"
@@ -945,7 +1404,7 @@ mod tests {
         // 48 alphanumeric chars after sk-
         let key = format!("sk-{}", "A".repeat(48));
         let content = format!("OPENAI_API_KEY={}", key);
-        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false);
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[]);
         assert!(
             findings.iter().any(|f| f.pattern_id == "openai_key"),
             "Should detect legacy OpenAI API key (sk-<48 chars>)"
@@ -957,7 +1416,7 @@ mod tests {
         // Project key: sk-proj-<86 chars of A-Za-z0-9_->
         let key = format!("sk-proj-{}", "A".repeat(86));
         let content = format!("key={}", key);
-        let findings = scan_content(&content, "config.py", "a".repeat(40).as_str(), false);
+        let findings = scan_content(&content, "config.py", "a".repeat(40).as_str(), false, &[]);
         assert!(
             findings.iter().any(|f| f.pattern_id == "openai_key"),
             "Should detect OpenAI project key (sk-proj-<86 chars>)"
@@ -968,7 +1427,7 @@ mod tests {
     fn test_scan_content_finds_anthropic_key() {
         let key = format!("sk-ant-{}", "A".repeat(95));
         let content = format!("ANTHROPIC_API_KEY={}", key);
-        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false);
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[]);
         assert!(
             findings.iter().any(|f| f.pattern_id == "anthropic_key"),
             "Should detect Anthropic API key"
@@ -979,7 +1438,7 @@ mod tests {
     fn test_scan_content_finds_huggingface_token() {
         let token = format!("hf_{}", "a".repeat(36));
         let content = format!("HF_TOKEN={}", token);
-        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false);
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[]);
         assert!(
             findings.iter().any(|f| f.pattern_id == "huggingface_token"),
             "Should detect HuggingFace token"
@@ -990,7 +1449,7 @@ mod tests {
     fn test_scan_content_finds_digitalocean_pat() {
         let token = format!("dop_v1_{}", "a".repeat(64));
         let content = format!("DO_TOKEN={}", token);
-        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false);
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[]);
         assert!(
             findings.iter().any(|f| f.pattern_id == "digitalocean_pat"),
             "Should detect DigitalOcean PAT"
@@ -1002,7 +1461,7 @@ mod tests {
         // dapi + exactly 32 hex chars; constructed at runtime to avoid secret-scanner false positives
         let token = ["dapi", &"a".repeat(32)].concat();
         let content = format!("DATABRICKS_TOKEN={}", token);
-        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false);
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[]);
         assert!(
             findings.iter().any(|f| f.pattern_id == "databricks_token"),
             "Should detect Databricks API token"
@@ -1013,7 +1472,7 @@ mod tests {
     fn test_scan_content_finds_vault_hvs_token() {
         let token = format!("hvs.{}", "A".repeat(30));
         let content = format!("VAULT_TOKEN={}", token);
-        let findings = scan_content(&content, "config.sh", "a".repeat(40).as_str(), false);
+        let findings = scan_content(&content, "config.sh", "a".repeat(40).as_str(), false, &[]);
         assert!(
             findings.iter().any(|f| f.pattern_id == "vault_token"),
             "Should detect HashiCorp Vault hvs token"
@@ -1022,7 +1481,7 @@ mod tests {
     fn test_scan_content_finds_planetscale_token() {
         let token = format!("pscale_tkn_{}", "A".repeat(43));
         let content = format!("DATABASE_TOKEN={}", token);
-        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false);
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[]);
         assert!(
             findings.iter().any(|f| f.pattern_id == "planetscale_token"),
             "Should detect PlanetScale token"
@@ -1033,7 +1492,7 @@ mod tests {
     fn test_scan_content_finds_supabase_key() {
         let key = format!("sbp_{}", "A".repeat(40));
         let content = format!("SUPABASE_KEY={}", key);
-        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false);
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[]);
         assert!(
             findings.iter().any(|f| f.pattern_id == "supabase_key"),
             "Should detect Supabase service role key"
@@ -1044,7 +1503,7 @@ mod tests {
     fn test_scan_content_finds_linear_key() {
         let key = format!("lin_api_{}", "A".repeat(40));
         let content = format!("LINEAR_KEY={}", key);
-        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false);
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[]);
         assert!(
             findings.iter().any(|f| f.pattern_id == "linear_key"),
             "Should detect Linear API key"
@@ -1109,7 +1568,7 @@ mod tests {
     #[test]
     fn test_scan_content_finds_shopify_token() {
         let content = format!("SHOPIFY_TOKEN=shpat_{}", "A".repeat(32));
-        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false);
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[]);
         assert!(
             findings.iter().any(|f| f.pattern_id == "shopify_token"),
             "Should detect Shopify Admin API token"
@@ -1119,7 +1578,7 @@ mod tests {
     #[test]
     fn test_scan_content_finds_jira_token() {
         let content = format!("JIRA_TOKEN=ATATT{}", "A".repeat(30));
-        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false);
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[]);
         assert!(
             findings.iter().any(|f| f.pattern_id == "jira_token"),
             "Should detect Atlassian/Jira API token"
@@ -1130,7 +1589,7 @@ mod tests {
     fn test_scan_content_finds_sentry_dsn() {
         let dsn = format!("https://{}@o1234.ingest.sentry.io/5678", "a".repeat(32));
         let content = format!("SENTRY_DSN={}", dsn);
-        let findings = scan_content(&content, "sentry.properties", "a".repeat(40).as_str(), false);
+        let findings = scan_content(&content, "sentry.properties", "a".repeat(40).as_str(), false, &[]);
         assert!(
             findings.iter().any(|f| f.pattern_id == "sentry_dsn"),
             "Should detect Sentry DSN"
@@ -1140,7 +1599,7 @@ mod tests {
     #[test]
     fn test_scan_content_finds_cloudinary_url() {
         let content = "CLOUDINARY_URL=cloudinary://apikey:apisecret@cloudname";
-        let findings = scan_content(content, ".env", "a".repeat(40).as_str(), false);
+        let findings = scan_content(content, ".env", "a".repeat(40).as_str(), false, &[]);
         assert!(
             findings.iter().any(|f| f.pattern_id == "cloudinary_url"),
             "Should detect Cloudinary credentials URL"
@@ -1150,7 +1609,7 @@ mod tests {
     #[test]
     fn test_scan_content_finds_notion_token() {
         let content = format!("NOTION_TOKEN=secret_{}", "A".repeat(43));
-        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false);
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[]);
         assert!(
             findings.iter().any(|f| f.pattern_id == "notion_token"),
             "Should detect Notion integration token"
@@ -1160,7 +1619,7 @@ mod tests {
     #[test]
     fn test_scan_content_finds_grafana_token() {
         let content = format!("GRAFANA_TOKEN=glsa_{}_ABCD1234", "A".repeat(32));
-        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false);
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[]);
         assert!(
             findings.iter().any(|f| f.pattern_id == "grafana_token"),
             "Should detect Grafana service account token"
@@ -1170,7 +1629,7 @@ mod tests {
     #[test]
     fn test_scan_content_finds_mongodb_atlas_uri() {
         let content = "MONGO_URI=mongodb+srv://user:password@cluster.mongodb.net/db";
-        let findings = scan_content(content, ".env", "a".repeat(40).as_str(), false);
+        let findings = scan_content(content, ".env", "a".repeat(40).as_str(), false, &[]);
         assert!(
             findings.iter().any(|f| f.pattern_id == "mongodb_atlas"),
             "Should detect MongoDB Atlas connection string"
@@ -1180,7 +1639,7 @@ mod tests {
     #[test]
     fn test_scan_content_finds_discord_webhook() {
         let content = format!("DISCORD_WEBHOOK=https://discord.com/api/webhooks/123456789012345678/{}", "A".repeat(68));
-        let findings = scan_content(&content, "config.js", "a".repeat(40).as_str(), false);
+        let findings = scan_content(&content, "config.js", "a".repeat(40).as_str(), false, &[]);
         assert!(
             findings.iter().any(|f| f.pattern_id == "discord_webhook"),
             "Should detect Discord webhook URL"
@@ -1210,5 +1669,263 @@ mod tests {
     #[test]
     fn test_sensitive_names_id_ecdsa() {
         assert!(is_sensitive_file("id_ecdsa"), "id_ecdsa private key file should be sensitive");
+    }
+
+    // ── New feature tests ─────────────────────────────────────────
+
+    // Shannon entropy
+    #[test]
+    fn test_shannon_entropy_low_for_repeated_chars() {
+        // "aaaa" has 0 entropy (only one distinct char)
+        assert_eq!(shannon_entropy("aaaa"), 0.0);
+    }
+
+    #[test]
+    fn test_shannon_entropy_high_for_random_string() {
+        // A random-looking 40-char string should score well above 3.5 bits/char
+        let s = "aB3xZ9qR2mK7wL5nP8tC1vD6yJ4uE0fG";
+        assert!(shannon_entropy(s) > 3.5, "Random string should have high entropy");
+    }
+
+    #[test]
+    fn test_shannon_entropy_returns_zero_for_short_string() {
+        assert_eq!(shannon_entropy("ab"), 0.0, "Strings shorter than 4 chars yield 0.0");
+    }
+
+    // Content-based tech detection
+    #[test]
+    fn test_detect_tech_from_content_flask() {
+        let mut stack = std::collections::HashSet::new();
+        detect_tech_from_content("from flask import Flask, render_template", &mut stack);
+        assert!(stack.contains("Flask"), "Should detect Flask from content");
+    }
+
+    #[test]
+    fn test_detect_tech_from_content_express() {
+        let mut stack = std::collections::HashSet::new();
+        detect_tech_from_content(r#"const express = require('express')"#, &mut stack);
+        assert!(stack.contains("Express"), "Should detect Express.js from content");
+    }
+
+    #[test]
+    fn test_detect_tech_from_content_react() {
+        let mut stack = std::collections::HashSet::new();
+        detect_tech_from_content("import React from 'react'", &mut stack);
+        assert!(stack.contains("React"), "Should detect React from content");
+    }
+
+    #[test]
+    fn test_detect_tech_from_content_prisma() {
+        let mut stack = std::collections::HashSet::new();
+        detect_tech_from_content("const client = new PrismaClient()", &mut stack);
+        assert!(stack.contains("Prisma"), "Should detect Prisma from content");
+    }
+
+    // Context window
+    #[test]
+    fn test_build_context_window_center() {
+        let lines = vec!["a", "b", "c", "d", "e"];
+        let ctx = build_context_window(&lines, 2, 2);
+        assert!(ctx.contains('a'), "Window radius=2 from center=2 should include line 0");
+        assert!(ctx.contains('e'), "Window radius=2 from center=2 should include line 4");
+    }
+
+    #[test]
+    fn test_build_context_window_edges() {
+        let lines = vec!["only"];
+        let ctx = build_context_window(&lines, 0, 2);
+        assert_eq!(ctx, "only");
+    }
+
+    // Minified JS segment scanning
+    #[test]
+    fn test_scan_minified_segments_finds_aws_key() {
+        let sha = "a".repeat(40);
+        let minified = format!(
+            "var x=1;const k=\"{}\";function f(){{}}",
+            "AKIAZ9XYZMNOP1234567"
+        );
+        let mut findings = Vec::new();
+        scan_minified_segments(&minified, 0, "bundle.min.js", &sha, false, &mut findings);
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "aws_key_id"),
+            "Should detect AWS key in minified JS segment"
+        );
+    }
+
+    // YAML next-line secrets
+    #[test]
+    fn test_scan_yaml_nextline_finds_secret() {
+        let sha   = "a".repeat(40);
+        let content = "password:\n  SuperSecretP@ssw0rd!!abc123xyz";
+        let findings = scan_yaml_nextline_secrets(content, "config.yaml", &sha, false);
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "yaml_nextline_secret"),
+            "Should detect YAML next-line secret"
+        );
+    }
+
+    #[test]
+    fn test_scan_yaml_nextline_skips_empty_value() {
+        let sha     = "a".repeat(40);
+        let content = "password:\n  ";
+        let findings = scan_yaml_nextline_secrets(content, "config.yaml", &sha, false);
+        assert!(findings.is_empty(), "Should not flag empty YAML value");
+    }
+
+    // Entropy line scan
+    #[test]
+    fn test_scan_entropy_line_fires_for_high_entropy_secret() {
+        let sha   = "a".repeat(40);
+        // Use a standalone keyword ("secret") so \bsecret\b matches
+        let line  = r#"secret = "xK9mQz3rN7wT2vB5sL0pJ4hY8uE6fA1d""#;
+        let lines = vec![line];
+        let mut out = Vec::new();
+        scan_entropy_line(line, 0, "config.py", &sha, false, &lines, &mut out);
+        assert!(
+            out.iter().any(|f| f.pattern_id == "high_entropy_secret"),
+            "Should fire for high-entropy quoted value in keyword context"
+        );
+    }
+
+    #[test]
+    fn test_scan_entropy_line_silent_without_keyword_context() {
+        let sha   = "a".repeat(40);
+        // 'description' is not in our keyword list, so no entropy finding expected
+        let line  = r#"description = "xK9mQz3rN7wT2vB5sL0pJ4hY8uE6fA1d""#;
+        let lines = vec![line];
+        let mut out = Vec::new();
+        scan_entropy_line(line, 0, "config.py", &sha, false, &lines, &mut out);
+        assert!(out.is_empty(), "Should not fire when no keyword context present");
+    }
+
+    // New provider patterns
+
+    #[test]
+    fn test_scan_content_finds_razorpay_key() {
+        let content = format!("RAZORPAY_KEY=rzp_live_{}", "A".repeat(14));
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[]);
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "razorpay_key"),
+            "Should detect Razorpay key"
+        );
+    }
+
+    #[test]
+    fn test_scan_content_finds_flyio_token() {
+        let content = format!("FLY_TOKEN=fo1_{}", "A".repeat(40));
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[]);
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "flyio_token"),
+            "Should detect Fly.io token"
+        );
+    }
+
+    #[test]
+    fn test_scan_content_finds_render_api_key() {
+        let content = format!("RENDER_KEY=rnd_{}", "A".repeat(32));
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[]);
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "render_api_key"),
+            "Should detect Render API key"
+        );
+    }
+
+    #[test]
+    fn test_scan_content_finds_scaleway_secret() {
+        let content = "SCW_SECRET_KEY=12345678-1234-1234-1234-123456789abc";
+        let findings = scan_content(content, ".env", "a".repeat(40).as_str(), false, &[]);
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "scaleway_secret_key"),
+            "Should detect Scaleway secret key"
+        );
+    }
+
+    #[test]
+    fn test_scan_content_finds_square_key() {
+        let content = format!("SQUARE_TOKEN=sq0csp-{}", "A".repeat(43));
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[]);
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "square_api_key"),
+            "Should detect Square API key"
+        );
+    }
+
+    #[test]
+    fn test_scan_content_finds_mapbox_token() {
+        let content = "MAPBOX_TOKEN=pk.eyJhIjoiYWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoifQ.ABCDEFGHIJKLMNOPQRS";
+        let findings = scan_content(content, ".env", "a".repeat(40).as_str(), false, &[]);
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "mapbox_token"),
+            "Should detect Mapbox access token"
+        );
+    }
+
+    // unique_findings / unique_count
+    #[test]
+    fn test_unique_findings_deduplicates() {
+        let sha = "a".repeat(40);
+        let content = "AKIAZ9XYZMNOP1234567\nAKIAZ9XYZMNOP1234567";
+        let raw = scan_content(content, "file.sh", &sha, false, &[]);
+        // Build a StreamResult manually
+        let sr = super::StreamResult {
+            findings: raw,
+            contributors: vec![],
+            tech_stack: vec![],
+            commit_count: 0,
+            blobs_scanned: 1,
+            blobs_failed: 0,
+            bytes_scanned: 0,
+            elapsed_s: 0.0,
+            files_saved: 0,
+            files_save_failed: 0,
+        };
+        // Both lines have the same match, so unique should be 1
+        assert_eq!(sr.unique_count(), 1, "Same secret on two lines should deduplicate to 1");
+        assert!(sr.unique_findings().len() <= sr.findings.len());
+    }
+
+    // DynPattern / load_patterns_from_file
+    #[test]
+    fn test_scan_content_uses_dyn_pattern() {
+        let dyn_pat = super::DynPattern {
+            id:    "custom_token".to_string(),
+            sev:   "HIGH".to_string(),
+            desc:  "Custom test token".to_string(),
+            regex: regex::Regex::new(r"CUSTOM_[A-Z0-9]{8}").unwrap(),
+        };
+        let content = "TOKEN=CUSTOM_ABCD1234";
+        let findings = scan_content(content, "config.sh", "a".repeat(40).as_str(), false, &[dyn_pat]);
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "custom_token"),
+            "Should detect custom dynamic pattern"
+        );
+    }
+
+    #[test]
+    fn test_load_patterns_from_file_valid() {
+        let path = std::env::temp_dir().join("gitrecon_patterns_valid.json");
+        std::fs::write(&path, br#"{"patterns":[{"id":"t","severity":"HIGH","description":"Test","regex":"TEST_[0-9]+"}]}"#).unwrap();
+        let loaded = super::load_patterns_from_file(path.to_str().unwrap()).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, "t");
+        assert_eq!(loaded[0].sev, "HIGH");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_load_patterns_from_file_missing() {
+        let result = super::load_patterns_from_file("/tmp/gitrecon_nonexistent_file.json");
+        assert!(result.is_err(), "Missing file should return an error");
+    }
+
+    #[test]
+    fn test_load_patterns_from_file_invalid_json() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("gitrecon_invalid.json");
+        std::fs::write(&path, b"not valid json").unwrap();
+        let result = super::load_patterns_from_file(path.to_str().unwrap());
+        assert!(result.is_err(), "Invalid JSON should return an error");
+        let _ = std::fs::remove_file(&path);
     }
 }

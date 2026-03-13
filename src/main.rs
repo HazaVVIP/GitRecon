@@ -95,6 +95,18 @@ struct Cli {
     #[arg(long = "mem-limit", default_value = "256", value_name = "MB")]
     mem_limit: usize,
 
+    /// Berhenti setelah N temuan (0 = tidak terbatas)
+    #[arg(long = "max-findings", default_value = "0", value_name = "N")]
+    max_findings: usize,
+
+    /// Hentikan scan segera setelah temuan CRITICAL pertama
+    #[arg(long = "stop-on-critical")]
+    stop_on_critical: bool,
+
+    /// Path ke file JSON berisi pola deteksi tambahan
+    #[arg(long = "patterns", value_name = "FILE")]
+    patterns: Option<String>,
+
     /// Confidence minimum untuk lanjut scan (default: 45)
     #[arg(long = "min-confidence", default_value = "45", value_name = "PCT",
           value_parser = clap::value_parser!(u32).range(0..=100))]
@@ -252,11 +264,32 @@ async fn main() {
         None
     };
 
+    // Load optional custom patterns
+    let extra_patterns: Vec<streamer::DynPattern> = if let Some(ref path) = args.patterns {
+        match streamer::load_patterns_from_file(path) {
+            Ok(p)  => {
+                if verbose {
+                    println!("  [+] Loaded {} custom patterns from '{}'", p.len(), path);
+                }
+                p
+            }
+            Err(e) => {
+                eprintln!("  [!] Failed to load patterns from '{}': {}", path, e);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        vec![]
+    };
+
     let streamer = streamer::Streamer::new(
         client.clone(),
         args.workers,
         args.mem_limit,
         verbose,
+        args.max_findings,
+        args.stop_on_critical,
+        extra_patterns,
     );
 
     rep.print_stream_start(total);
