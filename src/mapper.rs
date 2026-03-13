@@ -24,6 +24,11 @@ const META_FILES: &[&str] = &[
     "FETCH_HEAD",
     "MERGE_HEAD",
     "CHERRY_PICK_HEAD",
+    "SQUASH_MSG",
+    "REBASE_HEAD",
+    "rebase-merge/head-name",
+    "config.worktree",
+    "shallow",
     "refs/heads/master",
     "refs/heads/main",
     "refs/heads/develop",
@@ -273,7 +278,21 @@ impl Mapper {
             }
         }
 
-        // 8. Pack discovery via objects/info/packs
+        // 8. Extract SHA1s from special per-operation head files and shallow clone info.
+        // These files are already fetched via META_FILES but are not under refs/ or logs/,
+        // so they need their own extraction pass.
+        const SPECIAL_HEAD_FILES: &[&str] = &[
+            "ORIG_HEAD", "FETCH_HEAD", "MERGE_HEAD", "CHERRY_PICK_HEAD",
+            "REBASE_HEAD", "shallow",
+        ];
+        for file in SPECIAL_HEAD_FILES {
+            if let Some(body) = meta.get(*file) {
+                let text = String::from_utf8_lossy(body);
+                sha1s.extend(extract_sha1s(&text));
+            }
+        }
+
+        // 9. Pack discovery via objects/info/packs
         if let Some(raw) = meta.get("objects/info/packs") {
             let text = String::from_utf8_lossy(raw);
             let packs = parse_info_packs(&text);
@@ -301,10 +320,10 @@ impl Mapper {
             }
         }
 
-        // 9. Classify SHA1s
+        // 10. Classify SHA1s
         result.commit_sha1s = sha1s.difference(&result.blob_sha1s).cloned().collect();
 
-        // 10. Size estimation
+        // 11. Size estimation
         result.estimated_files = if !result.index_entries.is_empty() {
             result.index_entries.len()
         } else {
@@ -356,5 +375,27 @@ mod tests {
     #[test]
     fn test_meta_files_contains_merge_head() {
         assert!(META_FILES.contains(&"MERGE_HEAD"));
+    }
+
+    // ── V3 new meta-file coverage ─────────────────
+
+    #[test]
+    fn test_meta_files_contains_shallow() {
+        assert!(META_FILES.contains(&"shallow"), "shallow must be in META_FILES for shallow-clone detection");
+    }
+
+    #[test]
+    fn test_meta_files_contains_squash_msg() {
+        assert!(META_FILES.contains(&"SQUASH_MSG"), "SQUASH_MSG must be in META_FILES");
+    }
+
+    #[test]
+    fn test_meta_files_contains_rebase_head() {
+        assert!(META_FILES.contains(&"REBASE_HEAD"), "REBASE_HEAD must be in META_FILES");
+    }
+
+    #[test]
+    fn test_meta_files_contains_config_worktree() {
+        assert!(META_FILES.contains(&"config.worktree"), "config.worktree must be in META_FILES");
     }
 }

@@ -201,7 +201,7 @@ impl Reporter {
         let now = chrono::Utc::now().to_rfc3339();
         let mut report = serde_json::json!({
             "tool":      "GitRecon",
-            "version":   "2.0.0",
+            "version":   "3.0.0",
             "timestamp": now,
             "target":    target,
         });

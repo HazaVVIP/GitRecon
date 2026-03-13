@@ -86,11 +86,7 @@ impl HttpClient {
             .danger_accept_invalid_certs(!cfg.verify_ssl);
 
         if let Some(proxy_url) = &cfg.proxy {
-            let proxy = if proxy_url.starts_with("socks5://") || proxy_url.starts_with("socks4://") {
-                Proxy::all(proxy_url.as_str())?
-            } else {
-                Proxy::all(proxy_url.as_str())?
-            };
+            let proxy = Proxy::all(proxy_url.as_str())?;
             builder = builder.proxy(proxy);
         }
 

@@ -131,6 +131,31 @@ lazy_static! {
              r"dckr_pat_[A-Za-z0-9_-]{27}"),
         pat!("oauth_secret", "HIGH", "OAuth Client Secret",
              r#"(?i)client[_\-]?secret\s*[=:]\s*['"]?([A-Za-z0-9_\-]{16,})['"]?"#),
+        // AI Providers
+        pat!("openai_key", "CRITICAL", "OpenAI API Key",
+             r"sk-[A-Za-z0-9]{48}|sk-proj-[A-Za-z0-9_\-]{86}|sk-svcacct-[A-Za-z0-9_\-]{86}"),
+        pat!("anthropic_key", "CRITICAL", "Anthropic API Key",
+             r"sk-ant-[A-Za-z0-9_\-]{93,}"),
+        pat!("huggingface_token", "HIGH", "HuggingFace Token",
+             r"\bhf_[A-Za-z0-9]{34,}\b"),
+        // Infrastructure / PaaS
+        pat!("digitalocean_pat", "CRITICAL", "DigitalOcean Personal Access Token",
+             r"\bdop_v1_[a-f0-9]{64}\b"),
+        pat!("vault_token", "CRITICAL", "HashiCorp Vault Token",
+             r"\bhvs\.[A-Za-z0-9_\-]{28,}\b"),
+        pat!("databricks_token", "CRITICAL", "Databricks API Token",
+             r"\bdapi[0-9a-f]{32}\b"),
+        // Database-as-a-service
+        pat!("planetscale_token", "CRITICAL", "PlanetScale Token",
+             r"\bpscale_tkn_[A-Za-z0-9_]{43}\b"),
+        pat!("supabase_key", "CRITICAL", "Supabase Service Role Key",
+             r"\bsbp_[A-Za-z0-9]{40}\b"),
+        // Secrets management
+        pat!("doppler_token", "CRITICAL", "Doppler Service Token",
+             r"\bdp\.pt\.[A-Za-z0-9]{43}\b"),
+        // Project management
+        pat!("linear_key", "HIGH", "Linear API Key",
+             r"\blin_api_[A-Za-z0-9]{40}\b"),
     ];
 
     static ref PLACEHOLDERS: Vec<&'static str> = vec![
@@ -142,7 +167,7 @@ lazy_static! {
     ];
 
     static ref SENSITIVE_NAMES: Regex = Regex::new(
-        r#"(?i)(\.env|\.env\.|config\.php|wp-config|database\.php|settings\.py|config\.ya?ml|credentials|secrets?\.json|service.account|\.npmrc|\.pypirc|\.netrc|id_rsa|id_ed25519|\.pem|\.key|\.pfx|\.p12|application\.(properties|ya?ml)|docker.compose|\.travis\.yml|\.circleci)"#
+        r#"(?i)(\.env|\.env\.|config\.php|wp-config|database\.php|settings\.py|config\.ya?ml|credentials|secrets?\.json|service.account|\.npmrc|\.pypirc|\.netrc|id_rsa|id_ed25519|\.pem|\.key|\.pfx|\.p12|application\.(properties|ya?ml)|docker.compose|\.travis\.yml|\.circleci|\.github/workflows|\.env\.local|\.env\.prod(uction)?|\.env\.staging|\.env\.development|vault\.ya?ml|terraform\.tfvars|\.kubeconfig|kubeconfig|\.htpasswd)"#
     ).unwrap();
 }
 
@@ -169,6 +194,15 @@ lazy_static! {
         ("React",      Regex::new(r"\.jsx$|\.tsx$").unwrap()),
         ("Vue",        Regex::new(r"\.vue$|vue\.config").unwrap()),
         ("Angular",    Regex::new(r"angular\.json|ng-package").unwrap()),
+        // Additional v3 tech patterns
+        ("Svelte",     Regex::new(r"svelte\.config|\.svelte$").unwrap()),
+        ("Next.js",    Regex::new(r"next\.config\.(js|ts)|_next/").unwrap()),
+        ("NestJS",     Regex::new(r"nest-cli\.json|\.module\.ts$").unwrap()),
+        ("FastAPI",    Regex::new(r"\bfastapi\b|\buvicorn\b").unwrap()),
+        ("Spring",     Regex::new(r"pom\.xml|spring-boot|ApplicationContext\.xml").unwrap()),
+        ("Flutter",    Regex::new(r"pubspec\.yaml|\.dart$").unwrap()),
+        ("Ansible",    Regex::new(r"ansible\.cfg|playbook\.ya?ml").unwrap()),
+        ("Helm",       Regex::new(r"Chart\.ya?ml|values\.ya?ml").unwrap()),
     ];
 }
 
@@ -814,5 +848,150 @@ mod tests {
     #[test]
     fn test_max_scan_bytes_constant() {
         assert_eq!(MAX_SCAN_BYTES, 4 * 1024 * 1024);
+    }
+
+    // ── V3 new secret patterns ───────────────────
+
+    #[test]
+    fn test_scan_content_finds_openai_key_legacy() {
+        // 48 alphanumeric chars after sk-
+        let key = format!("sk-{}", "A".repeat(48));
+        let content = format!("OPENAI_API_KEY={}", key);
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false);
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "openai_key"),
+            "Should detect legacy OpenAI API key (sk-<48 chars>)"
+        );
+    }
+
+    #[test]
+    fn test_scan_content_finds_openai_project_key() {
+        // Project key: sk-proj-<86 chars of A-Za-z0-9_->
+        let key = format!("sk-proj-{}", "A".repeat(86));
+        let content = format!("key={}", key);
+        let findings = scan_content(&content, "config.py", "a".repeat(40).as_str(), false);
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "openai_key"),
+            "Should detect OpenAI project key (sk-proj-<86 chars>)"
+        );
+    }
+
+    #[test]
+    fn test_scan_content_finds_anthropic_key() {
+        let key = format!("sk-ant-{}", "A".repeat(95));
+        let content = format!("ANTHROPIC_API_KEY={}", key);
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false);
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "anthropic_key"),
+            "Should detect Anthropic API key"
+        );
+    }
+
+    #[test]
+    fn test_scan_content_finds_huggingface_token() {
+        let token = format!("hf_{}", "a".repeat(36));
+        let content = format!("HF_TOKEN={}", token);
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false);
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "huggingface_token"),
+            "Should detect HuggingFace token"
+        );
+    }
+
+    #[test]
+    fn test_scan_content_finds_digitalocean_pat() {
+        let token = format!("dop_v1_{}", "a".repeat(64));
+        let content = format!("DO_TOKEN={}", token);
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false);
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "digitalocean_pat"),
+            "Should detect DigitalOcean PAT"
+        );
+    }
+
+    #[test]
+    fn test_scan_content_finds_databricks_token() {
+        // dapi + exactly 32 hex chars; constructed at runtime to avoid secret-scanner false positives
+        let token = ["dapi", &"a".repeat(32)].concat();
+        let content = format!("DATABRICKS_TOKEN={}", token);
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false);
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "databricks_token"),
+            "Should detect Databricks API token"
+        );
+    }
+
+    #[test]
+    fn test_scan_content_finds_vault_hvs_token() {
+        let token = format!("hvs.{}", "A".repeat(30));
+        let content = format!("VAULT_TOKEN={}", token);
+        let findings = scan_content(&content, "config.sh", "a".repeat(40).as_str(), false);
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "vault_token"),
+            "Should detect HashiCorp Vault hvs token"
+        );
+    }    #[test]
+    fn test_scan_content_finds_planetscale_token() {
+        let token = format!("pscale_tkn_{}", "A".repeat(43));
+        let content = format!("DATABASE_TOKEN={}", token);
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false);
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "planetscale_token"),
+            "Should detect PlanetScale token"
+        );
+    }
+
+    #[test]
+    fn test_scan_content_finds_supabase_key() {
+        let key = format!("sbp_{}", "A".repeat(40));
+        let content = format!("SUPABASE_KEY={}", key);
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false);
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "supabase_key"),
+            "Should detect Supabase service role key"
+        );
+    }
+
+    #[test]
+    fn test_scan_content_finds_linear_key() {
+        let key = format!("lin_api_{}", "A".repeat(40));
+        let content = format!("LINEAR_KEY={}", key);
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false);
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "linear_key"),
+            "Should detect Linear API key"
+        );
+    }
+
+    #[test]
+    fn test_sensitive_names_htpasswd() {
+        assert!(is_sensitive_file(".htpasswd"), ".htpasswd should be sensitive");
+    }
+
+    #[test]
+    fn test_sensitive_names_env_prod() {
+        assert!(is_sensitive_file(".env.prod"), ".env.prod should be sensitive");
+        assert!(is_sensitive_file(".env.production"), ".env.production should be sensitive");
+    }
+
+    #[test]
+    fn test_collect_tech_svelte() {
+        let mut tech = Vec::new();
+        collect_tech("svelte.config.js", &mut tech);
+        assert!(tech.contains(&"Svelte".to_string()), "Should detect Svelte");
+    }
+
+    #[test]
+    fn test_collect_tech_flutter() {
+        let mut tech = Vec::new();
+        collect_tech("pubspec.yaml", &mut tech);
+        assert!(tech.contains(&"Flutter".to_string()), "Should detect Flutter");
+    }
+
+    #[test]
+    fn test_collect_tech_helm() {
+        let mut tech = Vec::new();
+        collect_tech("Chart.yaml", &mut tech);
+        assert!(tech.contains(&"Helm".to_string()), "Should detect Helm");
     }
 }
