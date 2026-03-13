@@ -131,7 +131,7 @@ lazy_static! {
         pat!("discord_webhook","HIGH", "Discord Webhook URL",
              r"https://discord(?:app)?\.com/api/webhooks/\d{17,19}/[A-Za-z0-9_\-]{68}"),
         pat!("telegram_bot",  "HIGH", "Telegram Bot Token",
-             r"\d{8,10}:[A-Za-z0-9_-]{35}"),
+             r#"(?i)(?:telegram|bot)[_\-\s]?(?:token|api[_\-]?key|auth[_\-]?token|chat[_\-]?id)\s*[=:]\s*['"]?\d{8,10}:[A-Za-z0-9_-]{35}['"]?"#),
         pat!("sendgrid",      "HIGH", "SendGrid API Key",
              r"SG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}"),
         pat!("twilio",        "HIGH", "Twilio API Key",
@@ -351,15 +351,23 @@ lazy_static! {
     ];
 
     static ref PLACEHOLDERS: Vec<&'static str> = vec![
-        "your_", "YOUR_", "example", "EXAMPLE", "placeholder",
-        "xxxx", "XXXX", "changeme", "CHANGE_ME", "insert_",
+        "your_", "YOUR_", "your-", "YOUR-",
+        "example", "EXAMPLE", "placeholder",
+        "xxxx", "XXXX", "changeme", "CHANGE_ME", "changeit", "ChangeMe",
+        "insert_", "INSERT_",
         "TODO", "FIXME", "test_", "TEST_", "dummy", "DUMMY",
         "replace", "REPLACE", "sample", "SAMPLE", "fake", "FAKE",
         "00000000", "11111111", "<", ">",
         // Additional common dev/template placeholders
         "n/a", "N/A", "none", "NONE", "null", "NULL", "undefined",
         "my_", "MY_", "enter_", "ENTER_", "set_", "SET_",
-        "fill_", "FILL_", "put_", "PUT_", "add_", "ADD_",
+        "fill_", "FILL_",
+        // "put_" / "PUT_" (underscore) and "put " (space) cover both `put_your_key_here`
+        // style and WordPress wp-config-sample.php `put your unique phrase here` values.
+        "put_", "PUT_", "put ",
+        "add_", "ADD_",
+        // Common template / documentation phrases
+        "change this", "change-this",
     ];
 
     static ref SENSITIVE_NAMES: Regex = Regex::new(
@@ -1154,14 +1162,15 @@ fn scan_entropy_line(
         let inner = &quoted[1..quoted.len() - 1];
         if is_placeholder(inner) { continue; }
         let ent = shannon_entropy(inner);
-        if ent < 3.5 { continue; }
-        let sev = if ent >= 4.5 { "HIGH" } else { "MEDIUM" };
+        // Only flag high-entropy values (>= 4.5 bits/char); MEDIUM severity is not used
+        // since the 3.5–4.5 range produces too many false positives on normal code strings.
+        if ent < 4.5 { continue; }
         out.push(Finding {
             filename:    filename.to_string(),
             line:        lineno + 1,
             pattern_id:  "high_entropy_secret".to_string(),
             description: format!("High-entropy secret ({:.2} bits/char)", ent),
-            severity:    sev.to_string(),
+            severity:    "HIGH".to_string(),
             match_str:   inner.to_string(),
             context:     build_context_window(all_lines, lineno, 2),
             is_deleted,
@@ -1279,13 +1288,14 @@ mod tests {
     }
 
     #[test]
-    fn test_scan_content_finds_wp_define_auth_key() {
+    fn test_scan_content_wp_define_placeholder_is_filtered() {
+        // "put your unique phrase here" is a WordPress wp-config-sample.php placeholder.
+        // After adding "put " to PLACEHOLDERS, this should NOT produce a finding.
         let content = r#"define( 'AUTH_KEY', 'put your unique phrase here' );"#;
         let findings = scan_content(content, "wp-config.php", "a".repeat(40).as_str(), false, &[]);
-        // "put your" is not in PLACEHOLDERS, but we verify the pattern matches at all
         assert!(
-            findings.iter().any(|f| f.pattern_id == "wp_define"),
-            "Should detect WordPress AUTH_KEY define()"
+            !findings.iter().any(|f| f.pattern_id == "wp_define"),
+            "WordPress AUTH_KEY with placeholder value 'put your unique phrase here' must be filtered"
         );
     }
 
@@ -1927,5 +1937,87 @@ mod tests {
         let result = super::load_patterns_from_file(path.to_str().unwrap());
         assert!(result.is_err(), "Invalid JSON should return an error");
         let _ = std::fs::remove_file(&path);
+    }
+
+    // ── False-positive reduction tests ───────────────────────────
+
+    /// Entropy scanner must never produce MEDIUM-severity findings.
+    /// (Historically, values in the 3.5–4.5 bits/char range were labelled MEDIUM
+    ///  and caused the bulk of false positives. The threshold is now 4.5.)
+    #[test]
+    fn test_entropy_scanner_never_produces_medium() {
+        let sha = "a".repeat(40);
+        // A keyword context line with a borderline-entropy value (3.5–4.4 range)
+        let line = r#"api_key = "AbCdEfGhIjKlMnOpQrStUvWxYz12345678""#;
+        let lines = vec![line];
+        let mut out = Vec::new();
+        scan_entropy_line(line, 0, "config.py", &sha, false, &lines, &mut out);
+        assert!(
+            !out.iter().any(|f| f.severity == "MEDIUM"),
+            "Entropy scanner must never produce MEDIUM-severity findings (threshold is 4.5)"
+        );
+    }
+
+    /// Values with entropy below 4.5 bits/char should not produce any entropy finding.
+    #[test]
+    fn test_entropy_scanner_skips_below_threshold() {
+        let sha = "a".repeat(40);
+        // "aababababababababab" has entropy ~1.0 — well below 4.5
+        let line = r#"password = "aababababababababab""#;
+        let lines = vec![line];
+        let mut out = Vec::new();
+        scan_entropy_line(line, 0, "config.py", &sha, false, &lines, &mut out);
+        assert!(out.is_empty(), "Low-entropy value (< 4.5 bits/char) must not produce findings");
+    }
+
+    /// Verify that "put " (with space) is now treated as a placeholder.
+    /// This covers WordPress wp-config-sample.php style "put your unique phrase here" values.
+    #[test]
+    fn test_placeholder_put_space_is_recognized() {
+        assert!(is_placeholder("put your unique phrase here"), "'put ' should be recognized as a placeholder");
+        // A real-looking secret that does not contain any placeholder substring
+        assert!(!is_placeholder("xK9mQz3rN7wT2vB5sL0pJ4hY8uE6fA1d"), "A high-entropy secret must not be flagged as placeholder");
+    }
+
+    /// "your-api-key" style (hyphen) placeholder should be recognized.
+    #[test]
+    fn test_placeholder_your_hyphen_is_recognized() {
+        assert!(is_placeholder("your-api-key-here"), "'your-' (with hyphen) should be recognized as a placeholder");
+        assert!(is_placeholder("YOUR-SECRET-HERE"), "'YOUR-' (with hyphen) should be recognized as a placeholder");
+    }
+
+    /// "changeit" and "ChangeMe" should be recognized as placeholders.
+    #[test]
+    fn test_placeholder_changeit_changeme_variants() {
+        assert!(is_placeholder("changeit"), "'changeit' should be a placeholder");
+        assert!(is_placeholder("ChangeMe_value"), "'ChangeMe' variant should be a placeholder");
+        assert!(is_placeholder("change this value"), "'change this' should be a placeholder");
+        assert!(is_placeholder("change-this-value"), "'change-this' should be a placeholder");
+    }
+
+    /// Telegram bot pattern must require "telegram" or "bot" context keyword.
+    /// A bare numeric-ID:token string without context must NOT match.
+    #[test]
+    fn test_telegram_bot_requires_context_keyword() {
+        let sha = "a".repeat(40);
+        // Bare token without any label (common FP source: order IDs, tracking numbers)
+        let content = "order_id=1234567890:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi";
+        let findings = scan_content(content, "config.php", &sha, false, &[]);
+        assert!(
+            !findings.iter().any(|f| f.pattern_id == "telegram_bot"),
+            "Bare numeric:token without 'telegram'/'bot' context must not be flagged as Telegram Bot Token"
+        );
+    }
+
+    /// Telegram bot pattern MUST fire when proper context keyword is present.
+    #[test]
+    fn test_telegram_bot_fires_with_context_keyword() {
+        let sha = "a".repeat(40);
+        let content = "TELEGRAM_BOT_TOKEN=1234567890:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi";
+        let findings = scan_content(content, ".env", &sha, false, &[]);
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "telegram_bot"),
+            "Telegram bot token with 'TELEGRAM_BOT_TOKEN=' label must be detected"
+        );
     }
 }
