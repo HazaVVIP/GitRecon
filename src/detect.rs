@@ -27,6 +27,12 @@ const PATH_VARIANTS: &[&str] = &[
     "admin/.git", "backend/.git", "app/.git",
     "web/.git", "www/.git", "public/.git",
     "src/.git", "portal/.git", "wp-content/.git",
+    // Additional v3 paths
+    "_git",
+    "git",
+    "dist/.git", "build/.git", "assets/.git",
+    "website/.git", "cms/.git",
+    ".git.bak", ".git.old",
 ];
 
 /// Minimum confidence score to report a DetectResult.
@@ -233,4 +239,41 @@ pub async fn run(
     }
 
     best.filter(|b| b.confidence >= MIN_CONFIDENCE)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_path_variants_contains_default() {
+        assert!(PATH_VARIANTS.contains(&".git"), "Default .git path must be present");
+    }
+
+    #[test]
+    fn test_path_variants_contains_backup_paths() {
+        assert!(PATH_VARIANTS.contains(&".git.bak"), ".git.bak must be in PATH_VARIANTS");
+        assert!(PATH_VARIANTS.contains(&".git.old"), ".git.old must be in PATH_VARIANTS");
+    }
+
+    #[test]
+    fn test_path_variants_contains_azure_devops_path() {
+        assert!(PATH_VARIANTS.contains(&"_git"), "_git (Azure DevOps) must be in PATH_VARIANTS");
+    }
+
+    #[test]
+    fn test_path_variants_contains_dist_build() {
+        assert!(PATH_VARIANTS.contains(&"dist/.git"), "dist/.git must be in PATH_VARIANTS");
+        assert!(PATH_VARIANTS.contains(&"build/.git"), "build/.git must be in PATH_VARIANTS");
+    }
+
+    #[test]
+    fn test_label_thresholds() {
+        assert_eq!(label(100), "CONFIRMED");
+        assert_eq!(label(90),  "CONFIRMED");
+        assert_eq!(label(89),  "HIGH");
+        assert_eq!(label(45),  "MEDIUM");
+        assert_eq!(label(20),  "LOW");
+        assert_eq!(label(10),  "NONE");
+    }
 }

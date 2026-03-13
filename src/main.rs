@@ -1,5 +1,5 @@
 //! main.rs
-//! GitRecon v2.0.0 — Streaming Git Exposure Scanner (Rust)
+//! GitRecon v3.0.0 — Streaming Git Exposure Scanner (Rust)
 //!
 //! Usage:
 //!   gitrecon <url> [options]
@@ -19,6 +19,8 @@ mod detect;
 mod mapper;
 mod streamer;
 mod reporter;
+#[allow(dead_code)]
+mod reconstructor;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -36,7 +38,7 @@ use reporter::Reporter;
 #[derive(Parser, Debug)]
 #[command(
     name = "gitrecon",
-    version = "2.0.0",
+    version = "3.0.0",
     about = "GitRecon — Streaming Git Exposure Scanner (Rust)",
     long_about = None,
     after_help = "Cara pakai:\n  gitrecon https://target.com\n  gitrecon https://target.com --save\n  gitrecon https://target.com --proxy socks5://127.0.0.1:9050 --delay 1\n  gitrecon https://target.com --fuzz --timeout 15"

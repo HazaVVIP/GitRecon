@@ -110,6 +110,11 @@ async fn save_blob(
 
     let local_path: PathBuf = parts_owned.iter().fold(output_dir.to_path_buf(), |acc, p| acc.join(p));
 
+    // Defense in depth: verify the joined path is still rooted inside output_dir
+    if !local_path.starts_with(output_dir) {
+        return false;
+    }
+
     if let Some(parent) = local_path.parent() {
         std::fs::create_dir_all(parent).ok();
     }
