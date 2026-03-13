@@ -1,9 +1,10 @@
 //! streamer.rs
 //! Phase 3 — Stream & Scan: fetch every object, scan for secrets in memory,
-//! discard object after scan.  NO writes to disk.
+//! optionally writing blobs to disk when --save is active.
 //! Output: StreamResult with all findings + intel.
 
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 use regex::Regex;
@@ -103,12 +104,24 @@ lazy_static! {
              r#"(?i)(password|passwd|pass|pwd)\s*[=:]\s*['"]([^'"\s]{8,})['"]"#),
         pat!("env_pass",       "HIGH", "Env Password Variable",
              r"(?m)^[A-Z_]*PASS(?:WORD)?[A-Z_]*\s*=\s*([^\s].+)$"),
-        // Network
-        pat!("private_ip", "MEDIUM", "Private IP Address",
-             r"(?:^|[^0-9])(10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2[0-9]|3[01])\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3})(?:[^0-9]|$)"),
-        // Cloud storage
-        pat!("s3_url", "MEDIUM", "S3 Bucket URL",
-             r"https?://[a-z0-9\-\.]+\.s3(?:\.[a-z0-9\-]+)?\.amazonaws\.com"),
+        // WordPress / PHP — define('KEY', 'value') with comma separator
+        pat!("wp_define", "CRITICAL", "WordPress Config Credential",
+             r#"(?i)define\s*\(\s*['"](?:DB_PASSWORD|DB_USER|DB_HOST|DB_NAME|AUTH_KEY|SECURE_AUTH_KEY|LOGGED_IN_KEY|NONCE_KEY|AUTH_SALT|SECURE_AUTH_SALT|LOGGED_IN_SALT|NONCE_SALT|SECRET_KEY|SECRET_SALT)['"]\s*,\s*['"]([^'"]{4,})['"]"#),
+        // Django / Flask
+        pat!("django_secret", "CRITICAL", "Django/Flask SECRET_KEY",
+             r#"(?i)SECRET_KEY\s*=\s*['"]([^'"]{20,})['"]"#),
+        // Google
+        pat!("google_api_key", "HIGH", "Google API Key",
+             r"\bAIza[0-9A-Za-z\-_]{35}\b"),
+        // Rails
+        pat!("rails_secret", "CRITICAL", "Rails secret_key_base",
+             r#"(?i)secret_key_base\s*[=:]\s*['"]?([A-Za-z0-9]{64,})['"]?"#),
+        // Mailchimp
+        pat!("mailchimp_key", "HIGH", "Mailchimp API Key",
+             r"[0-9a-f]{32}-us[1-9][0-9]?\b"),
+        // Laravel
+        pat!("laravel_app_key", "CRITICAL", "Laravel APP_KEY",
+             r"APP_KEY=base64:[A-Za-z0-9+/=]{40,}"),
         // Misc
         pat!("firebase_fcm", "HIGH", "Firebase FCM Key",
              r"AAAA[A-Za-z0-9_-]{7}:[A-Za-z0-9_-]{140}"),
@@ -131,9 +144,6 @@ lazy_static! {
     static ref SENSITIVE_NAMES: Regex = Regex::new(
         r#"(?i)(\.env|\.env\.|config\.php|wp-config|database\.php|settings\.py|config\.ya?ml|credentials|secrets?\.json|service.account|\.npmrc|\.pypirc|\.netrc|id_rsa|id_ed25519|\.pem|\.key|\.pfx|\.p12|application\.(properties|ya?ml)|docker.compose|\.travis\.yml|\.circleci)"#
     ).unwrap();
-
-    static ref ENTROPY_TOKEN_RE: Regex =
-        Regex::new(r#"['"]([A-Za-z0-9+/=_\-]{24,})['"]"#).unwrap();
 }
 
 // ════════════════════════════════════════════════
@@ -204,15 +214,18 @@ pub struct Contributor {
 
 #[derive(Debug, Default)]
 pub struct StreamResult {
-    pub findings:       Vec<Finding>,
-    pub contributors:   Vec<Contributor>,
-    pub tech_stack:     Vec<String>,
-    pub commit_count:   usize,
-    pub blobs_scanned:  usize,
+    pub findings:          Vec<Finding>,
+    pub contributors:      Vec<Contributor>,
+    pub tech_stack:        Vec<String>,
+    pub commit_count:      usize,
+    pub blobs_scanned:     usize,
     #[allow(dead_code)]
-    pub blobs_failed:   usize,
-    pub bytes_scanned:  usize,
-    pub elapsed_s:      f64,
+    pub blobs_failed:      usize,
+    pub bytes_scanned:     usize,
+    pub elapsed_s:         f64,
+    pub files_saved:       usize,
+    #[allow(dead_code)]
+    pub files_save_failed: usize,
 }
 
 impl StreamResult {
@@ -253,21 +266,24 @@ impl StreamResult {
 
 #[derive(Default)]
 struct State {
-    findings:        Vec<Finding>,
-    contributors:    HashMap<String, String>,   // email → name
-    tech_stack:      HashSet<String>,
-    commit_count:    usize,
-    blobs_scanned:   usize,
-    blobs_failed:    usize,
-    bytes_scanned:   usize,
+    findings:          Vec<Finding>,
+    contributors:      HashMap<String, String>,   // email → name
+    tech_stack:        HashSet<String>,
+    commit_count:      usize,
+    blobs_scanned:     usize,
+    blobs_failed:      usize,
+    bytes_scanned:     usize,
+    files_saved:       usize,
+    files_save_failed: usize,
 }
 
 // Result sent back from each worker task via channel
 enum WorkerResult {
     BlobScanned {
-        findings: Vec<Finding>,
-        tech:     Vec<String>,
-        bytes:    usize,
+        findings:    Vec<Finding>,
+        tech:        Vec<String>,
+        bytes:       usize,
+        save_result: Option<bool>,  // None = not attempted, Some(true) = saved, Some(false) = failed
     },
     BlobFailed,
     CommitProcessed {
@@ -307,9 +323,16 @@ impl Streamer {
         git_url: &str,
         map_result: &MapResult,
         progress_cb: Option<Arc<dyn Fn(usize, usize) + Send + Sync>>,
+        save_dir: Option<PathBuf>,
     ) -> StreamResult {
         let t0 = Instant::now();
         let git_url = git_url.trim_end_matches('/').to_string();
+
+        // Create save directory upfront if --save is active
+        if let Some(ref dir) = save_dir {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let save_dir_arc: Option<Arc<PathBuf>> = save_dir.map(Arc::new);
 
         // Build sha1→filename lookup and current-blob set upfront
         let mut sha1_to_file: HashMap<String, String> = HashMap::with_capacity(map_result.index_entries.len());
@@ -356,8 +379,9 @@ impl Streamer {
                 let git_url = git_url.clone();
                 let sha1_to_file = sha1_to_file.clone();
                 let current_blobs = current_blobs.clone();
+                let save_dir = save_dir_arc.clone();
                 async move {
-                    fetch_and_process(&client, &git_url, &sha1, &sha1_to_file, &current_blobs).await
+                    fetch_and_process(&client, &git_url, &sha1, &sha1_to_file, &current_blobs, save_dir).await
                 }
             })
             .buffer_unordered(workers);
@@ -371,12 +395,17 @@ impl Streamer {
                 cb(done, total);
             }
             match result {
-                WorkerResult::BlobScanned { findings, tech, bytes } => {
+                WorkerResult::BlobScanned { findings, tech, bytes, save_result } => {
                     state.blobs_scanned += 1;
                     state.bytes_scanned += bytes;
                     state.findings.extend(findings);
                     for t in tech {
                         state.tech_stack.insert(t);
+                    }
+                    match save_result {
+                        Some(true)  => state.files_saved       += 1,
+                        Some(false) => state.files_save_failed += 1,
+                        None        => {}
                     }
                 }
                 WorkerResult::BlobFailed => {
@@ -402,16 +431,18 @@ impl Streamer {
         ts.sort();
 
         StreamResult {
-            findings:      state.findings,
-            contributors:  state.contributors.iter()
-                             .map(|(email, name)| Contributor { name: name.clone(), email: email.clone() })
-                             .collect(),
-            tech_stack:    ts,
-            commit_count:  state.commit_count,
-            blobs_scanned: state.blobs_scanned,
-            blobs_failed:  state.blobs_failed,
-            bytes_scanned: state.bytes_scanned,
-            elapsed_s:     elapsed,
+            findings:          state.findings,
+            contributors:      state.contributors.iter()
+                                 .map(|(email, name)| Contributor { name: name.clone(), email: email.clone() })
+                                 .collect(),
+            tech_stack:        ts,
+            commit_count:      state.commit_count,
+            blobs_scanned:     state.blobs_scanned,
+            blobs_failed:      state.blobs_failed,
+            bytes_scanned:     state.bytes_scanned,
+            elapsed_s:         elapsed,
+            files_saved:       state.files_saved,
+            files_save_failed: state.files_save_failed,
         }
     }
 }
@@ -429,6 +460,7 @@ async fn fetch_and_process(
     sha1: &str,
     sha1_to_file: &HashMap<String, String>,
     current_blobs: &HashSet<String>,
+    save_dir: Option<Arc<PathBuf>>,
 ) -> WorkerResult {
     let url  = format!("{}/{}", git_url, obj_path(sha1));
     let resp = client.get(&url).await;
@@ -453,18 +485,20 @@ async fn fetch_and_process(
             if null_count > 10 {
                 // Binary file — skip scanning, still count bytes
                 return WorkerResult::BlobScanned {
-                    findings: vec![],
-                    tech: vec![],
-                    bytes: raw_bytes,
+                    findings:    vec![],
+                    tech:        vec![],
+                    bytes:       raw_bytes,
+                    save_result: None,
                 };
             }
 
             // Skip blobs that exceed the scan size limit
             if obj.data.len() > MAX_SCAN_BYTES {
                 return WorkerResult::BlobScanned {
-                    findings: vec![],
-                    tech: vec![],
-                    bytes: raw_bytes,
+                    findings:    vec![],
+                    tech:        vec![],
+                    bytes:       raw_bytes,
+                    save_result: None,
                 };
             }
 
@@ -483,7 +517,18 @@ async fn fetch_and_process(
 
             let findings = scan_content(&content, &filename, sha1, is_deleted);
 
-            WorkerResult::BlobScanned { findings, tech, bytes: raw_bytes }
+            // Optionally write blob to disk (--save integration: avoids a second download pass)
+            let save_result = if let Some(ref dir) = save_dir {
+                if let Some(actual_name) = sha1_to_file.get(sha1) {
+                    Some(write_blob_to_disk(actual_name, &obj.data, dir))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            WorkerResult::BlobScanned { findings, tech, bytes: raw_bytes, save_result }
         }
         "commit" => {
             if let Some(commit) = parser.parse_commit(&obj) {
@@ -539,33 +584,6 @@ fn scan_content(
                 });
             }
         }
-
-        // Entropy check for long tokens
-        let trimmed = line.trim();
-        if trimmed.len() >= 20
-            && !trimmed.starts_with('#')
-            && !trimmed.starts_with("//")
-            && !trimmed.starts_with('*')
-            && !trimmed.starts_with("<!--")
-            && !trimmed.starts_with("--")
-        {
-            for cap in ENTROPY_TOKEN_RE.captures_iter(line) {
-                let token = &cap[1];
-                if high_entropy(token) && !is_placeholder(token) {
-                    findings.push(Finding {
-                        filename:    filename.to_string(),
-                        line:        lineno + 1,
-                        pattern_id:  "entropy_string".to_string(),
-                        description: "High-entropy string (suspected secret)".to_string(),
-                        severity:    "MEDIUM".to_string(),
-                        match_str:   token.to_string(),
-                        context:     line.trim().to_string(),
-                        is_deleted,
-                        commit_sha1: Some(sha1.to_string()),
-                    });
-                }
-            }
-        }
     }
 
     findings
@@ -574,6 +592,29 @@ fn scan_content(
 // ════════════════════════════════════════════════
 // HELPERS
 // ════════════════════════════════════════════════
+
+/// Write blob data to disk under `output_dir`, reconstructing directory structure.
+/// Sanitises the path to prevent path-traversal (rejects `..` and absolute components).
+/// Returns true if the file was written successfully.
+fn write_blob_to_disk(filename: &str, data: &[u8], output_dir: &Path) -> bool {
+    let normalized = filename.replace('\\', "/");
+    let parts: Vec<&str> = normalized
+        .split('/')
+        .filter(|p| !p.is_empty() && *p != ".." && *p != ".")
+        .collect();
+    if parts.is_empty() {
+        return false;
+    }
+    let local_path: PathBuf = parts.iter().fold(output_dir.to_path_buf(), |acc, p| acc.join(p));
+    // Defense in depth: verify the joined path is still rooted inside output_dir
+    if !local_path.starts_with(output_dir) {
+        return false;
+    }
+    if let Some(parent) = local_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::write(&local_path, data).is_ok()
+}
 
 /// Collect matching tech stack entries into a Vec (lock-free variant for worker tasks).
 fn collect_tech(filename: &str, out: &mut Vec<String>) {
@@ -601,34 +642,6 @@ fn is_placeholder(s: &str) -> bool {
     PLACEHOLDERS.iter().any(|p| s.contains(p))
 }
 
-fn entropy(s: &str, charset: &std::collections::HashSet<char>) -> f64 {
-    let filtered: Vec<char> = s.chars().filter(|c| charset.contains(c)).collect();
-    if filtered.len() < 12 {
-        return 0.0;
-    }
-    let mut freq: HashMap<char, usize> = HashMap::new();
-    for c in &filtered {
-        *freq.entry(*c).or_insert(0) += 1;
-    }
-    let len = filtered.len() as f64;
-    -freq.values().map(|&v| {
-        let p = v as f64 / len;
-        p * p.log2()
-    }).sum::<f64>()
-}
-
-fn high_entropy(s: &str) -> bool {
-    lazy_static! {
-        static ref B64_CHARSET: std::collections::HashSet<char> =
-            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/="
-                .chars().collect();
-        static ref HEX_CHARSET: std::collections::HashSet<char> =
-            "0123456789abcdefABCDEF".chars().collect();
-    }
-    let threshold = 3.6;
-    entropy(s, &B64_CHARSET) > threshold || entropy(s, &HEX_CHARSET) > threshold
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -638,17 +651,6 @@ mod tests {
         assert!(is_placeholder("your_api_key_here"));
         assert!(is_placeholder("AKIAIOSFODNN7EXAMPLE"));
         assert!(!is_placeholder("AKIAIOSFODNN7REAL_SECRET"));
-    }
-
-    #[test]
-    fn test_high_entropy_base64() {
-        // High-entropy Base64 string (random-looking)
-        assert!(high_entropy("R2l0UmVjb25Jc0F3ZXNvbWVUb29sRm9yU2VjdXJpdHk="));
-    }
-
-    #[test]
-    fn test_low_entropy() {
-        assert!(!high_entropy("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
     }
 
     #[test]
@@ -683,6 +685,123 @@ mod tests {
         let findings = scan_content(&long_line, "file.txt", "a".repeat(40).as_str(), false);
         // Long lines should be skipped — no findings
         assert!(findings.is_empty(), "Lines >2000 chars should be skipped");
+    }
+
+    #[test]
+    fn test_scan_content_finds_wp_define_credential() {
+        let content = r#"define('DB_PASSWORD', 'supersecret123');"#;
+        let findings = scan_content(content, "wp-config.php", "a".repeat(40).as_str(), false);
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "wp_define"),
+            "Should detect WordPress define() credential"
+        );
+    }
+
+    #[test]
+    fn test_scan_content_finds_wp_define_auth_key() {
+        let content = r#"define( 'AUTH_KEY', 'put your unique phrase here' );"#;
+        let findings = scan_content(content, "wp-config.php", "a".repeat(40).as_str(), false);
+        // "put your" is not in PLACEHOLDERS, but we verify the pattern matches at all
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "wp_define"),
+            "Should detect WordPress AUTH_KEY define()"
+        );
+    }
+
+    #[test]
+    fn test_scan_content_finds_django_secret_key() {
+        let content = r#"SECRET_KEY = 'django-insecure-abcdefghijklmnopqrstuvwxyz1234567890!@#'"#;
+        let findings = scan_content(content, "settings.py", "a".repeat(40).as_str(), false);
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "django_secret"),
+            "Should detect Django SECRET_KEY"
+        );
+    }
+
+    #[test]
+    fn test_scan_content_finds_google_api_key() {
+        // AIza + exactly 35 alphanumeric/dash/underscore chars
+        let content = "GOOGLE_KEY=AIzaSyC1234567890abcdefghijklmnop123456";
+        let findings = scan_content(content, "config.js", "a".repeat(40).as_str(), false);
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "google_api_key"),
+            "Should detect Google API Key"
+        );
+    }
+
+    #[test]
+    fn test_scan_content_finds_laravel_app_key() {
+        let content = "APP_KEY=base64:SomeBase64EncodedKeyHereThatIsLongEnoughToMatch==";
+        let findings = scan_content(content, ".env", "a".repeat(40).as_str(), false);
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "laravel_app_key"),
+            "Should detect Laravel APP_KEY"
+        );
+    }
+
+    #[test]
+    fn test_no_private_ip_false_positive() {
+        // Private IPs no longer trigger any finding
+        let content = "db_host = 192.168.1.100";
+        let findings = scan_content(content, "config.ini", "a".repeat(40).as_str(), false);
+        assert!(
+            !findings.iter().any(|f| f.pattern_id == "private_ip"),
+            "Private IP should not be flagged"
+        );
+    }
+
+    #[test]
+    fn test_no_s3_url_false_positive() {
+        // S3 URLs no longer trigger a MEDIUM finding
+        let content = "endpoint = https://mybucket.s3.amazonaws.com";
+        let findings = scan_content(content, "config.ini", "a".repeat(40).as_str(), false);
+        assert!(
+            !findings.iter().any(|f| f.pattern_id == "s3_url"),
+            "S3 URL should not be flagged"
+        );
+    }
+
+    #[test]
+    fn test_no_entropy_medium_finding() {
+        // Entropy check is removed; quoted high-entropy strings should not produce MEDIUM findings
+        let content = r#"some_field = "R2l0UmVjb25Jc0F3ZXNvbWVUb29sRm9yU2VjdXJpdHk=""#;
+        let findings = scan_content(content, "file.txt", "a".repeat(40).as_str(), false);
+        assert!(
+            !findings.iter().any(|f| f.severity == "MEDIUM"),
+            "Entropy check should not produce MEDIUM findings"
+        );
+    }
+
+    #[test]
+    fn test_write_blob_to_disk_sanitises_path_traversal() {
+        let dir = std::env::temp_dir().join("gitrecon_test_write");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Path-traversal attempt: `..` components are stripped so the path is
+        // sanitised to stay inside `dir` (e.g. dir/etc/passwd).
+        let result = write_blob_to_disk("../../etc/passwd", b"test_gitrecon", &dir);
+        if result {
+            // The sanitised path must land inside `dir`
+            let sanitised = dir.join("etc").join("passwd");
+            assert!(sanitised.exists(), "Sanitised file must be inside the output directory");
+            // The real /etc/passwd must not have been modified
+            if std::path::Path::new("/etc/passwd").exists() {
+                let content = std::fs::read("/etc/passwd").unwrap_or_default();
+                assert_ne!(content, b"test_gitrecon", "Must not overwrite /etc/passwd");
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_blob_to_disk_creates_subdirs() {
+        let dir = std::env::temp_dir().join("gitrecon_test_subdirs");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ok = write_blob_to_disk("sub/dir/file.txt", b"hello", &dir);
+        assert!(ok, "Should write successfully");
+        assert!(dir.join("sub/dir/file.txt").exists(), "Should create sub-directories");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

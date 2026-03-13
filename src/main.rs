@@ -18,11 +18,9 @@ mod git_parser;
 mod detect;
 mod mapper;
 mod streamer;
-mod reconstructor;
 mod reporter;
 
-use std::collections::HashMap;
-use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -233,6 +231,9 @@ async fn main() {
 
     // ── --save confirmation ──────────────────────────────────────
     let mut do_save = args.save;
+    let tname      = target_name(&url);
+    let source_dir = format!("{}/{}", args.output, tname);
+
     if do_save {
         if !ask_save_confirm(&map_r.size_human(), map_r.estimated_files) {
             println!("  Dibatalkan. Melanjutkan tanpa --save (mode online).");
@@ -241,8 +242,14 @@ async fn main() {
         println!();
     }
 
-    // ── Phase 3: Stream & Scan ───────────────────────────────────
+    // ── Phase 3: Stream & Scan (+ optional save) ─────────────────
     let total = map_r.all_sha1s().len();
+    let save_dir: Option<PathBuf> = if do_save {
+        Some(PathBuf::from(&source_dir))
+    } else {
+        None
+    };
+
     let streamer = streamer::Streamer::new(
         client.clone(),
         args.workers,
@@ -263,53 +270,22 @@ async fn main() {
             }
         });
 
-    let stream_r = streamer.run(&dr.git_url, &map_r, Some(progress_cb)).await;
+    let stream_r = streamer.run(&dr.git_url, &map_r, Some(progress_cb), save_dir).await;
     rep_arc.print_stream_done(&stream_r);
+
+    if do_save && (stream_r.files_saved > 0 || stream_r.files_save_failed > 0) {
+        println!("  Location: {}", source_dir);
+        println!();
+    }
 
     // ── Phase 4: Report ──────────────────────────────────────────
     rep_arc.print_report(&dr, &map_r, &stream_r);
 
     // Save JSON report
-    let tname       = target_name(&url);
     let report_path = format!("{}/{}_report.json", args.output, tname);
 
     if let Err(e) = rep_arc.save_json(&report_path, &url, Some(&dr), Some(&map_r), Some(&stream_r)) {
         eprintln!("  [!] Could not save report: {}", e);
-    }
-
-    // ── Optional: Reconstruct ────────────────────────────────────
-    if do_save && !map_r.index_entries.is_empty() {
-        let source_dir = format!("{}/{}", args.output, tname);
-        let sha1_map: HashMap<String, String> = map_r.index_entries
-            .iter()
-            .map(|e| (e.sha1.clone(), e.filename.clone()))
-            .collect();
-
-        let total_files = sha1_map.len();
-        println!("\n  [→] Reconstructing {} files to disk...", total_files);
-
-        let recon = reconstructor::Reconstructor::new(client.clone(), args.workers);
-
-        let save_cb: Arc<dyn Fn(usize, usize) + Send + Sync> =
-            Arc::new(move |d: usize, t: usize| {
-                if !quiet {
-                    let pct = d as f64 / t.max(1) as f64;
-                    let bar = (pct * 30.0) as usize;
-                    print!(
-                        "\r  [{}{}] {:5.1}%  {}/{}",
-                        "█".repeat(bar),
-                        "░".repeat(30 - bar),
-                        pct * 100.0,
-                        d, t,
-                    );
-                    use std::io::Write;
-                    std::io::stdout().flush().ok();
-                }
-            });
-
-        let stats = recon.run(&dr.git_url, &sha1_map, Path::new(&source_dir), Some(save_cb)).await;
-        println!("\n  Saved: {} files  Failed: {}", stats["saved"], stats["failed"]);
-        println!("  Location: {}", source_dir);
     }
 
     // ── Summary ──────────────────────────────────────────────────

@@ -108,6 +108,9 @@ impl Reporter {
         println!(); // newline after progress bar
         println!("  Blobs scanned : {}", r.blobs_scanned);
         println!("  Data processed: {:} KB", r.bytes_scanned / 1024);
+        if r.files_saved > 0 || r.files_save_failed > 0 {
+            println!("  Files saved   : {}  Failed: {}", r.files_saved, r.files_save_failed);
+        }
         println!("  Elapsed       : {:.1}s", r.elapsed_s);
         println!();
     }
