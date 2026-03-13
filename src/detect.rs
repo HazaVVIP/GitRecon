@@ -12,9 +12,17 @@ type Verifier = fn(&[u8]) -> bool;
 const PROBES: &[(&str, Verifier, u32)] = &[
     ("HEAD",              |b| b.windows(9).any(|w| w == b"ref: refs") || (b.len() >= 40 && b[..40].iter().all(|&c| c.is_ascii_hexdigit())), 40),
     ("config",            |b| b.windows(6).any(|w| w == b"[core]"),  30),
-    ("packed-refs",       |b| b.iter().any(|&c| c.is_ascii_hexdigit()), 15),
+    // packed-refs: valid format has a line with 40 hex chars followed by ' refs/'
+    ("packed-refs",       |b| b.windows(46).any(|w| {
+        w[..40].iter().all(|&c| c.is_ascii_hexdigit()) && w[40] == b' ' && &w[41..46] == b"refs/"
+    }), 15),
     ("index",             |b| b.len() >= 4 && &b[..4] == b"DIRC",    20),
-    ("logs/HEAD",         |b| b.iter().any(|&c| c.is_ascii_hexdigit()), 10),
+    // logs/HEAD: valid format has two consecutive 40-char hex SHA1s separated by a space
+    ("logs/HEAD",         |b| b.windows(82).any(|w| {
+        w[..40].iter().all(|&c| c.is_ascii_hexdigit())
+            && w[40] == b' '
+            && w[41..81].iter().all(|&c| c.is_ascii_hexdigit())
+    }), 10),
     ("COMMIT_EDITMSG",    |b| !b.trim_ascii().is_empty(),              5),
     // Objects tree confirms readable object storage — strongest corroboration after HEAD
     ("objects/info/packs",|b| b.windows(2).any(|w| w == b"P "),      10),
@@ -355,6 +363,40 @@ mod tests {
         assert_eq!(label(45),  "MEDIUM");
         assert_eq!(label(20),  "LOW");
         assert_eq!(label(10),  "NONE");
+    }
+
+    #[test]
+    fn test_packed_refs_verifier_accepts_valid_format() {
+        // Valid packed-refs line: 40-char SHA1 followed by ' refs/heads/main'
+        let valid = b"abc123def456abc123def456abc123def456abc1 refs/heads/main\n";
+        let verifier = PROBES.iter().find(|(p, _, _)| *p == "packed-refs").map(|(_, v, _)| v).unwrap();
+        assert!(verifier(valid), "packed-refs verifier must accept a properly formatted file");
+    }
+
+    #[test]
+    fn test_packed_refs_verifier_rejects_plain_hex() {
+        // A file that merely contains hex digits (no valid packed-refs line) must NOT match
+        let not_packed = b"just some hex digits: abcdef1234567890\n";
+        let verifier = PROBES.iter().find(|(p, _, _)| *p == "packed-refs").map(|(_, v, _)| v).unwrap();
+        assert!(!verifier(not_packed), "packed-refs verifier must reject a file with only stray hex chars");
+    }
+
+    #[test]
+    fn test_logs_head_verifier_accepts_valid_format() {
+        // Valid git log line: old-SHA1 <space> new-SHA1
+        let old_sha = "0000000000000000000000000000000000000000";
+        let new_sha = "abc123def456abc123def456abc123def456abc1";
+        let valid = format!("{} {} Author <a@b.com> 1234567890 +0000\tCommit\n", old_sha, new_sha);
+        let verifier = PROBES.iter().find(|(p, _, _)| *p == "logs/HEAD").map(|(_, v, _)| v).unwrap();
+        assert!(verifier(valid.as_bytes()), "logs/HEAD verifier must accept a properly formatted log line");
+    }
+
+    #[test]
+    fn test_logs_head_verifier_rejects_plain_hex() {
+        // A file with only stray hex digits must NOT match
+        let not_log = b"just some hex: abcdef1234567890\n";
+        let verifier = PROBES.iter().find(|(p, _, _)| *p == "logs/HEAD").map(|(_, v, _)| v).unwrap();
+        assert!(!verifier(not_log), "logs/HEAD verifier must reject a file with only stray hex chars");
     }
 
     #[test]
