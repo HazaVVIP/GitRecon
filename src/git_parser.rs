@@ -17,7 +17,9 @@ use sha1::{Sha1, Digest};
 pub struct IndexEntry {
     pub sha1: String,
     pub filename: String,
+    #[allow(dead_code)]
     pub mode: u32,
+    #[allow(dead_code)]
     pub file_size: u32,
 }
 
@@ -25,18 +27,24 @@ pub struct IndexEntry {
 pub struct GitObject {
     pub sha1: String,
     pub obj_type: String,
+    #[allow(dead_code)]
     pub size: usize,
     pub data: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
 pub struct CommitInfo {
+    #[allow(dead_code)]
     pub sha1: String,
+    #[allow(dead_code)]
     pub tree: String,
+    #[allow(dead_code)]
     pub parents: Vec<String>,
     pub author: String,
     pub author_email: String,
+    #[allow(dead_code)]
     pub author_ts: i64,
+    #[allow(dead_code)]
     pub message: String,
 }
 
@@ -52,6 +60,7 @@ impl TreeEntry {
         self.mode == "100644" || self.mode == "100755"
     }
 
+    #[allow(dead_code)]
     pub fn is_tree(&self) -> bool {
         self.mode == "040000"
     }
@@ -264,6 +273,7 @@ impl ObjectParser {
         entries
     }
 
+    #[allow(dead_code)]
     pub fn sha1_of(&self, obj_type: &str, content: &[u8]) -> String {
         let header = format!("{} {}\x00", obj_type, content.len());
         let mut hasher = Sha1::new();
