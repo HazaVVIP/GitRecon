@@ -39,15 +39,25 @@ macro_rules! pat {
 
 lazy_static! {
     static ref PATTERNS: Vec<Pattern> = vec![
-        // Cloud
+        // Cloud — AWS
         pat!("aws_key_id",  "CRITICAL", "AWS Access Key ID",
              r"\b(AKIA|ABIA|ACCA|ASIA)[A-Z0-9]{16}\b"),
         pat!("aws_secret",  "CRITICAL", "AWS Secret Access Key",
              r#"(?i)aws[_\-\s]?secret[_\-\s]?[a-z]*\s*[=:]\s*['"]?([A-Za-z0-9/+=]{40})['"]?"#),
+        pat!("aws_mfa",     "HIGH",     "AWS MFA Serial",
+             r"\barn:aws:iam::\d{12}:mfa/[A-Za-z0-9+=,.@_/-]+"),
+        // Cloud — GCP
         pat!("gcp_sa",      "CRITICAL", "GCP Service Account",
              r#""type"\s*:\s*"service_account""#),
+        pat!("gcp_api_key", "CRITICAL", "GCP API Key",
+             r"\bAIza[0-9A-Za-z\-_]{35}\b"),
+        // Cloud — Azure
         pat!("azure_conn",  "CRITICAL", "Azure Storage Connection String",
              r"DefaultEndpointsProtocol=https;AccountName=[^;]+;AccountKey=[^;]+"),
+        pat!("azure_sas",   "HIGH",     "Azure SAS Token",
+             r"sig=[A-Za-z0-9%+/]+=?&se=\d{4}-\d{2}-\d{2}"),
+        pat!("azure_tenant","HIGH",     "Azure AD Client Secret",
+             r#"(?i)client[_\-]?secret\s*[=:]\s*['"]?([A-Za-z0-9~._@\-]{32,})['"]?"#),
         // VCS tokens
         pat!("github_pat",   "CRITICAL", "GitHub Personal Access Token",
              r"ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{82}"),
@@ -57,36 +67,63 @@ lazy_static! {
              r"(ghu|ghs)_[A-Za-z0-9]{36}"),
         pat!("gitlab_pat",   "CRITICAL", "GitLab PAT",
              r"glpat-[A-Za-z0-9\-_]{20}"),
+        pat!("bitbucket_key","CRITICAL", "Bitbucket App Password",
+             r"\bATBB[A-Za-z0-9]{32}\b"),
         // Payment
         pat!("stripe_sk", "CRITICAL", "Stripe Secret Key",
              r"sk_(live|test)_[A-Za-z0-9]{24,}"),
         pat!("stripe_pk", "HIGH",     "Stripe Publishable Key",
              r"pk_(live|test)_[A-Za-z0-9]{24,}"),
-        // Messaging
+        pat!("stripe_webhook", "HIGH", "Stripe Webhook Secret",
+             r"\bwhsec_[A-Za-z0-9]{32,}\b"),
+        pat!("paypal_client", "HIGH",  "PayPal Client ID / Secret",
+             r#"(?i)paypal[_\-\s]?(client[_\-]?id|secret)\s*[=:]\s*['"]?([A-Za-z0-9_\-]{20,})['"]?"#),
+        // Messaging / Comms
         pat!("slack_token",   "HIGH", "Slack Token",
              r"xox[baprs]-[0-9]{10,}-[0-9]{10,}-[A-Za-z0-9]{24,}"),
         pat!("slack_webhook", "HIGH", "Slack Webhook",
              r"https://hooks\.slack\.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[A-Za-z0-9]+"),
+        pat!("slack_signing",  "HIGH", "Slack Signing Secret",
+             r"\bv0=[0-9a-f]{64}\b"),
         pat!("discord_token", "HIGH", "Discord Bot Token",
              r#"(?i)discord[_\-\s]?token\s*[=:]\s*['"]?([A-Za-z0-9._-]{59,})['"]?"#),
+        pat!("discord_webhook","HIGH", "Discord Webhook URL",
+             r"https://discord(?:app)?\.com/api/webhooks/\d{17,19}/[A-Za-z0-9_\-]{68}"),
         pat!("telegram_bot",  "HIGH", "Telegram Bot Token",
              r"\d{8,10}:[A-Za-z0-9_-]{35}"),
         pat!("sendgrid",      "HIGH", "SendGrid API Key",
              r"SG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}"),
         pat!("twilio",        "HIGH", "Twilio API Key",
              r"SK[0-9a-f]{32}"),
+        pat!("twilio_account","HIGH", "Twilio Account SID",
+             r"\bAC[0-9a-f]{32}\b"),
         pat!("mailgun",       "HIGH", "Mailgun Key",
              r"key-[0-9a-f]{32}"),
+        pat!("pusher_key",    "HIGH", "Pusher App Key/Secret",
+             r#"(?i)pusher[_\-]?(app[_\-]?key|app[_\-]?secret|key|secret)\s*[=:]\s*['"]?([A-Za-z0-9]{20,})['"]?"#),
+        // E-commerce / PaaS
+        pat!("shopify_token",  "CRITICAL", "Shopify Admin API Token",
+             r"shpat_[A-Za-z0-9]{32}"),
+        pat!("shopify_secret", "HIGH",     "Shopify Shared Secret",
+             r"shpss_[A-Za-z0-9]{32}"),
+        pat!("heroku_api_key", "CRITICAL", "Heroku API Key",
+             r#"(?i)heroku[_\-]?(api[_\-]?key|token|auth)\s*[=:]\s*['"]?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})['"]?"#),
+        pat!("vercel_token",   "CRITICAL", "Vercel API Token",
+             r"\bvercel[_\-]?token\s*[=:]\s*[A-Za-z0-9]{24,}\b"),
         // Database
         pat!("db_url",      "CRITICAL", "Database Connection URL",
-             r"(?i)(mysql|postgres|postgresql|mongodb|redis|mssql|oracle)://[^:@\s]+:[^@\s]+@[^\s]+"),
+             r"(?i)(mysql|postgres|postgresql|mongodb|redis|mssql|oracle|cockroachdb|clickhouse)://[^:@\s]+:[^@\s]+@[^\s]+"),
         pat!("db_password", "CRITICAL", "Database Password",
              r#"(?i)db[_\-]?(pass(word)?|pwd)\s*[=:]\s*['"]?([^\s'"]{8,})['"]?"#),
-        // Keys
+        pat!("mongodb_atlas","CRITICAL", "MongoDB Atlas Connection String",
+             r"mongodb\+srv://[^:@\s]+:[^@\s]+@[^\s]+\.mongodb\.net"),
+        // Keys & Certificates
         pat!("private_key", "CRITICAL", "Private Key",
              r"-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY(?: BLOCK)?-----"),
         pat!("pgp_key",     "CRITICAL", "PGP Private Key",
              r"-----BEGIN PGP PRIVATE KEY BLOCK-----"),
+        pat!("pkcs12",      "HIGH",     "PKCS12/PFX Certificate Bundle Reference",
+             r#"(?i)(keystore|truststore|\.p12|\.pfx)\s*[=:]\s*['"]?([^\s'"]{4,})['"]?"#),
         // JWT
         pat!("jwt",        "HIGH",     "JWT Token",
              r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"),
@@ -99,6 +136,8 @@ lazy_static! {
              r#"(?i)secret[_\-\s]?key\s*[=:]\s*['"]?([A-Za-z0-9_\-!@#$]{16,})['"]?"#),
         pat!("access_token", "HIGH", "Access Token",
              r#"(?i)access[_\-\s]?token\s*[=:]\s*['"]?([A-Za-z0-9_\-\.]{20,})['"]?"#),
+        pat!("bearer_token", "HIGH", "Bearer Token in Authorization Header",
+             r"(?i)Authorization\s*[:=]\s*[Bb]earer\s+([A-Za-z0-9_\-\.]{20,})"),
         // Password
         pat!("hardcoded_pass", "HIGH", "Hardcoded Password",
              r#"(?i)(password|passwd|pass|pwd)\s*[=:]\s*['"]([^'"\s]{8,})['"]"#),
@@ -110,9 +149,6 @@ lazy_static! {
         // Django / Flask
         pat!("django_secret", "CRITICAL", "Django/Flask SECRET_KEY",
              r#"(?i)SECRET_KEY\s*=\s*['"]([^'"]{20,})['"]"#),
-        // Google
-        pat!("google_api_key", "HIGH", "Google API Key",
-             r"\bAIza[0-9A-Za-z\-_]{35}\b"),
         // Rails
         pat!("rails_secret", "CRITICAL", "Rails secret_key_base",
              r#"(?i)secret_key_base\s*[=:]\s*['"]?([A-Za-z0-9]{64,})['"]?"#),
@@ -122,15 +158,31 @@ lazy_static! {
         // Laravel
         pat!("laravel_app_key", "CRITICAL", "Laravel APP_KEY",
              r"APP_KEY=base64:[A-Za-z0-9+/=]{40,}"),
-        // Misc
+        // Misc SaaS
         pat!("firebase_fcm", "HIGH", "Firebase FCM Key",
              r"AAAA[A-Za-z0-9_-]{7}:[A-Za-z0-9_-]{140}"),
+        pat!("firebase_rtdb", "HIGH", "Firebase RTDB URL with Auth",
+             r"https://[a-z0-9\-]+\.firebaseio\.com.*[?&]auth=[A-Za-z0-9_\-]{20,}"),
         pat!("npm_token",    "HIGH", "NPM Token",
              r"(?:^|[^a-z])npm_[A-Za-z0-9]{36}"),
         pat!("docker_pat",   "HIGH", "Docker Hub PAT",
              r"dckr_pat_[A-Za-z0-9_-]{27}"),
         pat!("oauth_secret", "HIGH", "OAuth Client Secret",
              r#"(?i)client[_\-]?secret\s*[=:]\s*['"]?([A-Za-z0-9_\-]{16,})['"]?"#),
+        pat!("twitch_token",  "CRITICAL", "Twitch OAuth Token",
+             r"\boauth:[A-Za-z0-9]{30}\b"),
+        pat!("algolia_key",   "HIGH", "Algolia API Key",
+             r#"(?i)algolia[_\-\s]?(api[_\-]?key|app[_\-]?id)\s*[=:]\s*['"]?([A-Za-z0-9]{32,})['"]?"#),
+        pat!("sentry_dsn",    "HIGH", "Sentry DSN",
+             r"https://[0-9a-f]{32}@(?:o\d+\.)?ingest\.sentry\.io/\d+"),
+        pat!("cloudinary_url","HIGH", "Cloudinary Credentials",
+             r"cloudinary://[A-Za-z0-9]+:[A-Za-z0-9_\-]+@[A-Za-z0-9]+"),
+        pat!("okta_api_token","CRITICAL", "Okta API Token",
+             r#"(?i)okta[_\-]?api[_\-]?token\s*[=:]\s*['"]?([A-Za-z0-9_\-]{32,})['"]?"#),
+        pat!("pagerduty_key", "HIGH", "PagerDuty API Key",
+             r#"(?i)pagerduty[_\-]?(api[_\-]?key|token)\s*[=:]\s*['"]?([A-Za-z0-9\+]{20,})['"]?"#),
+        pat!("terraform_cloud","CRITICAL","Terraform Cloud Token",
+             r"\btfp[a-z0-9]{30,}\b"),
         // AI Providers
         pat!("openai_key", "CRITICAL", "OpenAI API Key",
              r"sk-[A-Za-z0-9]{48}|sk-proj-[A-Za-z0-9_\-]{86}|sk-svcacct-[A-Za-z0-9_\-]{86}"),
@@ -138,6 +190,8 @@ lazy_static! {
              r"sk-ant-[A-Za-z0-9_\-]{93,}"),
         pat!("huggingface_token", "HIGH", "HuggingFace Token",
              r"\bhf_[A-Za-z0-9]{34,}\b"),
+        pat!("cohere_key",    "HIGH", "Cohere API Key",
+             r#"(?i)cohere[_\-]?api[_\-]?key\s*[=:]\s*['"]?([A-Za-z0-9]{40})['"]?"#),
         // Infrastructure / PaaS
         pat!("digitalocean_pat", "CRITICAL", "DigitalOcean Personal Access Token",
              r"\bdop_v1_[a-f0-9]{64}\b"),
@@ -145,17 +199,40 @@ lazy_static! {
              r"\bhvs\.[A-Za-z0-9_\-]{28,}\b"),
         pat!("databricks_token", "CRITICAL", "Databricks API Token",
              r"\bdapi[0-9a-f]{32}\b"),
+        pat!("cloudflare_key",   "CRITICAL", "Cloudflare Global API Key",
+             r#"(?i)cloudflare[_\-]?(api[_\-]?key|token)\s*[=:]\s*['"]?([A-Za-z0-9]{37,})['"]?"#),
+        pat!("cloudflare_token", "CRITICAL", "Cloudflare API Token",
+             r"\bcloudflare_token\s*=\s*[A-Za-z0-9_\-]{40}\b"),
+        pat!("netlify_pat",      "CRITICAL", "Netlify Personal Access Token",
+             r#"(?i)netlify[_\-]?token\s*[=:]\s*['"]?([A-Za-z0-9_\-]{40,})['"]?"#),
         // Database-as-a-service
         pat!("planetscale_token", "CRITICAL", "PlanetScale Token",
              r"\bpscale_tkn_[A-Za-z0-9_]{43}\b"),
         pat!("supabase_key", "CRITICAL", "Supabase Service Role Key",
              r"\bsbp_[A-Za-z0-9]{40}\b"),
+        pat!("neon_token",   "HIGH",     "Neon Database Token",
+             r"\bneon_[A-Za-z0-9_\-]{40,}\b"),
         // Secrets management
         pat!("doppler_token", "CRITICAL", "Doppler Service Token",
              r"\bdp\.pt\.[A-Za-z0-9]{43}\b"),
-        // Project management
-        pat!("linear_key", "HIGH", "Linear API Key",
+        // Project management / Collaboration
+        pat!("linear_key",   "HIGH", "Linear API Key",
              r"\blin_api_[A-Za-z0-9]{40}\b"),
+        pat!("jira_token",   "HIGH", "Atlassian / Jira API Token",
+             r"ATATT[A-Za-z0-9+/=]{28,}"),
+        pat!("confluence_api","HIGH", "Confluence API Token",
+             r"ATCTT[A-Za-z0-9+/=]{28,}"),
+        pat!("asana_token",  "HIGH", "Asana Personal Access Token",
+             r#"(?i)asana[_\-]?(token|pat|access[_\-]?token)\s*[=:]\s*['"]?(0/[A-Za-z0-9]{32})['"]?"#),
+        pat!("notion_token", "HIGH", "Notion Integration Token",
+             r"\bsecret_[A-Za-z0-9]{43}\b"),
+        // Observability / Monitoring
+        pat!("datadog_api",  "HIGH", "Datadog API Key",
+             r#"(?i)datadog[_\-]?api[_\-]?key\s*[=:]\s*['"]?([0-9a-f]{32})['"]?"#),
+        pat!("newrelic_key", "HIGH", "New Relic License Key",
+             r"\bNRAL-[A-Za-z0-9]{32,}\b"),
+        pat!("grafana_token","HIGH", "Grafana Service Account Token",
+             r"\bglsa_[A-Za-z0-9]{32}_[A-Za-z0-9]{8}\b"),
     ];
 
     static ref PLACEHOLDERS: Vec<&'static str> = vec![
@@ -164,12 +241,17 @@ lazy_static! {
         "TODO", "FIXME", "test_", "TEST_", "dummy", "DUMMY",
         "replace", "REPLACE", "sample", "SAMPLE", "fake", "FAKE",
         "00000000", "11111111", "<", ">",
+        // Additional common dev/template placeholders
+        "n/a", "N/A", "none", "NONE", "null", "NULL", "undefined",
+        "my_", "MY_", "enter_", "ENTER_", "set_", "SET_",
+        "fill_", "FILL_", "put_", "PUT_", "add_", "ADD_",
     ];
 
     static ref SENSITIVE_NAMES: Regex = Regex::new(
-        r#"(?i)(\.env|\.env\.|config\.php|wp-config|database\.php|settings\.py|config\.ya?ml|credentials|secrets?\.json|service.account|\.npmrc|\.pypirc|\.netrc|id_rsa|id_ed25519|\.pem|\.key|\.pfx|\.p12|application\.(properties|ya?ml)|docker.compose|\.travis\.yml|\.circleci|\.github/workflows|\.env\.local|\.env\.prod(uction)?|\.env\.staging|\.env\.development|vault\.ya?ml|terraform\.tfvars|\.kubeconfig|kubeconfig|\.htpasswd)"#
+        r#"(?i)(\.env|\.env\.|config\.php|wp-config|database\.php|settings\.py|config\.ya?ml|credentials|secrets?\.json|service.account|\.npmrc|\.pypirc|\.netrc|id_rsa|id_ed25519|id_ecdsa|id_dsa|\.pem|\.key|\.pfx|\.p12|application\.(properties|ya?ml)|docker.compose|\.travis\.yml|\.circleci|\.github/workflows|\.env\.local|\.env\.prod(uction)?|\.env\.staging|\.env\.development|vault\.ya?ml|terraform\.tfvars|\.kubeconfig|kubeconfig|\.htpasswd|\.aws/credentials|\.aws/config|gcloud/credentials|\.config/gcloud|sentry\.properties|\.npmrc|\.yarnrc|Dockerfile|\.kube/config|\.ssh/config|authorized_keys|known_hosts)"#
     ).unwrap();
 }
+
 
 // ════════════════════════════════════════════════
 // TECH STACK
@@ -177,32 +259,38 @@ lazy_static! {
 
 lazy_static! {
     static ref TECH_PATTERNS: Vec<(&'static str, Regex)> = vec![
-        ("Python",     Regex::new(r"requirements\.txt|setup\.py|Pipfile|pyproject\.toml|manage\.py").unwrap()),
-        ("Node.js",    Regex::new(r"package\.json|yarn\.lock|package-lock\.json").unwrap()),
-        ("PHP",        Regex::new(r"composer\.json|composer\.lock|\.php$").unwrap()),
-        ("Ruby",       Regex::new(r"Gemfile|\.ruby-version|\.rb$").unwrap()),
-        ("Java",       Regex::new(r"pom\.xml|build\.gradle|\.java$").unwrap()),
-        ("Go",         Regex::new(r"go\.mod|go\.sum|\.go$").unwrap()),
-        ("Rust",       Regex::new(r"Cargo\.toml|Cargo\.lock|\.rs$").unwrap()),
-        (".NET",       Regex::new(r"\.csproj|\.sln|web\.config").unwrap()),
-        ("Docker",     Regex::new(r"Dockerfile|docker-compose").unwrap()),
-        ("Kubernetes", Regex::new(r"kubectl|\.yaml$").unwrap()),
-        ("Terraform",  Regex::new(r"\.tf$|terraform\.tfvars").unwrap()),
-        ("WordPress",  Regex::new(r"wp-config|wp-content").unwrap()),
-        ("Django",     Regex::new(r"manage\.py|settings\.py|wsgi\.py").unwrap()),
-        ("Laravel",    Regex::new(r"artisan|\.blade\.php").unwrap()),
-        ("React",      Regex::new(r"\.jsx$|\.tsx$").unwrap()),
-        ("Vue",        Regex::new(r"\.vue$|vue\.config").unwrap()),
-        ("Angular",    Regex::new(r"angular\.json|ng-package").unwrap()),
-        // Additional v3 tech patterns
-        ("Svelte",     Regex::new(r"svelte\.config|\.svelte$").unwrap()),
-        ("Next.js",    Regex::new(r"next\.config\.(js|ts)|_next/").unwrap()),
-        ("NestJS",     Regex::new(r"nest-cli\.json|\.module\.ts$").unwrap()),
-        ("FastAPI",    Regex::new(r"\bfastapi\b|\buvicorn\b").unwrap()),
-        ("Spring",     Regex::new(r"pom\.xml|spring-boot|ApplicationContext\.xml").unwrap()),
-        ("Flutter",    Regex::new(r"pubspec\.yaml|\.dart$").unwrap()),
-        ("Ansible",    Regex::new(r"ansible\.cfg|playbook\.ya?ml").unwrap()),
-        ("Helm",       Regex::new(r"Chart\.ya?ml|values\.ya?ml").unwrap()),
+        ("Python",      Regex::new(r"requirements\.txt|setup\.py|Pipfile|pyproject\.toml|manage\.py|tox\.ini").unwrap()),
+        ("Node.js",     Regex::new(r"package\.json|yarn\.lock|package-lock\.json|\.nvmrc").unwrap()),
+        ("PHP",         Regex::new(r"composer\.json|composer\.lock|\.php$").unwrap()),
+        ("Ruby",        Regex::new(r"Gemfile|\.ruby-version|\.rb$|Rakefile").unwrap()),
+        ("Java",        Regex::new(r"pom\.xml|build\.gradle|\.java$|\.jar$").unwrap()),
+        ("Go",          Regex::new(r"go\.mod|go\.sum|\.go$").unwrap()),
+        ("Rust",        Regex::new(r"Cargo\.toml|Cargo\.lock|\.rs$").unwrap()),
+        (".NET",        Regex::new(r"\.csproj|\.sln|web\.config|\.fsproj|\.vbproj").unwrap()),
+        ("Docker",      Regex::new(r"Dockerfile|docker-compose|\.dockerignore").unwrap()),
+        ("Kubernetes",  Regex::new(r"kubectl|\.yaml$|kustomization\.ya?ml").unwrap()),
+        ("Terraform",   Regex::new(r"\.tf$|terraform\.tfvars|\.tfstate").unwrap()),
+        ("WordPress",   Regex::new(r"wp-config|wp-content|wp-includes").unwrap()),
+        ("Django",      Regex::new(r"manage\.py|settings\.py|wsgi\.py|asgi\.py").unwrap()),
+        ("Laravel",     Regex::new(r"artisan|\.blade\.php|bootstrap/app\.php").unwrap()),
+        ("React",       Regex::new(r"\.jsx$|\.tsx$|react-scripts").unwrap()),
+        ("Vue",         Regex::new(r"\.vue$|vue\.config|vuex").unwrap()),
+        ("Angular",     Regex::new(r"angular\.json|ng-package|\.component\.ts$").unwrap()),
+        ("Svelte",      Regex::new(r"svelte\.config|\.svelte$").unwrap()),
+        ("Next.js",     Regex::new(r"next\.config\.(js|ts)|_next/|\.next/").unwrap()),
+        ("NestJS",      Regex::new(r"nest-cli\.json|\.module\.ts$|\.controller\.ts$").unwrap()),
+        ("FastAPI",     Regex::new(r"\bfastapi\b|\buvicorn\b").unwrap()),
+        ("Spring",      Regex::new(r"pom\.xml|spring-boot|ApplicationContext\.xml|application\.properties").unwrap()),
+        ("Flutter",     Regex::new(r"pubspec\.yaml|\.dart$").unwrap()),
+        ("Ansible",     Regex::new(r"ansible\.cfg|playbook\.ya?ml|inventory\.ya?ml").unwrap()),
+        ("Helm",        Regex::new(r"Chart\.ya?ml|values\.ya?ml|templates/").unwrap()),
+        ("Elixir",      Regex::new(r"mix\.exs|mix\.lock|\.ex$|\.exs$").unwrap()),
+        ("Kotlin",      Regex::new(r"\.kt$|\.kts$|build\.gradle\.kts").unwrap()),
+        ("Swift",       Regex::new(r"\.swift$|Package\.swift|Podfile").unwrap()),
+        ("Scala",       Regex::new(r"\.scala$|build\.sbt|\.sc$").unwrap()),
+        ("Haskell",     Regex::new(r"\.hs$|\.cabal$|stack\.yaml").unwrap()),
+        ("Pulumi",      Regex::new(r"Pulumi\.ya?ml|Pulumi\..*\.ya?ml").unwrap()),
+        ("CDK",         Regex::new(r"cdk\.json|aws-cdk").unwrap()),
     ];
 }
 
@@ -758,8 +846,8 @@ mod tests {
         let content = "GOOGLE_KEY=AIzaSyC1234567890abcdefghijklmnop123456";
         let findings = scan_content(content, "config.js", "a".repeat(40).as_str(), false);
         assert!(
-            findings.iter().any(|f| f.pattern_id == "google_api_key"),
-            "Should detect Google API Key"
+            findings.iter().any(|f| f.pattern_id == "gcp_api_key"),
+            "Should detect Google/GCP API Key"
         );
     }
 
@@ -993,5 +1081,134 @@ mod tests {
         let mut tech = Vec::new();
         collect_tech("Chart.yaml", &mut tech);
         assert!(tech.contains(&"Helm".to_string()), "Should detect Helm");
+    }
+
+    #[test]
+    fn test_collect_tech_elixir() {
+        let mut tech = Vec::new();
+        collect_tech("mix.exs", &mut tech);
+        assert!(tech.contains(&"Elixir".to_string()), "Should detect Elixir");
+    }
+
+    #[test]
+    fn test_collect_tech_kotlin() {
+        let mut tech = Vec::new();
+        collect_tech("build.gradle.kts", &mut tech);
+        assert!(tech.contains(&"Kotlin".to_string()), "Should detect Kotlin");
+    }
+
+    #[test]
+    fn test_collect_tech_swift() {
+        let mut tech = Vec::new();
+        collect_tech("Package.swift", &mut tech);
+        assert!(tech.contains(&"Swift".to_string()), "Should detect Swift");
+    }
+
+    // ── New secret pattern tests ─────────────────
+
+    #[test]
+    fn test_scan_content_finds_shopify_token() {
+        let content = format!("SHOPIFY_TOKEN=shpat_{}", "A".repeat(32));
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false);
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "shopify_token"),
+            "Should detect Shopify Admin API token"
+        );
+    }
+
+    #[test]
+    fn test_scan_content_finds_jira_token() {
+        let content = format!("JIRA_TOKEN=ATATT{}", "A".repeat(30));
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false);
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "jira_token"),
+            "Should detect Atlassian/Jira API token"
+        );
+    }
+
+    #[test]
+    fn test_scan_content_finds_sentry_dsn() {
+        let dsn = format!("https://{}@o1234.ingest.sentry.io/5678", "a".repeat(32));
+        let content = format!("SENTRY_DSN={}", dsn);
+        let findings = scan_content(&content, "sentry.properties", "a".repeat(40).as_str(), false);
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "sentry_dsn"),
+            "Should detect Sentry DSN"
+        );
+    }
+
+    #[test]
+    fn test_scan_content_finds_cloudinary_url() {
+        let content = "CLOUDINARY_URL=cloudinary://apikey:apisecret@cloudname";
+        let findings = scan_content(content, ".env", "a".repeat(40).as_str(), false);
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "cloudinary_url"),
+            "Should detect Cloudinary credentials URL"
+        );
+    }
+
+    #[test]
+    fn test_scan_content_finds_notion_token() {
+        let content = format!("NOTION_TOKEN=secret_{}", "A".repeat(43));
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false);
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "notion_token"),
+            "Should detect Notion integration token"
+        );
+    }
+
+    #[test]
+    fn test_scan_content_finds_grafana_token() {
+        let content = format!("GRAFANA_TOKEN=glsa_{}_ABCD1234", "A".repeat(32));
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false);
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "grafana_token"),
+            "Should detect Grafana service account token"
+        );
+    }
+
+    #[test]
+    fn test_scan_content_finds_mongodb_atlas_uri() {
+        let content = "MONGO_URI=mongodb+srv://user:password@cluster.mongodb.net/db";
+        let findings = scan_content(content, ".env", "a".repeat(40).as_str(), false);
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "mongodb_atlas"),
+            "Should detect MongoDB Atlas connection string"
+        );
+    }
+
+    #[test]
+    fn test_scan_content_finds_discord_webhook() {
+        let content = format!("DISCORD_WEBHOOK=https://discord.com/api/webhooks/123456789012345678/{}", "A".repeat(68));
+        let findings = scan_content(&content, "config.js", "a".repeat(40).as_str(), false);
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "discord_webhook"),
+            "Should detect Discord webhook URL"
+        );
+    }
+
+    #[test]
+    fn test_placeholder_extended() {
+        assert!(is_placeholder("null_token"), "null_ prefix should be a placeholder");
+        assert!(is_placeholder("my_secret_key"), "my_ prefix should be a placeholder");
+        assert!(is_placeholder("ENTER_VALUE_HERE"), "ENTER_ prefix should be a placeholder");
+        assert!(!is_placeholder("ghp_REALTOKEN123456789012345678901234567"));
+    }
+
+    #[test]
+    fn test_sensitive_names_ssh_config() {
+        assert!(is_sensitive_file(".ssh/config"), ".ssh/config should be sensitive");
+        assert!(is_sensitive_file("authorized_keys"), "authorized_keys should be sensitive");
+    }
+
+    #[test]
+    fn test_sensitive_names_aws_credentials() {
+        assert!(is_sensitive_file(".aws/credentials"), ".aws/credentials should be sensitive");
+        assert!(is_sensitive_file(".aws/config"), ".aws/config should be sensitive");
+    }
+
+    #[test]
+    fn test_sensitive_names_id_ecdsa() {
+        assert!(is_sensitive_file("id_ecdsa"), "id_ecdsa private key file should be sensitive");
     }
 }

@@ -10,33 +10,51 @@ use crate::git_parser::{parse_head, GitConfigParser, PackedRefsParser};
 type Verifier = fn(&[u8]) -> bool;
 
 const PROBES: &[(&str, Verifier, u32)] = &[
-    ("HEAD",           |b| b.windows(9).any(|w| w == b"ref: refs") || (b.len() >= 40 && b[..40].iter().all(|&c| c.is_ascii_hexdigit())), 40),
-    ("config",         |b| b.windows(6).any(|w| w == b"[core]"),  30),
-    ("packed-refs",    |b| b.iter().any(|&c| c.is_ascii_hexdigit()), 15),
-    ("index",          |b| b.len() >= 4 && &b[..4] == b"DIRC",    20),
-    ("logs/HEAD",      |b| b.iter().any(|&c| c.is_ascii_hexdigit()), 10),
-    ("COMMIT_EDITMSG", |b| !b.trim_ascii().is_empty(),              5),
+    ("HEAD",              |b| b.windows(9).any(|w| w == b"ref: refs") || (b.len() >= 40 && b[..40].iter().all(|&c| c.is_ascii_hexdigit())), 40),
+    ("config",            |b| b.windows(6).any(|w| w == b"[core]"),  30),
+    ("packed-refs",       |b| b.iter().any(|&c| c.is_ascii_hexdigit()), 15),
+    ("index",             |b| b.len() >= 4 && &b[..4] == b"DIRC",    20),
+    ("logs/HEAD",         |b| b.iter().any(|&c| c.is_ascii_hexdigit()), 10),
+    ("COMMIT_EDITMSG",    |b| !b.trim_ascii().is_empty(),              5),
+    // Objects tree confirms readable object storage — strongest corroboration after HEAD
+    ("objects/info/packs",|b| b.windows(2).any(|w| w == b"P "),      10),
 ];
 
-const TOTAL_WEIGHT: u32 = 40 + 30 + 15 + 20 + 10 + 5;
+const TOTAL_WEIGHT: u32 = 40 + 30 + 15 + 20 + 10 + 5 + 10;
 
 // Non-root .git locations
 const PATH_VARIANTS: &[&str] = &[
     ".git",
+    // API versioned paths
     "api/.git", "v1/.git", "v2/.git", "v3/.git",
+    "api/v1/.git", "api/v2/.git",
+    // Common subdirectory layouts
     "admin/.git", "backend/.git", "app/.git",
     "web/.git", "www/.git", "public/.git",
     "src/.git", "portal/.git", "wp-content/.git",
-    // Additional v3 paths
+    "frontend/.git", "server/.git", "client/.git",
+    "core/.git", "libs/.git", "service/.git",
+    "mobile/.git", "static/.git", "uploads/.git",
+    "storage/.git", "dashboard/.git",
+    // Azure DevOps bare-repo style
     "_git",
     "git",
+    // Build output paths
     "dist/.git", "build/.git", "assets/.git",
     "website/.git", "cms/.git",
+    // Backup / typo exposures
     ".git.bak", ".git.old",
+    // Numeric versioned roots
+    "v4/.git", "v5/.git",
 ];
 
 /// Minimum confidence score to report a DetectResult.
 const MIN_CONFIDENCE: u32 = 20;
+
+/// A 403 on HEAD means the path exists but the server is blocking directory traversal.
+/// We report this as a low-confidence result so the operator knows the endpoint exists.
+const PROTECTED_CONFIDENCE: u32 = 25;
+const PROTECTED_LABEL: &str = "PROTECTED";
 
 #[derive(Debug, Clone)]
 pub struct ProbeDetail {
@@ -105,6 +123,10 @@ async fn detect_server(client: &HttpClient, url: &str) -> String {
         ("Cloudflare", &["cloudflare"][..]),
         ("Vercel",     &["vercel"][..]),
         ("Netlify",    &["netlify"][..]),
+        ("Gunicorn",   &["gunicorn"][..]),
+        ("PHP",        &["php"][..]),
+        ("OpenResty",  &["openresty"][..]),
+        ("Traefik",    &["traefik"][..]),
     ];
     for (name, pats) in &servers {
         if pats.iter().any(|p| sv.contains(p)) {
@@ -123,7 +145,8 @@ async fn check_listing(client: &HttpClient, git_url: &str) -> bool {
     }
     let t = resp.text().to_lowercase();
     ["index of", "parent directory", "href=\"head\"", "href=\"config\"",
-     "href=\"objects/\"", "directory listing"]
+     "href=\"objects/\"", "directory listing", "\"head\"", "\"config\"",
+     ">objects/<", ">packed-refs<"]
         .iter()
         .any(|kw| t.contains(kw))
 }
@@ -176,8 +199,26 @@ async fn probe_one_path(
             valid,
         });
 
-        // Fast-fail: if HEAD is not accessible this path is invalid
+        // Fast-fail: if HEAD returns 404/0, this path doesn't exist.
+        // A 403 on HEAD means the directory exists but is access-controlled — report it.
         if path == "HEAD" && !ok {
+            if resp.status == 403 {
+                // .git exists but is protected — still worth reporting
+                let server  = detect_server(client, base_url).await;
+                let listing = false;
+                return Some(DetectResult {
+                    url: base_url.to_string(),
+                    git_url,
+                    confidence: PROTECTED_CONFIDENCE,
+                    label: PROTECTED_LABEL.to_string(),
+                    listing,
+                    server,
+                    branch: None,
+                    remote_url: None,
+                    head_sha1: None,
+                    probes: details,
+                });
+            }
             return None;
         }
     }
@@ -217,7 +258,9 @@ pub async fn run(
             .filter(|b| b.confidence >= MIN_CONFIDENCE);
     }
 
-    // Fuzz mode: probe all path variants concurrently for speed
+    // Fuzz mode: probe all path variants concurrently for speed.
+    // We launch all tasks at once and collect results as they complete,
+    // stopping early if a CONFIRMED result (≥ 90%) is found.
     let mut handles = Vec::new();
     for &git_path in PATH_VARIANTS {
         let client = client.clone();
@@ -233,7 +276,12 @@ pub async fn run(
         if let Ok(Some(r)) = h.await {
             let better = best.as_ref().map_or(true, |b: &DetectResult| r.confidence > b.confidence);
             if better {
+                let confirmed = r.confidence >= 90;
                 best = Some(r);
+                // Early exit: no need to wait for remaining tasks once we have a CONFIRMED result
+                if confirmed {
+                    break;
+                }
             }
         }
     }
@@ -268,6 +316,38 @@ mod tests {
     }
 
     #[test]
+    fn test_path_variants_contains_api_versioned() {
+        assert!(PATH_VARIANTS.contains(&"api/v1/.git"), "api/v1/.git must be in PATH_VARIANTS");
+        assert!(PATH_VARIANTS.contains(&"api/v2/.git"), "api/v2/.git must be in PATH_VARIANTS");
+    }
+
+    #[test]
+    fn test_path_variants_contains_common_subdirs() {
+        assert!(PATH_VARIANTS.contains(&"frontend/.git"), "frontend/.git must be in PATH_VARIANTS");
+        assert!(PATH_VARIANTS.contains(&"server/.git"),   "server/.git must be in PATH_VARIANTS");
+        assert!(PATH_VARIANTS.contains(&"client/.git"),   "client/.git must be in PATH_VARIANTS");
+        assert!(PATH_VARIANTS.contains(&"mobile/.git"),   "mobile/.git must be in PATH_VARIANTS");
+        assert!(PATH_VARIANTS.contains(&"static/.git"),   "static/.git must be in PATH_VARIANTS");
+        assert!(PATH_VARIANTS.contains(&"uploads/.git"),  "uploads/.git must be in PATH_VARIANTS");
+        assert!(PATH_VARIANTS.contains(&"storage/.git"),  "storage/.git must be in PATH_VARIANTS");
+        assert!(PATH_VARIANTS.contains(&"dashboard/.git"),"dashboard/.git must be in PATH_VARIANTS");
+    }
+
+    #[test]
+    fn test_probes_contains_objects_info_packs() {
+        assert!(
+            PROBES.iter().any(|(p, _, _)| *p == "objects/info/packs"),
+            "PROBES must include objects/info/packs for pack file discovery"
+        );
+    }
+
+    #[test]
+    fn test_total_weight_matches_probe_sum() {
+        let computed: u32 = PROBES.iter().map(|(_, _, w)| w).sum();
+        assert_eq!(computed, TOTAL_WEIGHT, "TOTAL_WEIGHT must equal sum of probe weights");
+    }
+
+    #[test]
     fn test_label_thresholds() {
         assert_eq!(label(100), "CONFIRMED");
         assert_eq!(label(90),  "CONFIRMED");
@@ -275,5 +355,13 @@ mod tests {
         assert_eq!(label(45),  "MEDIUM");
         assert_eq!(label(20),  "LOW");
         assert_eq!(label(10),  "NONE");
+    }
+
+    #[test]
+    fn test_protected_confidence_is_above_min() {
+        assert!(
+            PROTECTED_CONFIDENCE >= MIN_CONFIDENCE,
+            "PROTECTED_CONFIDENCE must be at least MIN_CONFIDENCE so protected results are reported"
+        );
     }
 }

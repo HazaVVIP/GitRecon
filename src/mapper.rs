@@ -29,6 +29,7 @@ const META_FILES: &[&str] = &[
     "rebase-merge/head-name",
     "config.worktree",
     "shallow",
+    // Standard branch refs
     "refs/heads/master",
     "refs/heads/main",
     "refs/heads/develop",
@@ -37,19 +38,36 @@ const META_FILES: &[&str] = &[
     "refs/heads/production",
     "refs/heads/release",
     "refs/heads/hotfix",
+    "refs/heads/test",
+    "refs/heads/beta",
+    "refs/heads/feature",
+    "refs/heads/fix",
+    "refs/heads/next",
+    "refs/heads/trunk",
+    // Remote tracking refs
     "refs/remotes/origin/HEAD",
     "refs/remotes/origin/master",
     "refs/remotes/origin/main",
     "refs/remotes/origin/develop",
+    "refs/remotes/origin/staging",
+    "refs/remotes/origin/production",
+    // Stash
     "refs/stash",
+    // Log files
     "logs/refs/heads/master",
     "logs/refs/heads/main",
     "logs/refs/heads/develop",
     "logs/refs/remotes/origin/HEAD",
+    // Pack/object discovery
     "objects/info/packs",
+    // Smart-HTTP info refs
     "info/refs",
+    // Work-in-progress refs (VS Code, Gerrit)
     "refs/wip/index/refs/heads/master",
     "refs/wip/wtree/refs/heads/master",
+    // Submodule and attribute metadata
+    ".gitmodules",
+    ".gitattributes",
 ];
 
 const SIZE_PER_BLOB: usize = 4 * 1024; // ~4 KB average
@@ -270,11 +288,26 @@ impl Mapper {
                 let text = String::from_utf8_lossy(body).trim().to_string();
                 if SHA40_RE.is_match(&text) {
                     sha1s.insert(text);
+                } else {
+                    // Multi-line ref files (e.g. info/refs format in some bare repos)
+                    sha1s.extend(extract_sha1s(&String::from_utf8_lossy(body)));
                 }
             } else if path == "info/refs" {
-                // info/refs lists all refs as "<sha1>\t<refname>"
+                // info/refs lists all refs as "<sha1>\t<refname>"; also extract branch names
                 let text = String::from_utf8_lossy(body);
                 sha1s.extend(extract_sha1s(&text));
+                for line in text.lines() {
+                    let parts: Vec<&str> = line.splitn(2, '\t').collect();
+                    if parts.len() == 2 {
+                        let ref_name = parts[1].trim();
+                        if let Some(br) = ref_name.strip_prefix("refs/heads/") {
+                            let br = br.to_string();
+                            if !result.branches.contains(&br) {
+                                result.branches.push(br);
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -289,6 +322,25 @@ impl Mapper {
             if let Some(body) = meta.get(*file) {
                 let text = String::from_utf8_lossy(body);
                 sha1s.extend(extract_sha1s(&text));
+            }
+        }
+
+        // 8b. Parse .gitmodules for submodule remote URLs
+        if let Some(raw) = meta.get(".gitmodules") {
+            let text = String::from_utf8_lossy(raw);
+            let cfg_parser = GitConfigParser;
+            let cfg = cfg_parser.parse(&text);
+            for (sec, data) in &cfg {
+                if sec.starts_with("submodule.") {
+                    if let Some(url) = data.get("url") {
+                        let mut m = std::collections::HashMap::new();
+                        m.insert("remote".into(), sec.clone());
+                        m.insert("url".into(), url.clone());
+                        if !result.remote_urls.iter().any(|r| r.get("url") == Some(url)) {
+                            result.remote_urls.push(m);
+                        }
+                    }
+                }
             }
         }
 
@@ -397,5 +449,36 @@ mod tests {
     #[test]
     fn test_meta_files_contains_config_worktree() {
         assert!(META_FILES.contains(&"config.worktree"), "config.worktree must be in META_FILES");
+    }
+
+    #[test]
+    fn test_meta_files_contains_gitmodules() {
+        assert!(META_FILES.contains(&".gitmodules"), ".gitmodules must be in META_FILES for submodule detection");
+    }
+
+    #[test]
+    fn test_meta_files_contains_gitattributes() {
+        assert!(META_FILES.contains(&".gitattributes"), ".gitattributes must be in META_FILES");
+    }
+
+    #[test]
+    fn test_meta_files_contains_extended_branch_refs() {
+        assert!(META_FILES.contains(&"refs/heads/test"),  "refs/heads/test must be in META_FILES");
+        assert!(META_FILES.contains(&"refs/heads/beta"),  "refs/heads/beta must be in META_FILES");
+        assert!(META_FILES.contains(&"refs/heads/trunk"), "refs/heads/trunk must be in META_FILES");
+        assert!(META_FILES.contains(&"refs/heads/next"),  "refs/heads/next must be in META_FILES");
+    }
+
+    #[test]
+    fn test_meta_files_contains_remote_tracking_refs() {
+        assert!(META_FILES.contains(&"refs/remotes/origin/staging"),    "staging remote ref must be in META_FILES");
+        assert!(META_FILES.contains(&"refs/remotes/origin/production"), "production remote ref must be in META_FILES");
+    }
+
+    #[test]
+    fn test_map_result_size_human_gb() {
+        let mut r = MapResult::default();
+        r.estimated_bytes = 2 * 1024 * 1024 * 1024;
+        assert!(r.size_human().contains("GB"), "sizes ≥ 1 GiB should use GB suffix");
     }
 }
