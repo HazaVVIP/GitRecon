@@ -187,6 +187,9 @@ lazy_static! {
         // WordPress / PHP — define('KEY', 'value') with comma separator
         pat!("wp_define", "CRITICAL", "WordPress Config Credential",
              r#"(?i)define\s*\(\s*['"](?:DB_PASSWORD|DB_USER|DB_HOST|DB_NAME|AUTH_KEY|SECURE_AUTH_KEY|LOGGED_IN_KEY|NONCE_KEY|AUTH_SALT|SECURE_AUTH_SALT|LOGGED_IN_SALT|NONCE_SALT|SECRET_KEY|SECRET_SALT)['"]\s*,\s*['"]([^'"]{4,})['"]"#),
+        // Generic PHP define() — catches define('..._KEY', ...), define('..._SECRET', ...), etc.
+        pat!("php_define_secret", "HIGH", "PHP define() Secret/Key/Token",
+             r#"(?i)define\s*\(\s*['"][A-Z0-9_]*(?:SECRET|KEY|TOKEN|PASSWORD|PASSWD|CREDENTIAL|AUTH)[A-Z0-9_]*['"]\s*,\s*['"]([^'"]{8,})['"]"#),
         // Django / Flask
         pat!("django_secret", "CRITICAL", "Django/Flask SECRET_KEY",
              r#"(?i)SECRET_KEY\s*=\s*['"]([^'"]{20,})['"]"#),
@@ -1365,6 +1368,67 @@ mod tests {
         assert!(
             !findings.iter().any(|f| f.pattern_id == "wp_define"),
             "WordPress AUTH_KEY with placeholder value 'put your unique phrase here' must be filtered"
+        );
+    }
+
+    #[test]
+    fn test_scan_content_finds_php_define_aws_key() {
+        let content = r#"define('AWS_KEY', 'CQITEE7X4TT318J00PWC');"#;
+        let findings = scan_content(content, "config.php", "a".repeat(40).as_str(), false, &[]);
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "php_define_secret"),
+            "Should detect define() with AWS_KEY"
+        );
+    }
+
+    #[test]
+    fn test_scan_content_finds_php_define_aws_secret_key() {
+        let content = r#"define('AWS_SECRET_KEY', 'GmZvCzpcTTczGfApjlhoycln0SzNGCoQEbJtbUPa');"#;
+        let findings = scan_content(content, "config.php", "a".repeat(40).as_str(), false, &[]);
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "php_define_secret"),
+            "Should detect define() with AWS_SECRET_KEY"
+        );
+    }
+
+    #[test]
+    fn test_scan_content_finds_php_define_auth_token_secret() {
+        let content = r#"define('AUTH_TOKEN_SECRET', 'jq6uik0LxAPCUBIHlHk3usBEZ8pJf9t9');"#;
+        let findings = scan_content(content, "config.php", "a".repeat(40).as_str(), false, &[]);
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "php_define_secret"),
+            "Should detect define() with AUTH_TOKEN_SECRET"
+        );
+    }
+
+    #[test]
+    fn test_scan_content_php_define_ignores_non_secret_keys() {
+        // BUCKET_NAME and ENDPOINT don't contain secret-related keywords
+        let content = r#"define('BUCKET_NAME', 'developer-request');"#;
+        let findings = scan_content(content, "config.php", "a".repeat(40).as_str(), false, &[]);
+        assert!(
+            !findings.iter().any(|f| f.pattern_id == "php_define_secret"),
+            "Should NOT detect define() with non-secret key name BUCKET_NAME"
+        );
+    }
+
+    #[test]
+    fn test_scan_content_php_define_ignores_short_values() {
+        let content = r#"define('API_KEY', 'short');"#;
+        let findings = scan_content(content, "config.php", "a".repeat(40).as_str(), false, &[]);
+        assert!(
+            !findings.iter().any(|f| f.pattern_id == "php_define_secret"),
+            "Should NOT detect define() with value shorter than 8 chars"
+        );
+    }
+
+    #[test]
+    fn test_scan_content_php_define_placeholder_is_filtered() {
+        let content = r#"define('API_KEY', 'your_api_key_here_placeholder');"#;
+        let findings = scan_content(content, "config.php", "a".repeat(40).as_str(), false, &[]);
+        assert!(
+            !findings.iter().any(|f| f.pattern_id == "php_define_secret"),
+            "Placeholder value in define() should be filtered"
         );
     }
 
