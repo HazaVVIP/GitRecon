@@ -174,7 +174,7 @@ Phase 1 — DETECT        Phase 2 — MAP           Phase 3 — STREAM & SCAN   
 | `main.rs` | ~330 | CLI parsing (clap), phase orchestration, configuration |
 | `detect.rs` | ~410 | Phase 1 — probe 8 metadata files, confidence scoring (0–100 %), fuzz 24+ paths |
 | `mapper.rs` | ~480 | Phase 2 — fetch 71 metadata files, collect SHA1s, parse pack indexes (v1 & v2) |
-| `streamer.rs` | ~2 000 | Phase 3 — concurrent fetch, 75+ secret patterns, Shannon entropy, YAML multi-line, minified JS |
+| `streamer.rs` | ~2000 | Phase 3 — concurrent fetch, 75+ secret patterns, Shannon entropy, YAML multi-line, minified JS |
 | `reporter.rs` | ~290 | Phase 4 — risk score, coloured terminal output, JSON report |
 | `git_parser.rs` | ~550 | Git object parser (loose objects, DIRC index v2–v4, pack index v1/v2, packed-refs, config) |
 | `http_client.rs` | ~200 | HTTP wrapper — exponential backoff, proxy (SOCKS5/HTTP), rate limiting, UA rotation |
@@ -196,7 +196,8 @@ Phase 1 — DETECT        Phase 2 — MAP           Phase 3 — STREAM & SCAN   
 ## Development Framework
 
 > **Panduan pengembangan GitRecon** — hasil audit arsitektur v3.0.0.  
-> Dokumen ini menggantikan riset lama (STREAMING_SCANNING_RESEARCH.md) yang sebagian besar sudah diimplementasikan.
+> Dokumen ini menggantikan riset lama (STREAMING_SCANNING_RESEARCH.md) yang sebagian besar sudah diimplementasikan.  
+> Item yang belum diimplementasikan dari dokumen lama telah dimasukkan ke dalam roadmap di bawah ini.
 
 ### Status Implementasi Saat Ini
 
@@ -230,7 +231,7 @@ Peningkatan di bawah ini diurutkan berdasarkan **dampak × kompleksitas**. Setia
 
 #### Tahap 1 — Resilience & Reliability
 
-> Tujuan: menjadikan GitRecon andal untuk target besar (>10 000 objek) dan koneksi tidak stabil.
+> Tujuan: menjadikan GitRecon andal untuk target besar (>10000 objek) dan koneksi tidak stabil.
 
 | ID | Peningkatan | Deskripsi | Prioritas |
 |---|---|---|---|
