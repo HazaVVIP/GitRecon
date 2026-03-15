@@ -29,6 +29,9 @@ const META_FILES: &[&str] = &[
     "rebase-merge/head-name",
     "config.worktree",
     "shallow",
+    // Repository metadata
+    "description",
+    "info/exclude",
     // Standard branch refs
     "refs/heads/master",
     "refs/heads/main",
@@ -44,6 +47,13 @@ const META_FILES: &[&str] = &[
     "refs/heads/fix",
     "refs/heads/next",
     "refs/heads/trunk",
+    // Common tag refs (gitdumper parity)
+    "refs/tags/latest",
+    "refs/tags/v1",
+    "refs/tags/v2",
+    "refs/tags/v1.0",
+    "refs/tags/v1.0.0",
+    "refs/tags/v2.0.0",
     // Remote tracking refs
     "refs/remotes/origin/HEAD",
     "refs/remotes/origin/master",
@@ -51,6 +61,9 @@ const META_FILES: &[&str] = &[
     "refs/remotes/origin/develop",
     "refs/remotes/origin/staging",
     "refs/remotes/origin/production",
+    // Remote tracking for common non-default remotes
+    "refs/remotes/upstream/HEAD",
+    "refs/remotes/upstream/main",
     // Stash
     "refs/stash",
     // Log files
@@ -60,8 +73,9 @@ const META_FILES: &[&str] = &[
     "logs/refs/remotes/origin/HEAD",
     // Pack/object discovery
     "objects/info/packs",
-    // Smart-HTTP info refs
+    // Smart-HTTP info refs (dumb + smart protocol)
     "info/refs",
+    "info/refs?service=git-upload-pack",
     // Work-in-progress refs (VS Code, Gerrit)
     "refs/wip/index/refs/heads/master",
     "refs/wip/wtree/refs/heads/master",
@@ -480,5 +494,36 @@ mod tests {
         let mut r = MapResult::default();
         r.estimated_bytes = 2 * 1024 * 1024 * 1024;
         assert!(r.size_human().contains("GB"), "sizes ≥ 1 GiB should use GB suffix");
+    }
+
+    // ── V3.1 metadata probe tests ────────────────
+
+    #[test]
+    fn test_meta_files_contains_description() {
+        assert!(META_FILES.contains(&"description"), "description should be in META_FILES");
+    }
+
+    #[test]
+    fn test_meta_files_contains_info_exclude() {
+        assert!(META_FILES.contains(&"info/exclude"), "info/exclude should be in META_FILES");
+    }
+
+    #[test]
+    fn test_meta_files_contains_smart_http_refs() {
+        assert!(
+            META_FILES.contains(&"info/refs?service=git-upload-pack"),
+            "Smart HTTP info/refs endpoint should be in META_FILES"
+        );
+    }
+
+    #[test]
+    fn test_meta_files_contains_tag_refs() {
+        assert!(META_FILES.contains(&"refs/tags/latest"), "refs/tags/latest should be in META_FILES");
+        assert!(META_FILES.contains(&"refs/tags/v1.0.0"), "refs/tags/v1.0.0 should be in META_FILES");
+    }
+
+    #[test]
+    fn test_meta_files_contains_upstream_remote() {
+        assert!(META_FILES.contains(&"refs/remotes/upstream/HEAD"), "upstream/HEAD should be in META_FILES");
     }
 }
