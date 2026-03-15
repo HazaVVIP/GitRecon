@@ -367,7 +367,7 @@ lazy_static! {
         pat!("contentful_token","HIGH",    "Contentful Delivery/Management Token",
              r"\bCFPAT-[A-Za-z0-9_\-]{43}\b"),
         pat!("sanity_token",    "HIGH",    "Sanity API Token",
-             r"\bsk[A-Za-z0-9]{60,}\b"),
+             r"\bskC[A-Za-z0-9]{60,}\b"),
         // Productivity / SaaS
         pat!("airtable_key",   "HIGH",     "Airtable API Key / PAT",
              r"\bpat[A-Za-z0-9]{14}\.[0-9a-f]{64}\b"),

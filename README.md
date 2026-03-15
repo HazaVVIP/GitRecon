@@ -3,7 +3,7 @@
 **GitRecon** is a high-performance, streaming Git exposure scanner written in Rust.  
 It detects exposed `.git` directories on web servers and recovers secrets, credentials, and source code hidden inside — all in memory, without writing to disk.
 
-**v3.0.0** · 110 secret patterns · 46 metadata probes · 48 tech stack fingerprints · ~4400 lines of Rust
+**v3.1.0** · 127 secret patterns · 61 metadata probes · 59 tech stack fingerprints · ~4800 lines of Rust
 
 ---
 
