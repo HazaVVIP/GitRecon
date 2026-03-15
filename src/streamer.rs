@@ -348,6 +348,45 @@ lazy_static! {
         // Platform
         pat!("railway_token",   "HIGH",     "Railway API Token",
              r#"(?i)railway[_\-]?token\s*[=:]\s*['"]?([A-Za-z0-9_\-]{40,})"#),
+        // GitHub fine-grained PAT (new format)
+        pat!("github_fine_pat", "CRITICAL", "GitHub Fine-Grained Personal Access Token",
+             r"github_pat_[A-Za-z0-9_]{82}"),
+        // AI providers — extended
+        pat!("groq_key",       "CRITICAL", "Groq API Key",
+             r"\bgsk_[A-Za-z0-9]{52}\b"),
+        pat!("mistral_key",    "CRITICAL", "Mistral API Key",
+             r#"(?i)mistral[_\-]?api[_\-]?key\s*[=:]\s*['"]?([A-Za-z0-9]{32})"#),
+        pat!("replicate_token","CRITICAL", "Replicate API Token",
+             r"\br8_[A-Za-z0-9]{40}\b"),
+        // Auth / Identity
+        pat!("auth0_secret",   "CRITICAL", "Auth0 Client Secret",
+             r#"(?i)auth0[_\-]?client[_\-]?secret\s*[=:]\s*['"]?([A-Za-z0-9_\-]{32,})"#),
+        pat!("clerk_secret",   "CRITICAL", "Clerk Secret Key",
+             r"\bsk_live_[A-Za-z0-9]{27,}\b"),
+        // CMS / Headless
+        pat!("contentful_token","HIGH",    "Contentful Delivery/Management Token",
+             r"\bCFPAT-[A-Za-z0-9_\-]{43}\b"),
+        pat!("sanity_token",    "HIGH",    "Sanity API Token",
+             r"\bskC[A-Za-z0-9]{60,}\b"),
+        // Productivity / SaaS
+        pat!("airtable_key",   "HIGH",     "Airtable API Key / PAT",
+             r"\bpat[A-Za-z0-9]{14}\.[0-9a-f]{64}\b"),
+        pat!("postman_key",    "HIGH",     "Postman API Key",
+             r"\bPMAK-[A-Za-z0-9]{24}-[A-Za-z0-9]{34}\b"),
+        pat!("snyk_token",     "HIGH",     "Snyk API Token",
+             r#"(?i)snyk[_\-]?token\s*[=:]\s*['"]?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"#),
+        // Cloud — Tencent
+        pat!("tencent_secret_id", "CRITICAL", "Tencent Cloud SecretId",
+             r"\bAKID[A-Za-z0-9]{32}\b"),
+        // Encryption
+        pat!("age_secret_key", "CRITICAL", "Age Encryption Secret Key",
+             r"AGE-SECRET-KEY-1[QPZRY9X8GF2TVDW0S3JN54KHCE6MUA7L]{58}"),
+        // AWS extended
+        pat!("aws_session",    "HIGH",     "AWS Session Token",
+             r#"(?i)aws[_\-\s]?session[_\-\s]?token\s*[=:]\s*['"]?([A-Za-z0-9/+=]{100,})['"]?"#),
+        // Docker
+        pat!("docker_config_auth", "CRITICAL", "Docker Registry Auth (Base64)",
+             r#""auth"\s*:\s*"([A-Za-z0-9+/=]{20,})""#),
     ];
 
     static ref PLACEHOLDERS: Vec<&'static str> = vec![
@@ -371,7 +410,7 @@ lazy_static! {
     ];
 
     static ref SENSITIVE_NAMES: Regex = Regex::new(
-        r#"(?i)(\.env|\.env\.|config\.php|wp-config|database\.php|settings\.py|config\.ya?ml|credentials|secrets?\.json|service.account|\.npmrc|\.pypirc|\.netrc|id_rsa|id_ed25519|id_ecdsa|id_dsa|\.pem|\.key|\.pfx|\.p12|application\.(properties|ya?ml)|docker.compose|\.travis\.yml|\.circleci|\.github/workflows|\.env\.local|\.env\.prod(uction)?|\.env\.staging|\.env\.development|vault\.ya?ml|terraform\.tfvars|\.kubeconfig|kubeconfig|\.htpasswd|\.aws/credentials|\.aws/config|gcloud/credentials|\.config/gcloud|sentry\.properties|\.npmrc|\.yarnrc|Dockerfile|\.kube/config|\.ssh/config|authorized_keys|known_hosts)"#
+        r#"(?i)(\.env|\.env\.|config\.php|wp-config|database\.php|settings\.py|config\.ya?ml|credentials|secrets?\.json|service.account|\.npmrc|\.pypirc|\.netrc|id_rsa|id_ed25519|id_ecdsa|id_dsa|\.pem|\.key|\.pfx|\.p12|application\.(properties|ya?ml)|docker.compose|\.travis\.yml|\.circleci|\.github/workflows|\.env\.local|\.env\.prod(uction)?|\.env\.staging|\.env\.development|vault\.ya?ml|terraform\.tfvars|\.kubeconfig|kubeconfig|\.htpasswd|\.aws/credentials|\.aws/config|gcloud/credentials|\.config/gcloud|sentry\.properties|\.npmrc|\.yarnrc|Dockerfile|\.kube/config|\.ssh/config|authorized_keys|known_hosts|\.docker/config\.json|\.terraform/|\.gradle/gradle\.properties|\.m2/settings\.xml|\.cargo/credentials|bower\.json|\.babelrc|\.eslintrc|shadow|passwd|\.gnupg/|\.pgpass|\.my\.cnf|\.s3cfg|\.gitconfig|\.bash_history|\.zsh_history|\.profile|\.bashrc|\.zshrc)"#
     ).unwrap();
 }
 
@@ -414,6 +453,15 @@ lazy_static! {
         ("Haskell",     Regex::new(r"\.hs$|\.cabal$|stack\.yaml").unwrap()),
         ("Pulumi",      Regex::new(r"Pulumi\.ya?ml|Pulumi\..*\.ya?ml").unwrap()),
         ("CDK",         Regex::new(r"cdk\.json|aws-cdk").unwrap()),
+        ("Remix",       Regex::new(r"remix\.config\.(js|ts)|entry\.server\.(ts|tsx)").unwrap()),
+        ("Astro",       Regex::new(r"astro\.config\.(mjs|ts)|\.astro$").unwrap()),
+        ("Deno",        Regex::new(r"deno\.json[c]?|mod\.ts$|deps\.ts$").unwrap()),
+        ("Bun",         Regex::new(r"bun\.lockb|bunfig\.toml").unwrap()),
+        ("Nuxt",        Regex::new(r"nuxt\.config\.(js|ts)|\.nuxt/").unwrap()),
+        ("SvelteKit",   Regex::new(r"svelte\.config\.(js|ts)|\.svelte-kit/").unwrap()),
+        ("Vite",        Regex::new(r"vite\.config\.(js|ts|mjs)").unwrap()),
+        ("Tauri",       Regex::new(r"tauri\.conf\.json|src-tauri/").unwrap()),
+        ("Electron",    Regex::new(r"electron\.js|electron-builder\.(ya?ml|json)").unwrap()),
     ];
 }
 
@@ -439,6 +487,12 @@ lazy_static! {
         ("Spring",     Regex::new(r"@SpringBootApplication|import org\.springframework").unwrap()),
         ("Laravel",    Regex::new(r"use Illuminate\\|namespace App\\Http").unwrap()),
         ("Rails",      Regex::new(r#"require ['"]rails['"]|include Rails\b"#).unwrap()),
+        ("Remix",      Regex::new(r#"from ['"]@remix-run|createCookieSessionStorage"#).unwrap()),
+        ("Astro",      Regex::new(r#"import.*from ['"]astro['"]|---\s*\n.*import"#).unwrap()),
+        ("Deno",       Regex::new(r#"Deno\.(serve|readTextFile|env)|from ['"]https://deno\.land"#).unwrap()),
+        ("tRPC",       Regex::new(r"initTRPC|createTRPCRouter|t\.procedure").unwrap()),
+        ("Supabase",   Regex::new(r"createClient\(.*supabase|@supabase/supabase-js").unwrap()),
+        ("Tailwind",   Regex::new(r"tailwindcss|@tailwind\s+(base|components|utilities)").unwrap()),
     ];
 
     // Regex for entropy-based secret detection (keyword context check).
@@ -593,8 +647,9 @@ enum WorkerResult {
     },
     BlobFailed,
     CommitProcessed {
-        email: String,
-        name:  String,
+        email:    String,
+        name:     String,
+        findings: Vec<Finding>,
     },
     TreeProcessed {
         file_techs: Vec<(String, String)>,  // (sha1, filename)
@@ -746,8 +801,9 @@ impl Streamer {
                 WorkerResult::BlobFailed => {
                     state.blobs_failed += 1;
                 }
-                WorkerResult::CommitProcessed { email, name } => {
+                WorkerResult::CommitProcessed { email, name, findings } => {
                     state.commit_count += 1;
+                    state.findings.extend(findings);
                     if !email.is_empty() {
                         state.contributors.entry(email).or_insert(name);
                     }
@@ -926,9 +982,22 @@ async fn fetch_and_process(
         }
         "commit" => {
             if let Some(commit) = parser.parse_commit(&obj) {
+                // Scan commit message for secrets (trufflehog/gitleaks parity)
+                let msg_findings = if !commit.message.is_empty() {
+                    scan_content(
+                        &commit.message,
+                        &format!("[commit:{}:message]", &sha1[..8]),
+                        sha1,
+                        false,
+                        &extra_patterns,
+                    )
+                } else {
+                    vec![]
+                };
                 WorkerResult::CommitProcessed {
-                    email: commit.author_email,
-                    name:  commit.author,
+                    email:    commit.author_email,
+                    name:     commit.author,
+                    findings: msg_findings,
                 }
             } else {
                 WorkerResult::Skipped
@@ -1107,7 +1176,7 @@ fn scan_minified_segments(
     is_deleted: bool,
     out:        &mut Vec<Finding>,
 ) {
-    for segment in line.split(|c| c == ';' || c == '{' || c == '}' || c == ',').take(200) {
+    for segment in line.split([';', '{', '}', ',']).take(200) {
         let seg = segment.trim();
         if seg.is_empty() || seg.len() > 2000 || seg.len() < 10 { continue; }
         for pat in PATTERNS.iter() {
@@ -2018,6 +2087,202 @@ mod tests {
         assert!(
             findings.iter().any(|f| f.pattern_id == "telegram_bot"),
             "Telegram bot token with 'TELEGRAM_BOT_TOKEN=' label must be detected"
+        );
+    }
+
+    // ── V3.1 new secret pattern tests ─────────────
+
+    #[test]
+    fn test_scan_content_finds_github_fine_pat() {
+        let content = format!("TOKEN=github_pat_{}", "A".repeat(82));
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[]);
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "github_fine_pat"),
+            "Should detect GitHub fine-grained PAT"
+        );
+    }
+
+    #[test]
+    fn test_scan_content_finds_groq_key() {
+        let content = format!("GROQ_KEY=gsk_{}", "A".repeat(52));
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[]);
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "groq_key"),
+            "Should detect Groq API key"
+        );
+    }
+
+    #[test]
+    fn test_scan_content_finds_replicate_token() {
+        let content = format!("REPLICATE_TOKEN=r8_{}", "A".repeat(40));
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[]);
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "replicate_token"),
+            "Should detect Replicate API token"
+        );
+    }
+
+    #[test]
+    fn test_scan_content_finds_contentful_token() {
+        let content = format!("CONTENTFUL_TOKEN=CFPAT-{}", "A".repeat(43));
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[]);
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "contentful_token"),
+            "Should detect Contentful token"
+        );
+    }
+
+    #[test]
+    fn test_scan_content_finds_postman_key() {
+        let content = format!("POSTMAN_KEY=PMAK-{}-{}", "A".repeat(24), "B".repeat(34));
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[]);
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "postman_key"),
+            "Should detect Postman API key"
+        );
+    }
+
+    #[test]
+    fn test_scan_content_finds_tencent_secret_id() {
+        let content = format!("TENCENT_ID=AKID{}", "A".repeat(32));
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[]);
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "tencent_secret_id"),
+            "Should detect Tencent Cloud SecretId"
+        );
+    }
+
+    #[test]
+    fn test_scan_content_finds_age_secret_key() {
+        let content = "AGE-SECRET-KEY-1QPZRY9X8GF2TVDW0S3JN54KHCE6MUA7LQPZRY9X8GF2TVDW0S3JN54KHCE6M";
+        let findings = scan_content(content, ".env", "a".repeat(40).as_str(), false, &[]);
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "age_secret_key"),
+            "Should detect Age encryption secret key"
+        );
+    }
+
+    #[test]
+    fn test_scan_content_finds_clerk_secret() {
+        let content = format!("CLERK_SECRET=sk_live_{}", "A".repeat(30));
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[]);
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "clerk_secret"),
+            "Should detect Clerk secret key"
+        );
+    }
+
+    // ── V3.1 sensitive file tests ─────────────────
+
+    #[test]
+    fn test_sensitive_names_docker_config() {
+        assert!(is_sensitive_file(".docker/config.json"), ".docker/config.json should be sensitive");
+    }
+
+    #[test]
+    fn test_sensitive_names_gradle_properties() {
+        assert!(is_sensitive_file(".gradle/gradle.properties"), ".gradle/gradle.properties should be sensitive");
+    }
+
+    #[test]
+    fn test_sensitive_names_cargo_credentials() {
+        assert!(is_sensitive_file(".cargo/credentials"), ".cargo/credentials should be sensitive");
+    }
+
+    #[test]
+    fn test_sensitive_names_bash_history() {
+        assert!(is_sensitive_file(".bash_history"), ".bash_history should be sensitive");
+    }
+
+    #[test]
+    fn test_sensitive_names_pgpass() {
+        assert!(is_sensitive_file(".pgpass"), ".pgpass should be sensitive");
+    }
+
+    // ── V3.1 tech stack tests ────────────────────
+
+    #[test]
+    fn test_collect_tech_remix() {
+        let mut tech = Vec::new();
+        collect_tech("remix.config.ts", &mut tech);
+        assert!(tech.contains(&"Remix".to_string()), "Should detect Remix");
+    }
+
+    #[test]
+    fn test_collect_tech_astro() {
+        let mut tech = Vec::new();
+        collect_tech("astro.config.mjs", &mut tech);
+        assert!(tech.contains(&"Astro".to_string()), "Should detect Astro");
+    }
+
+    #[test]
+    fn test_collect_tech_deno() {
+        let mut tech = Vec::new();
+        collect_tech("deno.json", &mut tech);
+        assert!(tech.contains(&"Deno".to_string()), "Should detect Deno");
+    }
+
+    #[test]
+    fn test_collect_tech_bun() {
+        let mut tech = Vec::new();
+        collect_tech("bun.lockb", &mut tech);
+        assert!(tech.contains(&"Bun".to_string()), "Should detect Bun");
+    }
+
+    #[test]
+    fn test_collect_tech_vite() {
+        let mut tech = Vec::new();
+        collect_tech("vite.config.ts", &mut tech);
+        assert!(tech.contains(&"Vite".to_string()), "Should detect Vite");
+    }
+
+    #[test]
+    fn test_collect_tech_tauri() {
+        let mut tech = Vec::new();
+        collect_tech("tauri.conf.json", &mut tech);
+        assert!(tech.contains(&"Tauri".to_string()), "Should detect Tauri");
+    }
+
+    #[test]
+    fn test_collect_tech_electron() {
+        let mut tech = Vec::new();
+        collect_tech("electron.js", &mut tech);
+        assert!(tech.contains(&"Electron".to_string()), "Should detect Electron");
+    }
+
+    // ── V3.1 content-based tech detection ─────────
+
+    #[test]
+    fn test_detect_tech_from_content_deno() {
+        let mut stack = std::collections::HashSet::new();
+        detect_tech_from_content("Deno.serve(handler)", &mut stack);
+        assert!(stack.contains("Deno"), "Should detect Deno from content");
+    }
+
+    #[test]
+    fn test_detect_tech_from_content_trpc() {
+        let mut stack = std::collections::HashSet::new();
+        detect_tech_from_content("const t = initTRPC.create()", &mut stack);
+        assert!(stack.contains("tRPC"), "Should detect tRPC from content");
+    }
+
+    #[test]
+    fn test_detect_tech_from_content_tailwind() {
+        let mut stack = std::collections::HashSet::new();
+        detect_tech_from_content("@tailwind base;\n@tailwind components;", &mut stack);
+        assert!(stack.contains("Tailwind"), "Should detect Tailwind CSS from content");
+    }
+
+    // ── V3.1 commit message scanning ──────────────
+
+    #[test]
+    fn test_scan_content_on_commit_message_finds_secret() {
+        // Simulate scanning a commit message that contains a secret
+        let content = "fix: update config\n\nAWS_KEY=AKIAZ9XYZMNOP1234567";
+        let findings = scan_content(content, "[commit:abcd1234:message]", "a".repeat(40).as_str(), false, &[]);
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "aws_key_id"),
+            "Should detect secrets in commit messages"
         );
     }
 }

@@ -54,6 +54,20 @@ const PATH_VARIANTS: &[&str] = &[
     ".git.bak", ".git.old",
     // Numeric versioned roots
     "v4/.git", "v5/.git",
+    // Framework-specific paths (gitdumper parity)
+    "laravel/.git", "symfony/.git", "django/.git",
+    "rails/.git", "express/.git", "flask/.git",
+    "nextjs/.git", "nuxt/.git",
+    // Environment / deployment paths
+    "staging/.git", "test/.git", "dev/.git",
+    "internal/.git", "demo/.git", "sandbox/.git",
+    "preview/.git", "release/.git",
+    // Documentation / auxiliary
+    "docs/.git", "doc/.git", "wiki/.git",
+    "blog/.git", "landing/.git",
+    // Nested project structures
+    "packages/.git", "modules/.git", "services/.git",
+    "microservices/.git",
 ];
 
 /// Minimum confidence score to report a DetectResult.
@@ -282,7 +296,7 @@ pub async fn run(
     let mut best: Option<DetectResult> = None;
     for h in handles {
         if let Ok(Some(r)) = h.await {
-            let better = best.as_ref().map_or(true, |b: &DetectResult| r.confidence > b.confidence);
+            let better = best.as_ref().is_none_or(|b: &DetectResult| r.confidence > b.confidence);
             if better {
                 let confirmed = r.confidence >= 90;
                 best = Some(r);
@@ -405,5 +419,27 @@ mod tests {
             PROTECTED_CONFIDENCE >= MIN_CONFIDENCE,
             "PROTECTED_CONFIDENCE must be at least MIN_CONFIDENCE so protected results are reported"
         );
+    }
+
+    // ── V3.1 fuzz path tests ──────────────────────
+
+    #[test]
+    fn test_path_variants_contains_framework_paths() {
+        assert!(PATH_VARIANTS.contains(&"laravel/.git"), "laravel/.git should be in PATH_VARIANTS");
+        assert!(PATH_VARIANTS.contains(&"django/.git"), "django/.git should be in PATH_VARIANTS");
+        assert!(PATH_VARIANTS.contains(&"rails/.git"), "rails/.git should be in PATH_VARIANTS");
+    }
+
+    #[test]
+    fn test_path_variants_contains_env_paths() {
+        assert!(PATH_VARIANTS.contains(&"staging/.git"), "staging/.git should be in PATH_VARIANTS");
+        assert!(PATH_VARIANTS.contains(&"demo/.git"), "demo/.git should be in PATH_VARIANTS");
+        assert!(PATH_VARIANTS.contains(&"sandbox/.git"), "sandbox/.git should be in PATH_VARIANTS");
+    }
+
+    #[test]
+    fn test_path_variants_contains_nested_paths() {
+        assert!(PATH_VARIANTS.contains(&"packages/.git"), "packages/.git should be in PATH_VARIANTS");
+        assert!(PATH_VARIANTS.contains(&"services/.git"), "services/.git should be in PATH_VARIANTS");
     }
 }

@@ -201,7 +201,7 @@ impl Reporter {
         let now = chrono::Utc::now().to_rfc3339();
         let mut report = serde_json::json!({
             "tool":      "GitRecon",
-            "version":   "3.0.0",
+            "version":   "3.1.0",
             "timestamp": now,
             "target":    target,
         });
@@ -255,7 +255,7 @@ impl Reporter {
         let parent = Path::new(path).parent().unwrap_or(Path::new("."));
         std::fs::create_dir_all(parent)?;
         let json_str = serde_json::to_string_pretty(&report)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(std::io::Error::other)?;
         std::fs::write(path, json_str)
     }
 
