@@ -282,7 +282,7 @@ pub async fn run(
     let mut best: Option<DetectResult> = None;
     for h in handles {
         if let Ok(Some(r)) = h.await {
-            let better = best.as_ref().map_or(true, |b: &DetectResult| r.confidence > b.confidence);
+            let better = best.as_ref().is_none_or(|b: &DetectResult| r.confidence > b.confidence);
             if better {
                 let confirmed = r.confidence >= 90;
                 best = Some(r);

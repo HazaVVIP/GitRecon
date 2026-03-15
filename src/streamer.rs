@@ -1107,7 +1107,7 @@ fn scan_minified_segments(
     is_deleted: bool,
     out:        &mut Vec<Finding>,
 ) {
-    for segment in line.split(|c| c == ';' || c == '{' || c == '}' || c == ',').take(200) {
+    for segment in line.split([';', '{', '}', ',']).take(200) {
         let seg = segment.trim();
         if seg.is_empty() || seg.len() > 2000 || seg.len() < 10 { continue; }
         for pat in PATTERNS.iter() {

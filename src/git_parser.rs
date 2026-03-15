@@ -90,7 +90,7 @@ impl IndexParser {
         let version = u32::from_be_bytes(data[4..8].try_into().unwrap());
         let n = u32::from_be_bytes(data[8..12].try_into().unwrap()) as usize;
 
-        if !matches!(version, 2 | 3 | 4) {
+        if !matches!(version, 2..=4) {
             return Err(format!("Unsupported index version: {version}"));
         }
 
@@ -175,9 +175,7 @@ impl ObjectParser {
 
         let nul = raw.iter().position(|&b| b == 0)?;
         let header = std::str::from_utf8(&raw[..nul]).ok()?;
-        let mut parts = header.splitn(2, ' ');
-        let obj_type = parts.next()?;
-        let size_str = parts.next()?;
+        let (obj_type, size_str) = header.split_once(' ')?;
 
         if !VALID_TYPES.contains(&obj_type) {
             return None;
@@ -435,7 +433,7 @@ impl GitConfigParser {
             if sec.starts_with("remote.") {
                 if let Some(url) = data.get("url") {
                     let mut m = HashMap::new();
-                    m.insert("remote".into(), sec.splitn(2, '.').nth(1).unwrap_or("").to_string());
+                    m.insert("remote".into(), sec.split_once('.').map(|x| x.1).unwrap_or("").to_string());
                     m.insert("url".into(), url.clone());
                     out.push(m);
                 }
@@ -447,7 +445,7 @@ impl GitConfigParser {
     pub fn branches(&self, cfg: &HashMap<String, HashMap<String, String>>) -> Vec<String> {
         cfg.keys()
             .filter(|k| k.starts_with("branch."))
-            .map(|k| k.splitn(2, '.').nth(1).unwrap_or("").to_string())
+            .map(|k| k.split_once('.').map(|x| x.1).unwrap_or("").to_string())
             .collect()
     }
 }
