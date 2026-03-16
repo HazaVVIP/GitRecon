@@ -939,7 +939,7 @@ async fn fetch_and_process(
 
             let filename   = sha1_to_file.get(sha1)
                 .cloned()
-                .unwrap_or_else(|| format!("[blob:{}]", &sha1[..8]));
+                .unwrap_or_else(|| format!("[blob:{}]", &sha1[..sha1.len().min(8)]));
             let is_deleted = !current_blobs.contains(sha1);
 
             // Collect tech tags from filename
@@ -989,7 +989,7 @@ async fn fetch_and_process(
                 let msg_findings = if !commit.message.is_empty() {
                     scan_content(
                         &commit.message,
-                        &format!("[commit:{}:message]", &sha1[..8]),
+                        &format!("[commit:{}:message]", &sha1[..sha1.len().min(8)]),
                         sha1,
                         false,
                         &extra_patterns,

@@ -495,7 +495,14 @@ pub fn parse_info_packs(text: &str) -> Vec<String> {
         .collect()
 }
 
+pub fn is_valid_sha1(s: &str) -> bool {
+    s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 pub fn obj_path(sha1: &str) -> String {
+    if sha1.len() < 2 {
+        return format!("objects/{}", sha1);
+    }
     format!("objects/{}/{}", &sha1[..2], &sha1[2..])
 }
 
@@ -529,6 +536,31 @@ mod tests {
     fn test_obj_path() {
         let sha = "a3b4c5d6e7f8a3b4c5d6e7f8a3b4c5d6e7f8a3b4";
         assert_eq!(obj_path(sha), format!("objects/a3/{}", &sha[2..]));
+    }
+
+    #[test]
+    fn test_obj_path_empty_sha1() {
+        // Should not panic on empty string
+        let result = obj_path("");
+        assert_eq!(result, "objects/");
+    }
+
+    #[test]
+    fn test_obj_path_short_sha1() {
+        // Should not panic on single character
+        let result = obj_path("a");
+        assert_eq!(result, "objects/a");
+    }
+
+    #[test]
+    fn test_is_valid_sha1() {
+        assert!(is_valid_sha1("a3b4c5d6e7f8a3b4c5d6e7f8a3b4c5d6e7f8a3b4"));
+        assert!(is_valid_sha1("0000000000000000000000000000000000000000"));
+        assert!(!is_valid_sha1(""));
+        assert!(!is_valid_sha1("a"));
+        assert!(!is_valid_sha1("xyz"));
+        assert!(!is_valid_sha1("ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ"));
+        assert!(!is_valid_sha1("a3b4c5")); // too short
     }
 
     #[test]
