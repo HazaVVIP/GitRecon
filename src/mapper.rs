@@ -11,6 +11,7 @@ use crate::http_client::HttpClient;
 use crate::git_parser::{
     IndexParser, PackedRefsParser, PackIndexParser,
     GitConfigParser, parse_head, parse_info_packs, extract_sha1s, IndexEntry,
+    is_valid_sha1,
 };
 
 const META_FILES: &[&str] = &[
@@ -386,10 +387,14 @@ impl Mapper {
             }
         }
 
-        // 10. Classify SHA1s
+        // 10. Discard malformed SHA1s that would cause panics downstream
+        sha1s.retain(|s| is_valid_sha1(s));
+        result.blob_sha1s.retain(|s| is_valid_sha1(s));
+
+        // 11. Classify SHA1s
         result.commit_sha1s = sha1s.difference(&result.blob_sha1s).cloned().collect();
 
-        // 11. Size estimation
+        // 12. Size estimation
         result.estimated_files = if !result.index_entries.is_empty() {
             result.index_entries.len()
         } else {
