@@ -921,12 +921,25 @@ async fn fetch_and_process(
 
     match obj.obj_type.as_str() {
         "blob" => {
+            // Persist blob to disk first, before any scan-skip guards, so that
+            // --save writes all blobs regardless of whether they are scannable
+            // (binary files, oversized blobs, memory-budget overflow, etc.).
+            let save_result = if let Some(ref dir) = save_dir {
+                if let Some(actual_name) = sha1_to_file.get(sha1) {
+                    Some(write_blob_to_disk(actual_name, &obj.data, dir))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
             // Fast binary detection: check first 8 KB for null bytes
             let probe      = &obj.data[..obj.data.len().min(8192)];
             let null_count = probe.iter().filter(|&&b| b == 0).count();
             if null_count > 10 {
                 return WorkerResult::BlobScanned {
-                    findings: vec![], tech: vec![], bytes: raw_bytes, save_result: None,
+                    findings: vec![], tech: vec![], bytes: raw_bytes, save_result,
                 };
             }
 
@@ -940,7 +953,7 @@ async fn fetch_and_process(
             };
             if blob_size > per_blob_limit {
                 return WorkerResult::BlobScanned {
-                    findings: vec![], tech: vec![], bytes: raw_bytes, save_result: None,
+                    findings: vec![], tech: vec![], bytes: raw_bytes, save_result,
                 };
             }
 
@@ -950,7 +963,7 @@ async fn fetch_and_process(
                 if prev + blob_size > mem_limit {
                     bytes_in_flight.fetch_sub(blob_size, Ordering::Relaxed);
                     return WorkerResult::BlobScanned {
-                        findings: vec![], tech: vec![], bytes: raw_bytes, save_result: None,
+                        findings: vec![], tech: vec![], bytes: raw_bytes, save_result,
                     };
                 }
             }
@@ -987,17 +1000,6 @@ async fn fetch_and_process(
             if mem_limit > 0 {
                 bytes_in_flight.fetch_sub(blob_size, Ordering::Relaxed);
             }
-
-            // Optionally persist blob to disk (avoids a second download pass when --save is active)
-            let save_result = if let Some(ref dir) = save_dir {
-                if let Some(actual_name) = sha1_to_file.get(sha1) {
-                    Some(write_blob_to_disk(actual_name, &obj.data, dir))
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
 
             WorkerResult::BlobScanned { findings, tech, bytes: raw_bytes, save_result }
         }
@@ -1543,6 +1545,41 @@ mod tests {
         let ok = write_blob_to_disk("sub/dir/file.txt", b"hello", &dir);
         assert!(ok, "Should write successfully");
         assert!(dir.join("sub/dir/file.txt").exists(), "Should create sub-directories");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_blob_to_disk_saves_binary_blob() {
+        // Regression test: binary blobs (with many null bytes) must be saved to
+        // disk when --save is active, even though they are skipped for scanning.
+        let dir = std::env::temp_dir().join("gitrecon_test_binary_save");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Construct data that would trigger the null-byte binary check (>10 nulls)
+        let mut binary_data = vec![0u8; 20];
+        binary_data.extend_from_slice(b"some extra bytes");
+        let ok = write_blob_to_disk("image.png", &binary_data, &dir);
+        assert!(ok, "Binary blob should be saved to disk even when skipped for scanning");
+        assert!(dir.join("image.png").exists(), "Binary blob file must exist on disk");
+        let saved = std::fs::read(dir.join("image.png")).unwrap();
+        assert_eq!(saved, binary_data, "Saved binary content must match original");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_blob_to_disk_saves_oversized_blob() {
+        // Regression test: blobs larger than MAX_SCAN_BYTES must be saved to disk
+        // when --save is active, even though they are skipped for scanning.
+        let dir = std::env::temp_dir().join("gitrecon_test_oversized_save");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Simulate an oversized blob (just over MAX_SCAN_BYTES)
+        let oversized_data: Vec<u8> = b"x".repeat(MAX_SCAN_BYTES + 1).to_vec();
+        let ok = write_blob_to_disk("large_file.bin", &oversized_data, &dir);
+        assert!(ok, "Oversized blob should be saved to disk even when skipped for scanning");
+        assert!(dir.join("large_file.bin").exists(), "Oversized blob file must exist on disk");
+        let saved = std::fs::read(dir.join("large_file.bin")).unwrap();
+        assert_eq!(saved.len(), MAX_SCAN_BYTES + 1, "Saved oversized content must be complete");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
