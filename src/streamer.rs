@@ -390,6 +390,24 @@ lazy_static! {
         // Docker
         pat!("docker_config_auth", "CRITICAL", "Docker Registry Auth (Base64)",
              r#""auth"\s*:\s*"([A-Za-z0-9+/=]{20,})""#),
+        // Email — SMTP / IMAP / POP3
+        pat!("smtp_credentials", "CRITICAL", "SMTP Credentials",
+             r#"(?i)\bsmtp[_\-]?(?:pass(?:word)?|pwd)\b['"]*\s*(?:=>|[=:])\s*['"]?([^\s'">,]{8,})['"]?"#),
+        pat!("smtp_url",         "CRITICAL", "SMTP Connection URL",
+             r"(?i)smtps?://[^:@\s]+:[^@\s]{8,}@[^\s]+"),
+        pat!("imap_credentials", "HIGH",     "IMAP/POP3 Credentials",
+             r#"(?i)\b(?:imap|pop3)[_\-]?(?:pass(?:word)?|pwd)\b['"]*\s*(?:=>|[=:])\s*['"]?([^\s'">,]{8,})['"]?"#),
+        // File transfer — FTP / SFTP
+        pat!("ftp_credentials",  "HIGH",     "FTP/SFTP Credentials",
+             r#"(?i)\bs?ftp[_\-]?(?:pass(?:word)?|pwd)\b['"]*\s*(?:=>|[=:])\s*['"]?([^\s'">,]{8,})['"]?"#),
+        pat!("ftp_url",          "HIGH",     "FTP Connection URL with Credentials",
+             r"(?i)s?ftp://[^:@\s]+:[^@\s]{8,}@[^\s]+"),
+        // Message queues — AMQP / RabbitMQ
+        pat!("amqp_url",         "HIGH",     "AMQP/RabbitMQ Connection URL",
+             r"(?i)amqps?://[^:@\s]+:[^@\s]{8,}@[^\s]+"),
+        // Directory services — LDAP
+        pat!("ldap_credentials", "HIGH",     "LDAP/LDAPS Credentials",
+             r"(?i)ldaps?://[^:@\s]+:[^@\s]{8,}@[^\s]+"),
     ];
 
     static ref PLACEHOLDERS: Vec<&'static str> = vec![
@@ -399,7 +417,7 @@ lazy_static! {
         "insert_", "INSERT_",
         "TODO", "FIXME", "test_", "TEST_", "dummy", "DUMMY",
         "replace", "REPLACE", "sample", "SAMPLE", "fake", "FAKE",
-        "00000000", "11111111", "<", ">",
+        "00000000", "11111111", "<",
         // Additional common dev/template placeholders
         "n/a", "N/A", "none", "NONE", "null", "NULL", "undefined",
         "my_", "MY_", "enter_", "ENTER_", "set_", "SET_",
@@ -2347,6 +2365,139 @@ mod tests {
         assert!(
             findings.iter().any(|f| f.pattern_id == "aws_key_id"),
             "Should detect secrets in commit messages"
+        );
+    }
+
+    // ── SMTP / email credential pattern tests ─────
+
+    #[test]
+    fn test_scan_content_finds_smtp_credentials_php_array() {
+        // PHP array format: 'smtp_pass' => 'p4ncasona@23'
+        let content = r#"'smtp_pass' => 'p4ncasona@23',"#;
+        let findings = scan_content(content, "email.php", "a".repeat(40).as_str(), false, &[]);
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "smtp_credentials"),
+            "Should detect smtp_pass in PHP array format"
+        );
+    }
+
+    #[test]
+    fn test_scan_content_finds_smtp_credentials_env() {
+        let content = "SMTP_PASS=secretpassword123";
+        let findings = scan_content(content, ".env", "a".repeat(40).as_str(), false, &[]);
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "smtp_credentials"),
+            "Should detect SMTP_PASS in .env format"
+        );
+    }
+
+    #[test]
+    fn test_scan_content_finds_smtp_password_yaml() {
+        let content = "smtp_password: mysecretpassword";
+        let findings = scan_content(content, "config.yaml", "a".repeat(40).as_str(), false, &[]);
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "smtp_credentials"),
+            "Should detect smtp_password in YAML format"
+        );
+    }
+
+    #[test]
+    fn test_scan_content_finds_smtp_url_with_credentials() {
+        let content = "MAIL_URL=smtps://mailuser:secretpass@smtp.acme.net:465";
+        let findings = scan_content(content, ".env", "a".repeat(40).as_str(), false, &[]);
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "smtp_url"),
+            "Should detect SMTP URL with embedded credentials"
+        );
+    }
+
+    #[test]
+    fn test_scan_content_finds_imap_credentials() {
+        let content = r#"'imap_pass' => 'mailboxSecret99',"#;
+        let findings = scan_content(content, "config.php", "a".repeat(40).as_str(), false, &[]);
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "imap_credentials"),
+            "Should detect IMAP credentials"
+        );
+    }
+
+    #[test]
+    fn test_scan_content_finds_pop3_credentials() {
+        let content = "pop3_password = 'inbox_secret_pass'";
+        let findings = scan_content(content, "mail.conf", "a".repeat(40).as_str(), false, &[]);
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "imap_credentials"),
+            "Should detect POP3 credentials"
+        );
+    }
+
+    #[test]
+    fn test_scan_content_finds_ftp_credentials() {
+        let content = r#"'ftp_pass' => 'ftpS3cret!',"#;
+        let findings = scan_content(content, "deploy.php", "a".repeat(40).as_str(), false, &[]);
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "ftp_credentials"),
+            "Should detect FTP credentials"
+        );
+    }
+
+    #[test]
+    fn test_scan_content_finds_sftp_credentials() {
+        let content = "SFTP_PASSWORD=deploy_secret_key";
+        let findings = scan_content(content, ".env", "a".repeat(40).as_str(), false, &[]);
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "ftp_credentials"),
+            "Should detect SFTP credentials"
+        );
+    }
+
+    #[test]
+    fn test_scan_content_finds_ftp_url_with_credentials() {
+        let content = "FTP_URL=ftp://ftpuser:ftppassword@ftp.acme.net";
+        let findings = scan_content(content, ".env", "a".repeat(40).as_str(), false, &[]);
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "ftp_url"),
+            "Should detect FTP URL with embedded credentials"
+        );
+    }
+
+    #[test]
+    fn test_scan_content_finds_amqp_url_with_credentials() {
+        let content = "AMQP_URL=amqp://rabbitmq:r4bbitPass@localhost:5672/vhost";
+        let findings = scan_content(content, ".env", "a".repeat(40).as_str(), false, &[]);
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "amqp_url"),
+            "Should detect AMQP connection URL with credentials"
+        );
+    }
+
+    #[test]
+    fn test_scan_content_finds_amqps_url_with_credentials() {
+        let content = "RABBITMQ_URL=amqps://admin:amqpSecret@mq.acme.net:5671";
+        let findings = scan_content(content, "config.sh", "a".repeat(40).as_str(), false, &[]);
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "amqp_url"),
+            "Should detect AMQPS (TLS) connection URL with credentials"
+        );
+    }
+
+    #[test]
+    fn test_scan_content_finds_ldap_credentials() {
+        let content = "LDAP_URL=ldap://cn=admin:ldapSecret@ldap.acme.net";
+        let findings = scan_content(content, ".env", "a".repeat(40).as_str(), false, &[]);
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "ldap_credentials"),
+            "Should detect LDAP URL with embedded credentials"
+        );
+    }
+
+    #[test]
+    fn test_smtp_credentials_placeholder_filtered() {
+        let content = "smtp_pass = 'changeme'";
+        let findings = scan_content(content, "config.php", "a".repeat(40).as_str(), false, &[]);
+        assert!(
+            !findings.iter().any(|f| f.pattern_id == "smtp_credentials"),
+            "Placeholder SMTP password 'changeme' should be filtered"
         );
     }
 }
