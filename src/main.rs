@@ -268,7 +268,7 @@ async fn main() {
     // Validate URL/targets
     let raw_url = match (&args.url, &args.targets) {
         (None, None) => {
-            eprintln!("  [✗] Either <URL> or --targets FILE is required.");
+            eprintln!("  ✘  Either <URL> or --targets FILE is required.");
             std::process::exit(1);
         }
         (Some(u), _) => u.clone(),
@@ -283,7 +283,7 @@ async fn main() {
                 .map(|l| normalize_url(l.trim()))
                 .collect(),
             Err(e) => {
-                eprintln!("  [!] Cannot read targets file '{}': {}", targets_file, e);
+                eprintln!("  ⚠   Cannot read targets file '{}': {}", targets_file, e);
                 std::process::exit(1);
             }
         }
@@ -338,7 +338,7 @@ async fn main() {
     let client = match HttpClient::new(cfg) {
         Ok(c)  => c,
         Err(e) => {
-            eprintln!("  [✗] Failed to create HTTP client: {}", e);
+            eprintln!("  ✘  Failed to create HTTP client: {}", e);
             std::process::exit(1);
         }
     };
@@ -348,7 +348,7 @@ async fn main() {
         match load_extra_patterns(patterns_file) {
             Ok(patterns) => patterns,
             Err(e) => {
-                eprintln!("  [!] Failed to load patterns from '{}': {}", patterns_file, e);
+                eprintln!("  ⚠   Failed to load patterns from '{}': {}", patterns_file, e);
                 std::process::exit(1);
             }
         }
@@ -363,9 +363,9 @@ async fn main() {
             println!("  Target: {}\n", url);
         }
 
-        // ── Phase 1: Detect ──────────────────────────────────────────
+        // ── Detect ──────────────────────────────────────────────────
         if verbose {
-            println!("  [→] Phase 1: Detecting .git exposure...");
+            println!("  ◈  Target identification...");
         }
 
         let dr = detect::run(&client, url, args.fuzz).await;
@@ -374,7 +374,7 @@ async fn main() {
             Some(r) => r,
             None => {
                 if verbose {
-                    println!("  [✗] No .git exposure detected");
+                    println!("  ✘  No .git exposure detected");
                 }
                 continue;
             }
@@ -382,18 +382,18 @@ async fn main() {
 
         if dr.confidence < args.min_confidence {
             if verbose {
-                println!("  [✗] Confidence {}% < minimum {}%", dr.confidence, args.min_confidence);
+                println!("  ✘  Confidence {}% < minimum {}%", dr.confidence, args.min_confidence);
             }
             continue;
         }
 
         if verbose {
-            println!("  [✓] Git detected! ({}%, {})", dr.confidence, dr.label);
+            println!("  ✔  Git detected! ({}%, {})", dr.confidence, dr.label);
         }
 
-        // ── Phase 2: Map ─────────────────────────────────────────────
+        // ── Reconnaissance ───────────────────────────────────────────
         if verbose {
-            println!("  [→] Phase 2: Mapping repository structure...");
+            println!("  ◈  Repository reconnaissance...");
         }
 
         let mapper = mapper::Mapper::new(client.clone());
@@ -401,7 +401,7 @@ async fn main() {
 
         // DX-4: --dry-run
         if args.dry_run {
-            println!("\n  [DRY RUN] Phase 1+2 complete. Scan skipped.");
+            println!("\n  ◈  [DRY RUN] Detection + Reconnaissance complete. Analysis skipped.");
             println!("  SHA1 objects   : {}", map_r.all_sha1s().len());
             println!("  Blobs (index)  : {}", map_r.blob_sha1s.len());
             println!("  Commits/trees  : {}", map_r.commit_sha1s.len());
@@ -418,12 +418,12 @@ async fn main() {
 
         let total = map_r.all_sha1s().len();
         if verbose {
-            println!("  [✓] Repository mapped: {} objects", total);
+            println!("  ✔  Repository mapped: {} objects", total);
         }
 
-        // ── Phase 3: Stream & Scan ──────────────────────────────────
+        // ── Analysis ─────────────────────────────────────────────────
         if verbose {
-            println!("  [→] Phase 3: Streaming & scanning objects...");
+            println!("  ◈  Deep object analysis...");
             rep.print_stream_start(total);
         }
 
@@ -466,13 +466,17 @@ async fn main() {
             println!();
         }
 
-        // ── Phase 4: Report ─────────────────────────────────────────
+        // ── Intelligence Report ──────────────────────────────────────
         if verbose {
-            println!("  [→] Phase 4: Generating report...");
+            println!("  ◈  Generating intelligence report...");
         }
 
         if !args.pipe {
             rep.print_stream_done(&stream_r);
+        }
+
+        if verbose && !args.pipe {
+            rep.print_findings_summary(&stream_r.findings);
         }
 
         // Save report in requested format
@@ -490,38 +494,38 @@ async fn main() {
         match args.format.as_str() {
             "sarif" => {
                 if let Err(e) = rep.save_sarif(&report_path, url, Some(&stream_r)) {
-                    eprintln!("  [!] Could not save SARIF report: {}", e);
+                    eprintln!("  ⚠   Could not save SARIF report: {}", e);
                 }
             }
             "csv" => {
                 if let Err(e) = rep.save_csv(&report_path, Some(&stream_r)) {
-                    eprintln!("  [!] Could not save CSV report: {}", e);
+                    eprintln!("  ⚠   Could not save CSV report: {}", e);
                 }
             }
             "ndjson" => {
                 if let Err(e) = rep.save_ndjson(&report_path, Some(&stream_r)) {
-                    eprintln!("  [!] Could not save NDJSON report: {}", e);
+                    eprintln!("  ⚠   Could not save NDJSON report: {}", e);
                 }
             }
             "md" => {
                 if let Err(e) = rep.save_markdown(&report_path, url, Some(&stream_r)) {
-                    eprintln!("  [!] Could not save Markdown report: {}", e);
+                    eprintln!("  ⚠   Could not save Markdown report: {}", e);
                 }
             }
             "html" => {
                 if let Err(e) = rep.save_html(&report_path, url, Some(&stream_r)) {
-                    eprintln!("  [!] Could not save HTML report: {}", e);
+                    eprintln!("  ⚠   Could not save HTML report: {}", e);
                 }
             }
             _ => {
                 if let Err(e) = rep.save_json(&report_path, url, Some(&dr), Some(&map_r), Some(&stream_r)) {
-                    eprintln!("  [!] Could not save report: {}", e);
+                    eprintln!("  ⚠   Could not save report: {}", e);
                 }
             }
         }
 
         if verbose && !args.pipe {
-            println!("  [✓] Report saved: {}", report_path);
+            rep.print_report(&dr, &map_r, &stream_r, &report_path);
         }
 
         // O-4: Webhook delivery
@@ -529,8 +533,8 @@ async fn main() {
             if let Ok(json_body) = std::fs::read_to_string(&report_path) {
                 let sent = rep.send_webhook(webhook_url, args.webhook_secret.as_deref(), &json_body, &client).await;
                 if verbose {
-                    if sent { println!("  [✓] Webhook delivered to {}", webhook_url); }
-                    else { eprintln!("  [!] Webhook delivery failed"); }
+                    if sent { println!("  ✔   Webhook delivered to {}", webhook_url); }
+                    else { eprintln!("  ⚠   Webhook delivery failed"); }
                 }
             }
         }
@@ -547,7 +551,7 @@ async fn main() {
         }
 
         if verbose && !args.pipe {
-            println!("  [✓] Complete\n");
+            println!("  ✔  Done\n");
         }
     }
 }

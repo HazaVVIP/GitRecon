@@ -1,6 +1,6 @@
 //! reporter.rs
-//! Phase 4 — Report: colored terminal summary + JSON to disk.
-//! The only thing written to disk is the JSON report file.
+//! Intelligence Report: colored terminal summary + report files to disk (JSON, SARIF, CSV, NDJSON, Markdown, HTML).
+//! The only thing written to disk is the report file.
 
 use std::path::Path;
 use colored::*;
@@ -35,60 +35,69 @@ impl Reporter {
   ╚═════╝ ╚═╝   ╚═╝   ╚═╝  ╚═╝╚══════╝ ╚═════╝ ╚═════╝ ╚═╝  ╚═══╝
 "#;
         println!("{}", art.cyan().bold());
-        println!("{}", "  Git Exposure · Streaming Scanner · No disk required".dimmed());
+        println!("{}", "  Enterprise Git Exposure Scanner".dimmed());
         println!("{}", format!("  {}", "─".repeat(53)).dimmed());
         println!();
     }
 
     pub fn print_detect(&self, r: &DetectResult) {
-        let icon = if r.actionable() { "✅" } else { "⚠️ " };
+        let icon = if r.actionable() {
+            "✔".green().bold().to_string()
+        } else {
+            "⚠".yellow().to_string()
+        };
         let conf_str = format!("{} ({}%)", r.label, r.confidence);
         let conf_colored = self.conf_color(&r.label, &conf_str);
 
-        println!("\n{}", "─".repeat(58).bold());
-        println!("{}", "  [1/4] DETECTION".bold());
-        println!("{}", "─".repeat(58));
-        println!("  {}: {}", "Target    ".bold(), r.url);
-        println!("  {}: {}", "Git URL   ".bold(), r.git_url.cyan());
-        println!("  {}: {}  {}", "Confidence".bold(), conf_colored, icon);
-        println!("  {}: {}", "Dir List  ".bold(),
-                 if r.listing { "⚠️  ON".yellow().to_string() } else { "OFF".to_string() });
-        println!("  {}: {}", "Server    ".bold(), r.server);
+        let w = 58usize;
+        println!("\n╔{}╗", "═".repeat(w));
+        println!("║  {:<width$}║", "DETECTION", width = w - 2);
+        println!("╚{}╝", "═".repeat(w));
+        println!("│  {:<14}: {}", "Target", r.url);
+        println!("│  {:<14}: {}", "Git URL", r.git_url.cyan());
+        println!("│  {:<14}: {}  {}", "Confidence", conf_colored, icon);
+        println!("│  {:<14}: {}", "Dir List",
+                 if r.listing { "⚠  ON".yellow().to_string() } else { "OFF".to_string() });
+        println!("│  {:<14}: {}", "Server", r.server);
         if let Some(ref br) = r.branch {
-            println!("  {}: {}", "Branch    ".bold(), br);
+            println!("│  {:<14}: {}", "Branch", br);
         }
         if let Some(ref ru) = r.remote_url {
-            println!("  {}: {}", "Remote    ".bold(), ru.yellow());
+            println!("│  {:<14}: {}", "Remote", ru.yellow());
         }
-        println!();
+        println!("│");
     }
 
     pub fn print_map(&self, m: &MapResult) {
         let all = m.all_sha1s();
-        println!("  {}", "[2/4] MAP".bold());
-        println!("  {}", "─".repeat(50));
-        println!("  SHA1s found   : {}", all.len().to_string().cyan());
-        println!("  Blobs (index) : {}", m.blob_sha1s.len());
-        println!("  Commits/trees : {}", m.commit_sha1s.len());
+        let w = 58usize;
+        println!("\n╔{}╗", "═".repeat(w));
+        println!("║  {:<width$}║", "RECONNAISSANCE", width = w - 2);
+        println!("╚{}╝", "═".repeat(w));
+        println!("│  {:<16}: {}", "SHA1 Objects", all.len().to_string().cyan());
+        println!("│  {:<16}: {}", "Blobs (index)", m.blob_sha1s.len());
+        println!("│  {:<16}: {}", "Commits/Trees", m.commit_sha1s.len());
         let branches_str = if m.branches.is_empty() { "—".to_string() }
                            else { m.branches[..m.branches.len().min(8)].join(", ") };
-        println!("  Branches      : {}", branches_str);
+        println!("│  {:<16}: {}", "Branches", branches_str);
         if let Some(remote) = m.remote_urls.first() {
             if let Some(url) = remote.get("url") {
-                println!("  Remote        : {}", url.yellow());
+                println!("│  {:<16}: {}", "Remote", url.yellow());
             }
         }
         if !m.pack_sha1s.is_empty() {
-            println!("  Pack files    : {}", m.pack_sha1s.len());
+            println!("│  {:<16}: {}", "Pack Files", m.pack_sha1s.len());
         }
-        println!("  Est. disk size: {} (if --save)", m.size_human().green());
-        println!();
+        println!("│  {:<16}: {} (if --save)", "Est. Disk Size", m.size_human().green());
+        println!("│");
     }
 
     pub fn print_stream_start(&self, total: usize) {
-        println!("  {}", "[3/4] STREAMING & SCANNING".bold());
-        println!("  {}", "─".repeat(50));
-        println!("  Scanning {} objects in memory (no disk write)...",
+        let w = 58usize;
+        println!("\n╔{}╗", "═".repeat(w));
+        println!("║  {:<width$}║", "ANALYSIS", width = w - 2);
+        println!("╚{}╝", "═".repeat(w));
+        println!("│  Scanning {} objects in memory (no disk write)...",
                  total.to_string().cyan());
     }
 
@@ -102,7 +111,7 @@ impl Reporter {
         } else {
             findings.to_string().green().to_string()
         };
-        print!("\r  [{}] {:5.1}%  {}/{} objs  findings={}   ",
+        print!("\r  ▶  [{}] {:5.1}%  {}/{} objs  findings={}   ",
                bar_s, pct * 100.0, done, total, f_str);
         use std::io::Write;
         std::io::stdout().flush().ok();
@@ -110,42 +119,19 @@ impl Reporter {
 
     pub fn print_stream_done(&self, r: &StreamResult) {
         println!(); // newline after progress bar
-        println!("  Blobs scanned : {}", r.blobs_scanned);
-        println!("  Data processed: {:} KB", r.bytes_scanned / 1024);
+        println!("│  {:<16}: {}", "Blobs scanned", r.blobs_scanned);
+        println!("│  {:<16}: {} KB", "Data processed", r.bytes_scanned / 1024);
         if r.files_saved > 0 || r.files_save_failed > 0 {
-            println!("  Files saved   : {}  Failed: {}", r.files_saved, r.files_save_failed);
+            println!("│  {:<16}: {}  Failed: {}", "Files saved", r.files_saved, r.files_save_failed);
         }
-        println!("  Elapsed       : {:.1}s", r.elapsed_s);
-        println!();
+        println!("│  {:<16}: {:.1}s", "Elapsed", r.elapsed_s);
+        println!("│");
     }
 
-    pub fn print_report(&self, _detect: &DetectResult, _map_r: &MapResult, stream_r: &StreamResult) {
-        let counts  = stream_r.severity_counts();
-        let risk    = stream_r.risk_score();
-        let risk_s  = format!("{}/100", risk);
-        let risk_colored = self.risk_color(risk, &risk_s);
-
-        println!("  {}", "[4/4] FINDINGS REPORT".bold());
-        println!("  {}", "─".repeat(50));
-        println!("  Risk Score : {}", risk_colored);
-        println!("  Secrets    : {}  [ {} {} {} ]",
-                 stream_r.findings.len().to_string().bold(),
-                 format!("CRIT:{}", counts["CRITICAL"]).red().bold(),
-                 format!("HIGH:{}", counts["HIGH"]).yellow(),
-                 format!("MED:{}", counts["MEDIUM"]).bright_yellow());
-
-        if !stream_r.tech_stack.is_empty() {
-            println!("  Tech Stack : {}", stream_r.tech_stack.join(", "));
-        }
-        if !stream_r.contributors.is_empty() {
-            println!("  Developers : {} found", stream_r.contributors.len());
-            for c in stream_r.contributors.iter().take(4) {
-                println!("    · {} <{}>", c.name, c.email.cyan());
-            }
-        }
-        println!("  Commits    : ~{}", stream_r.commit_count);
-
-        // Deduplicate + sort by severity
+    /// Displays all deduplicated findings immediately after scanning, in card style.
+    /// Shows a severity bar chart summary followed by individual finding cards.
+    pub fn print_findings_summary(&self, findings: &[crate::streamer::Finding]) {
+        let w = 58usize;
         let sev_order = |s: &str| match s {
             "CRITICAL" => 0,
             "HIGH"     => 1,
@@ -154,7 +140,7 @@ impl Reporter {
             _          => 99,
         };
 
-        let mut sorted = stream_r.findings.clone();
+        let mut sorted = findings.to_vec();
         sorted.sort_by_key(|f| sev_order(&f.severity));
 
         let mut seen_keys = std::collections::HashSet::new();
@@ -163,35 +149,120 @@ impl Reporter {
             seen_keys.insert(key)
         }).collect();
 
-        if !deduped.is_empty() {
-            println!("\n  {} unique):", format!("Secret Findings ({}", deduped.len()).bold());
-            for (i, f) in deduped.iter().take(25).enumerate() {
-                let sev_colored = self.sev_color(&f.severity);
-                let del_tag = if f.is_deleted { " [DELETED]".dimmed().to_string() } else { String::new() };
-                println!("\n  {} [{}] {}{}", format!("#{}", i + 1).bold(), sev_colored, f.description, del_tag);
-                println!("     File   : {}  line {}", f.filename.cyan(), f.line);
-                let m = &f.match_str[..f.match_str.len().min(100)];
-                println!("     Match  : {}", m);
-                let ctx = &f.context[..f.context.len().min(120)];
-                println!("     Context: {}", ctx.dimmed());
-            }
-            if deduped.len() > 25 {
-                println!("\n  ... +{} more findings in JSON report", deduped.len() - 25);
-            }
+        let crit  = deduped.iter().filter(|f| f.severity == "CRITICAL").count();
+        let high  = deduped.iter().filter(|f| f.severity == "HIGH").count();
+        let med   = deduped.iter().filter(|f| f.severity == "MEDIUM").count();
+        let low   = deduped.iter().filter(|f| f.severity == "LOW").count();
+        let total = deduped.len();
+
+        println!("\n╔{}╗", "═".repeat(w));
+        println!("║  {:<width$}║", "SCAN RESULTS", width = w - 2);
+        println!("╚{}╝", "═".repeat(w));
+        println!("│");
+
+        if total == 0 {
+            println!("│  {}  No secrets detected", "✔".green().bold());
+            println!("│");
+            return;
         }
+
+        println!("│  Total Findings : {}", total.to_string().bold());
+        println!("│");
+
+        // Severity bar chart
+        let bar_width = 20usize;
+        let max_c = crit.max(high).max(med).max(low).max(1);
+        let scale = bar_width as f64 / max_c as f64;
+        let make_bar = |n: usize| "█".repeat((n as f64 * scale) as usize);
+
+        if crit > 0 {
+            println!("│  {}  {:<8}  {:>3}  {}",
+                     "●".red().bold(), "CRITICAL".red().bold(), crit, make_bar(crit).red().bold());
+        }
+        if high > 0 {
+            println!("│  {}  {:<8}  {:>3}  {}",
+                     "●".yellow(), "HIGH".yellow(), high, make_bar(high).yellow());
+        }
+        if med > 0 {
+            println!("│  {}  {:<8}  {:>3}  {}",
+                     "●".bright_yellow(), "MEDIUM".bright_yellow(), med, make_bar(med).bright_yellow());
+        }
+        if low > 0 {
+            println!("│  {}  {:<8}  {:>3}  {}",
+                     "●".cyan(), "LOW".cyan(), low, make_bar(low).cyan());
+        }
+        println!("│");
+
+        // Individual finding cards (no cap — all findings shown)
+        for (i, f) in deduped.iter().enumerate() {
+            let sev_colored = self.sev_color(&f.severity);
+            let del_tag = if f.is_deleted { " · DELETED".dimmed().to_string() } else { String::new() };
+
+            // Calculate right-side dashes: total line = 60 chars
+            // "┌─[ #N · SEVERITY ]" + dashes + "┐"
+            // prefix "┌─[" = 3, suffix "]" = 1, "┐" = 1 → fixed = 5 chars
+            // header_plain used only for length, colored version in actual output
+            let header_plain = format!(" #{} · {} ", i + 1, f.severity);
+            let right_dashes = 55usize.saturating_sub(header_plain.len());
+            println!("\n┌─[ #{} · {} ]{}┐",
+                     (i + 1).to_string().bold(),
+                     sev_colored,
+                     "─".repeat(right_dashes));
+            println!("│  {:<12}: {}{}", "Type", f.description, del_tag);
+            println!("│  {:<12}: {}", "File",
+                     format!("{}  ·  line {}", f.filename, f.line).cyan());
+            let m = &f.match_str[..f.match_str.len().min(100)];
+            println!("│  {:<12}: {}", "Match", m);
+            let ctx = &f.context[..f.context.len().min(120)];
+            println!("│  {:<12}: {}", "Context", ctx.dimmed());
+            println!("└{}┘", "─".repeat(w));
+        }
+        println!();
+    }
+
+    /// Compact intelligence report footer shown after saving the report file.
+    pub fn print_report(&self, _detect: &DetectResult, _map_r: &MapResult, stream_r: &StreamResult, report_path: &str) {
+        let counts  = stream_r.severity_counts();
+        let risk    = stream_r.risk_score();
+        let risk_label = if risk >= 70 { "CRITICAL" } else if risk >= 40 { "HIGH" } else if risk >= 15 { "MEDIUM" } else { "CLEAR" };
+        let risk_s  = format!("{}/100  {}", risk, risk_label);
+        let risk_colored = self.risk_color(risk, &risk_s);
+
+        let w = 58usize;
+        println!("\n╔{}╗", "═".repeat(w));
+        println!("║  {:<width$}║", "INTELLIGENCE REPORT", width = w - 2);
+        println!("╚{}╝", "═".repeat(w));
+        println!("│  {:<14}: {}", "Risk Score", risk_colored);
+        println!("│  {:<14}: {}  [ {} {} {} ]",
+                 "Findings",
+                 stream_r.findings.len().to_string().bold(),
+                 format!("CRIT:{}", counts["CRITICAL"]).red().bold(),
+                 format!("HIGH:{}", counts["HIGH"]).yellow(),
+                 format!("MED:{}", counts["MEDIUM"]).bright_yellow());
+        if !stream_r.tech_stack.is_empty() {
+            println!("│  {:<14}: {}", "Tech Stack", stream_r.tech_stack.join(", "));
+        }
+        if !stream_r.contributors.is_empty() {
+            println!("│  {:<14}: {} found", "Developers", stream_r.contributors.len());
+        }
+        println!("│  {:<14}: {}  {}", "Report", report_path.green(), "✔".green().bold());
+        println!("│");
+        println!("└{}┘\n", "─".repeat(w));
     }
 
     pub fn print_summary(&self, target: &str, stream_r: &StreamResult, report_path: &str) {
         let risk_s  = format!("{}/100", stream_r.risk_score());
         let risk_colored = self.risk_color(stream_r.risk_score(), &risk_s);
-        println!("\n{}", "═".repeat(58));
-        println!("{}  |  {}", "  DONE".bold(), target);
-        println!("{}", "═".repeat(58));
-        println!("  Risk Score : {}", risk_colored);
-        println!("  Secrets    : {} findings (0 bytes written to disk)",
-                 stream_r.findings.len());
-        println!("  Report     : {}", report_path.green());
-        println!("{}\n", "═".repeat(58));
+        let w = 58usize;
+        println!("\n╔{}╗", "═".repeat(w));
+        println!("║  {:<width$}║", "COMPLETE", width = w - 2);
+        println!("╚{}╝", "═".repeat(w));
+        println!("│  {:<14}: {}", "Target", target);
+        println!("│  {:<14}: {}", "Risk Score", risk_colored);
+        println!("│  {:<14}: {} findings", "Secrets", stream_r.findings.len());
+        println!("│  {:<14}: {}", "Report", report_path.green());
+        println!("│");
+        println!("└{}┘\n", "─".repeat(w));
     }
 
     pub fn save_json(
