@@ -35,6 +35,7 @@ pub struct DynPattern {
 /// ```json
 /// {"patterns": [{"id": "my_token", "severity": "CRITICAL", "description": "...", "regex": "..."}]}
 /// ```
+#[allow(dead_code)]
 pub fn load_patterns_from_file(path: &str) -> anyhow::Result<Vec<DynPattern>> {
     let raw = std::fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("Cannot read patterns file '{}': {}", path, e))?;
@@ -545,6 +546,7 @@ pub struct Finding {
     pub context:     String,
     pub is_deleted:  bool,
     pub commit_sha1: Option<String>,
+    pub confidence_adjustment: Option<String>,
 }
 
 impl Finding {
@@ -559,6 +561,7 @@ impl Finding {
             "context":   &self.context[..self.context.len().min(200)],
             "deleted":   self.is_deleted,
             "blob_sha1": self.commit_sha1,
+            "confidence_adjustment": self.confidence_adjustment,
         })
     }
 }
@@ -693,9 +696,15 @@ pub struct Streamer {
     stop_on_critical: bool,
     /// Runtime-loaded extra patterns (from `--patterns FILE`).
     extra_patterns:   Arc<Vec<DynPattern>>,
+    max_blob_size:    usize,   // DX-2: in bytes
+    entropy_threshold: f64,   // DX-3
+    live:             bool,   // O-1
+    adaptive:         bool,   // P-1
+    initial_workers:  usize,  // P-1
 }
 
 impl Streamer {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         client:           HttpClient,
         workers:          usize,
@@ -704,6 +713,10 @@ impl Streamer {
         max_findings:     usize,
         stop_on_critical: bool,
         extra_patterns:   Vec<DynPattern>,
+        max_blob_size:    usize,
+        entropy_threshold: f64,
+        live:             bool,
+        adaptive:         bool,
     ) -> Self {
         Self {
             client,
@@ -713,6 +726,11 @@ impl Streamer {
             max_findings,
             stop_on_critical,
             extra_patterns: Arc::new(extra_patterns),
+            max_blob_size: max_blob_size * 1024 * 1024,
+            entropy_threshold,
+            live,
+            adaptive,
+            initial_workers: workers,
         }
     }
 
@@ -775,6 +793,9 @@ impl Streamer {
         let workers      = self.workers;
         let mem_limit    = self.mem_limit;
         let extra_pat    = self.extra_patterns.clone();
+        let max_scan_bytes  = self.max_blob_size;
+        let entropy_thresh  = self.entropy_threshold;
+        let verbose_flag    = self.verbose;
 
         let stream = futures::stream::iter(all_sha1s)
             .map(|sha1| {
@@ -792,6 +813,7 @@ impl Streamer {
                         &sha1_to_file, &current_blobs,
                         save_dir, extra_patterns,
                         stop_flag, mem_limit, bytes_in_flight,
+                        max_scan_bytes, entropy_thresh, verbose_flag,
                     ).await
                 }
             })
@@ -799,16 +821,53 @@ impl Streamer {
 
         let mut state = State::default();
 
+        // P-1: Adaptive concurrency monitoring
+        let current_workers = Arc::new(AtomicUsize::new(self.workers));
+        let err_window_count = Arc::new(AtomicUsize::new(0));
+        let req_window_count = Arc::new(AtomicUsize::new(0));
+        let initial_workers = self.initial_workers;
+        let adaptive = self.adaptive;
+
+        if adaptive {
+            let cw = current_workers.clone();
+            let err_c = err_window_count.clone();
+            let req_c = req_window_count.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
+                loop {
+                    interval.tick().await;
+                    let reqs = req_c.swap(0, Ordering::Relaxed);
+                    let errs = err_c.swap(0, Ordering::Relaxed);
+                    if reqs == 0 { continue; }
+                    let err_rate = errs as f64 / reqs as f64;
+                    let w = cw.load(Ordering::Relaxed);
+                    if err_rate > 0.20 {
+                        cw.store(w.saturating_sub(w / 2).max(2), Ordering::Relaxed);
+                    } else if err_rate < 0.05 && reqs >= 100 {
+                        cw.store((w + 5).min(initial_workers), Ordering::Relaxed);
+                    }
+                }
+            });
+        }
+
         futures::pin_mut!(stream);
         while let Some(result) = stream.next().await {
             let done = done_counter.fetch_add(1, Ordering::Relaxed) + 1;
             if let Some(ref cb) = progress_cb {
                 cb(done, total);
             }
+            // P-1: Track requests/errors for adaptive concurrency
+            req_window_count.fetch_add(1, Ordering::Relaxed);
             match result {
                 WorkerResult::BlobScanned { findings, tech, bytes, save_result } => {
                     state.blobs_scanned += 1;
                     state.bytes_scanned += bytes;
+                    // O-1: Live output
+                    if self.live {
+                        for f in &findings {
+                            println!("{}", serde_json::to_string(&f.to_dict()).unwrap_or_default());
+                        }
+                    }
                     state.findings.extend(findings);
                     for t in tech {
                         state.tech_stack.insert(t);
@@ -820,10 +879,17 @@ impl Streamer {
                     }
                 }
                 WorkerResult::BlobFailed => {
+                    err_window_count.fetch_add(1, Ordering::Relaxed);
                     state.blobs_failed += 1;
                 }
                 WorkerResult::CommitProcessed { email, name, findings } => {
                     state.commit_count += 1;
+                    // O-1: Live output for commit findings too
+                    if self.live {
+                        for f in &findings {
+                            println!("{}", serde_json::to_string(&f.to_dict()).unwrap_or_default());
+                        }
+                    }
                     state.findings.extend(findings);
                     if !email.is_empty() {
                         state.contributors.entry(email).or_insert(name);
@@ -880,6 +946,7 @@ impl Streamer {
 // ════════════════════════════════════════════════
 
 /// Max blob content size to scan (4 MB). Larger blobs are skipped.
+#[allow(dead_code)]
 const MAX_SCAN_BYTES: usize = 4 * 1024 * 1024;
 
 #[allow(clippy::too_many_arguments)]
@@ -894,6 +961,9 @@ async fn fetch_and_process(
     stop_flag:       Arc<AtomicBool>,
     mem_limit:       usize,
     bytes_in_flight: Arc<AtomicUsize>,
+    max_scan_bytes:  usize,
+    entropy_threshold: f64,
+    verbose:         bool,
 ) -> WorkerResult {
     // Bail immediately if a stop condition was already triggered
     if stop_flag.load(Ordering::Relaxed) {
@@ -934,10 +1004,26 @@ async fn fetch_and_process(
                 None
             };
 
+            let filename   = sha1_to_file.get(sha1)
+                .cloned()
+                .unwrap_or_else(|| format!("[blob:{}]", &sha1[..sha1.len().min(8)]));
+            let is_deleted = !current_blobs.contains(sha1);
+
             // Fast binary detection: check first 8 KB for null bytes
             let probe      = &obj.data[..obj.data.len().min(8192)];
             let null_count = probe.iter().filter(|&&b| b == 0).count();
             if null_count > 10 {
+                // S-3: Check for SQLite or ZIP before skipping
+                if obj.data.starts_with(b"SQLite format 3\0") {
+                    let strings = extract_printable_strings(&obj.data, 6);
+                    let text = strings.join("\n");
+                    let findings = scan_content(&text, &filename, sha1, is_deleted, &extra_patterns, entropy_threshold);
+                    return WorkerResult::BlobScanned { findings, tech: vec![], bytes: raw_bytes, save_result };
+                }
+                if obj.data.starts_with(b"PK\x03\x04") {
+                    // TODO: Add zip crate dependency for full ZIP scanning
+                    return WorkerResult::BlobScanned { findings: vec![], tech: vec![], bytes: raw_bytes, save_result };
+                }
                 return WorkerResult::BlobScanned {
                     findings: vec![], tech: vec![], bytes: raw_bytes, save_result,
                 };
@@ -947,11 +1033,16 @@ async fn fetch_and_process(
             let blob_size      = obj.data.len();
             let per_blob_limit = if mem_limit > 0 {
                 // At most a quarter of the total memory budget per individual blob
-                (mem_limit / 4).min(MAX_SCAN_BYTES)
+                (mem_limit / 4).min(max_scan_bytes)
             } else {
-                MAX_SCAN_BYTES
+                max_scan_bytes
             };
             if blob_size > per_blob_limit {
+                if verbose {
+                    let blob_size_mb = blob_size as f64 / 1024.0 / 1024.0;
+                    let max_size_mb = max_scan_bytes as f64 / 1024.0 / 1024.0;
+                    eprintln!("  [!] Blob {} ({:.2} MB) exceeds --max-blob-size {:.0}MB, skipping scan", &sha1[..8], blob_size_mb, max_size_mb);
+                }
                 return WorkerResult::BlobScanned {
                     findings: vec![], tech: vec![], bytes: raw_bytes, save_result,
                 };
@@ -967,11 +1058,6 @@ async fn fetch_and_process(
                     };
                 }
             }
-
-            let filename   = sha1_to_file.get(sha1)
-                .cloned()
-                .unwrap_or_else(|| format!("[blob:{}]", &sha1[..sha1.len().min(8)]));
-            let is_deleted = !current_blobs.contains(sha1);
 
             // Collect tech tags from filename
             let mut tech_set: HashSet<String> = HashSet::new();
@@ -991,10 +1077,13 @@ async fn fetch_and_process(
             let tech: Vec<String> = tech_set.into_iter().collect();
 
             // Primary line-by-line scan (patterns + entropy)
-            let mut findings = scan_content(&content, &filename, sha1, is_deleted, &extra_patterns);
+            let mut findings = scan_content(&content, &filename, sha1, is_deleted, &extra_patterns, entropy_threshold);
 
             // Multi-line YAML next-line secret detection
             findings.extend(scan_yaml_nextline_secrets(&content, &filename, sha1, is_deleted));
+
+            // S-4: DB credential detection
+            findings.extend(scan_db_config_blocks(&content, &filename, sha1, is_deleted));
 
             // Release in-flight budget
             if mem_limit > 0 {
@@ -1013,6 +1102,7 @@ async fn fetch_and_process(
                         sha1,
                         false,
                         &extra_patterns,
+                        entropy_threshold,
                     )
                 } else {
                     vec![]
@@ -1044,6 +1134,7 @@ fn scan_content(
     sha1: &str,
     is_deleted: bool,
     extra_patterns: &[DynPattern],
+    entropy_threshold: f64,
 ) -> Vec<Finding> {
     let lines: Vec<&str> = content.lines().collect();
     let mut findings     = Vec::new();
@@ -1075,6 +1166,7 @@ fn scan_content(
                     context:     build_context_window(&lines, lineno, 2),
                     is_deleted,
                     commit_sha1: Some(sha1.to_string()),
+                    confidence_adjustment: None,
                 });
                 line_has_finding = true;
             }
@@ -1095,6 +1187,7 @@ fn scan_content(
                     context:     build_context_window(&lines, lineno, 2),
                     is_deleted,
                     commit_sha1: Some(sha1.to_string()),
+                    confidence_adjustment: None,
                 });
                 line_has_finding = true;
             }
@@ -1103,9 +1196,21 @@ fn scan_content(
         // Shannon-entropy scan — only fires when no specific pattern matched the line
         // (avoids redundant/noisy entries for already-identified secrets)
         if !line_has_finding {
-            scan_entropy_line(line, lineno, filename, sha1, is_deleted, &lines, &mut findings);
+            scan_entropy_line(line, lineno, filename, sha1, is_deleted, &lines, &mut findings, entropy_threshold);
         }
     }
+
+    // S-1: Context-aware confidence adjustment
+    for f in findings.iter_mut() {
+        let lines_ref: Vec<&str> = content.lines().collect();
+        if let Some(reason) = context_suggests_example(&lines_ref, f.line.saturating_sub(1)) {
+            f.severity = downgrade_severity(&f.severity).to_string();
+            f.confidence_adjustment = Some(reason);
+        }
+    }
+
+    // S-2: Multi-line scan
+    findings.extend(scan_multiline(content, filename, sha1, is_deleted));
 
     findings
 }
@@ -1216,6 +1321,7 @@ fn scan_minified_segments(
                     context:     format!("[minified] {}", &seg[..seg.len().min(200)]),
                     is_deleted,
                     commit_sha1: Some(sha1.to_string()),
+                    confidence_adjustment: None,
                 });
             }
         }
@@ -1237,6 +1343,7 @@ fn build_context_window(lines: &[&str], center: usize, radius: usize) -> String 
 /// Shannon-entropy based secret scan for a single line.
 /// Only fires when ENTROPY_CONTEXT_RE matches the line (keyword context),
 /// to keep the false-positive rate low.
+#[allow(clippy::too_many_arguments)]
 fn scan_entropy_line(
     line:       &str,
     lineno:     usize,
@@ -1245,6 +1352,7 @@ fn scan_entropy_line(
     is_deleted: bool,
     all_lines:  &[&str],
     out:        &mut Vec<Finding>,
+    threshold:  f64,
 ) {
     if !ENTROPY_CONTEXT_RE.is_match(line) { return; }
 
@@ -1254,9 +1362,7 @@ fn scan_entropy_line(
         let inner = &quoted[1..quoted.len() - 1];
         if is_placeholder(inner) { continue; }
         let ent = shannon_entropy(inner);
-        // Only flag high-entropy values (>= 4.5 bits/char); MEDIUM severity is not used
-        // since the 3.5–4.5 range produces too many false positives on normal code strings.
-        if ent < 4.5 { continue; }
+        if ent < threshold { continue; }
         out.push(Finding {
             filename:    filename.to_string(),
             line:        lineno + 1,
@@ -1267,6 +1373,7 @@ fn scan_entropy_line(
             context:     build_context_window(all_lines, lineno, 2),
             is_deleted,
             commit_sha1: Some(sha1.to_string()),
+            confidence_adjustment: None,
         });
     }
 }
@@ -1310,6 +1417,7 @@ fn scan_yaml_nextline_secrets(
             context:     format!("{} | {}", line.trim(), value),
             is_deleted,
             commit_sha1: Some(sha1.to_string()),
+            confidence_adjustment: None,
         });
     }
     findings
@@ -1322,6 +1430,167 @@ fn detect_tech_from_content(content: &str, stack: &mut HashSet<String>) {
             stack.insert(tech.to_string());
         }
     }
+}
+
+// S-1: Context-aware confidence adjustment helper functions
+fn context_suggests_example(lines: &[&str], center: usize) -> Option<String> {
+    let start = center.saturating_sub(3);
+    let end = (center + 4).min(lines.len());
+    let window = lines[start..end].join(" ");
+    let has_comment = window.contains("# ") || window.contains("// ")
+        || window.contains("/* ") || window.contains("-- ");
+    lazy_static! {
+        static ref EXAMPLE_KEYWORDS: Regex = Regex::new(
+            r"(?i)\b(example|sample|demo|test|placeholder|fake|mock|dummy|your_|changeme|foobar)\b"
+        ).unwrap();
+    }
+    let has_example = EXAMPLE_KEYWORDS.is_match(&window);
+    if has_comment && has_example {
+        Some("context: comment+example".to_string())
+    } else if has_example {
+        Some("context: example keyword".to_string())
+    } else {
+        None
+    }
+}
+
+fn downgrade_severity(sev: &str) -> &'static str {
+    match sev {
+        "CRITICAL" => "HIGH",
+        "HIGH"     => "MEDIUM",
+        "MEDIUM"   => "LOW",
+        _          => "LOW",
+    }
+}
+
+// S-2: Multi-line pattern scanning
+fn scan_multiline(content: &str, filename: &str, sha1: &str, is_deleted: bool) -> Vec<Finding> {
+    lazy_static! {
+        static ref PEM_MULTILINE: Regex = Regex::new(
+            r"(?s)-----BEGIN [A-Z ]+PRIVATE KEY-----[^-]*-----END [A-Z ]+PRIVATE KEY-----"
+        ).unwrap();
+        static ref JSON_MULTILINE_SECRET: Regex = Regex::new(
+            r#"(?si)"(password|passwd|secret|api_key|access_token|private_key|client_secret)"\s*:\s*"([^"]{8,})""#
+        ).unwrap();
+    }
+    let mut findings = Vec::new();
+    for m in PEM_MULTILINE.find_iter(content) {
+        let val = m.as_str().to_string();
+        if !is_placeholder(&val) {
+            let line_no = content[..m.start()].lines().count() + 1;
+            findings.push(Finding {
+                filename: filename.to_string(),
+                line: line_no,
+                pattern_id: "pem_key_multiline".to_string(),
+                description: "PEM Private Key (multi-line)".to_string(),
+                severity: "CRITICAL".to_string(),
+                match_str: val[..val.len().min(100)].to_string(),
+                context: "multi-line PEM block".to_string(),
+                is_deleted,
+                commit_sha1: Some(sha1.to_string()),
+                confidence_adjustment: None,
+            });
+        }
+    }
+    for cap in JSON_MULTILINE_SECRET.captures_iter(content) {
+        if let Some(val) = cap.get(2) {
+            let v = val.as_str();
+            if !is_placeholder(v) {
+                let line_no = content[..cap.get(0).unwrap().start()].lines().count() + 1;
+                findings.push(Finding {
+                    filename: filename.to_string(),
+                    line: line_no,
+                    pattern_id: "json_nested_secret".to_string(),
+                    description: format!("JSON secret: {}", cap.get(1).unwrap().as_str()),
+                    severity: "HIGH".to_string(),
+                    match_str: v[..v.len().min(100)].to_string(),
+                    context: "multi-line JSON".to_string(),
+                    is_deleted,
+                    commit_sha1: Some(sha1.to_string()),
+                    confidence_adjustment: None,
+                });
+            }
+        }
+    }
+    findings
+}
+
+// S-3: Binary file string extraction
+fn extract_printable_strings(data: &[u8], min_len: usize) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut current = Vec::new();
+    for &b in data {
+        if (0x20..0x7f).contains(&b) {
+            current.push(b);
+        } else {
+            if current.len() >= min_len {
+                if let Ok(s) = std::str::from_utf8(&current) {
+                    result.push(s.to_string());
+                }
+            }
+            current.clear();
+        }
+    }
+    if current.len() >= min_len {
+        if let Ok(s) = std::str::from_utf8(&current) {
+            result.push(s.to_string());
+        }
+    }
+    result
+}
+
+// S-4: Database credential detection
+fn scan_db_config_blocks(content: &str, filename: &str, sha1: &str, is_deleted: bool) -> Vec<Finding> {
+    lazy_static! {
+        static ref DJANGO_DB: Regex = Regex::new(
+            r#"(?si)'PASSWORD'\s*:\s*'([^']{6,})'"#
+        ).unwrap();
+        static ref DB_URL_PASS: Regex = Regex::new(
+            r"(?i)(postgres|mysql|mongodb|redis|amqp)://[^:]+:([^@]+)@"
+        ).unwrap();
+    }
+    let mut findings = Vec::new();
+    for cap in DJANGO_DB.captures_iter(content) {
+        if let Some(val) = cap.get(1) {
+            let v = val.as_str();
+            if !is_placeholder(v) {
+                let line_no = content[..cap.get(0).unwrap().start()].lines().count() + 1;
+                findings.push(Finding {
+                    filename: filename.to_string(),
+                    line: line_no,
+                    pattern_id: "django_db_password".to_string(),
+                    description: "Django/Python database password".to_string(),
+                    severity: "HIGH".to_string(),
+                    match_str: v[..v.len().min(100)].to_string(),
+                    context: "DB config block".to_string(),
+                    is_deleted,
+                    commit_sha1: Some(sha1.to_string()),
+                    confidence_adjustment: None,
+                });
+            }
+        }
+    }
+    for cap in DB_URL_PASS.captures_iter(content) {
+        if let Some(val) = cap.get(2) {
+            let v = val.as_str();
+            if !is_placeholder(v) {
+                let line_no = content[..cap.get(0).unwrap().start()].lines().count() + 1;
+                findings.push(Finding {
+                    filename: filename.to_string(),
+                    line: line_no,
+                    pattern_id: "db_url_password".to_string(),
+                    description: "Database connection string with password".to_string(),
+                    severity: "HIGH".to_string(),
+                    match_str: v[..v.len().min(100)].to_string(),
+                    context: "DB connection URL".to_string(),
+                    is_deleted,
+                    commit_sha1: Some(sha1.to_string()),
+                    confidence_adjustment: None,
+                });
+            }
+        }
+    }
+    findings
 }
 
 #[cfg(test)]
@@ -1354,7 +1623,7 @@ mod tests {
     fn test_scan_content_finds_aws_key() {
         // AKIA + exactly 16 uppercase/digit chars, no placeholder substrings
         let content = "AWS_KEY=AKIAZ9XYZMNOP1234567";
-        let findings = scan_content(content, "config.sh", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(content, "config.sh", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             findings.iter().any(|f| f.pattern_id == "aws_key_id"),
             "Should detect AWS key ID pattern"
@@ -1364,7 +1633,7 @@ mod tests {
     #[test]
     fn test_scan_content_skips_long_lines() {
         let long_line = "A".repeat(2001);
-        let findings = scan_content(&long_line, "file.txt", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(&long_line, "file.txt", "a".repeat(40).as_str(), false, &[], 4.5);
         // Long lines should be skipped — no findings
         assert!(findings.is_empty(), "Lines >2000 chars should be skipped");
     }
@@ -1372,7 +1641,7 @@ mod tests {
     #[test]
     fn test_scan_content_finds_wp_define_credential() {
         let content = r#"define('DB_PASSWORD', 'supersecret123');"#;
-        let findings = scan_content(content, "wp-config.php", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(content, "wp-config.php", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             findings.iter().any(|f| f.pattern_id == "wp_define"),
             "Should detect WordPress define() credential"
@@ -1384,7 +1653,7 @@ mod tests {
         // "put your unique phrase here" is a WordPress wp-config-sample.php placeholder.
         // After adding "put " to PLACEHOLDERS, this should NOT produce a finding.
         let content = r#"define( 'AUTH_KEY', 'put your unique phrase here' );"#;
-        let findings = scan_content(content, "wp-config.php", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(content, "wp-config.php", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             !findings.iter().any(|f| f.pattern_id == "wp_define"),
             "WordPress AUTH_KEY with placeholder value 'put your unique phrase here' must be filtered"
@@ -1394,7 +1663,7 @@ mod tests {
     #[test]
     fn test_scan_content_finds_php_define_aws_key() {
         let content = r#"define('AWS_KEY', 'CQITEE7X4TT318J00PWC');"#;
-        let findings = scan_content(content, "config.php", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(content, "config.php", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             findings.iter().any(|f| f.pattern_id == "php_define_secret"),
             "Should detect define() with AWS_KEY"
@@ -1404,7 +1673,7 @@ mod tests {
     #[test]
     fn test_scan_content_finds_php_define_aws_secret_key() {
         let content = r#"define('AWS_SECRET_KEY', 'GmZvCzpcTTczGfApjlhoycln0SzNGCoQEbJtbUPa');"#;
-        let findings = scan_content(content, "config.php", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(content, "config.php", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             findings.iter().any(|f| f.pattern_id == "php_define_secret"),
             "Should detect define() with AWS_SECRET_KEY"
@@ -1414,7 +1683,7 @@ mod tests {
     #[test]
     fn test_scan_content_finds_php_define_auth_token_secret() {
         let content = r#"define('AUTH_TOKEN_SECRET', 'jq6uik0LxAPCUBIHlHk3usBEZ8pJf9t9');"#;
-        let findings = scan_content(content, "config.php", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(content, "config.php", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             findings.iter().any(|f| f.pattern_id == "php_define_secret"),
             "Should detect define() with AUTH_TOKEN_SECRET"
@@ -1425,7 +1694,7 @@ mod tests {
     fn test_scan_content_php_define_ignores_non_secret_keys() {
         // BUCKET_NAME and ENDPOINT don't contain secret-related keywords
         let content = r#"define('BUCKET_NAME', 'developer-request');"#;
-        let findings = scan_content(content, "config.php", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(content, "config.php", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             !findings.iter().any(|f| f.pattern_id == "php_define_secret"),
             "Should NOT detect define() with non-secret key name BUCKET_NAME"
@@ -1435,7 +1704,7 @@ mod tests {
     #[test]
     fn test_scan_content_php_define_ignores_short_values() {
         let content = r#"define('API_KEY', 'short');"#;
-        let findings = scan_content(content, "config.php", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(content, "config.php", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             !findings.iter().any(|f| f.pattern_id == "php_define_secret"),
             "Should NOT detect define() with value shorter than 8 chars"
@@ -1445,7 +1714,7 @@ mod tests {
     #[test]
     fn test_scan_content_php_define_placeholder_is_filtered() {
         let content = r#"define('API_KEY', 'your_api_key_here_placeholder');"#;
-        let findings = scan_content(content, "config.php", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(content, "config.php", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             !findings.iter().any(|f| f.pattern_id == "php_define_secret"),
             "Placeholder value in define() should be filtered"
@@ -1455,7 +1724,7 @@ mod tests {
     #[test]
     fn test_scan_content_finds_django_secret_key() {
         let content = r#"SECRET_KEY = 'django-insecure-abcdefghijklmnopqrstuvwxyz1234567890!@#'"#;
-        let findings = scan_content(content, "settings.py", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(content, "settings.py", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             findings.iter().any(|f| f.pattern_id == "django_secret"),
             "Should detect Django SECRET_KEY"
@@ -1466,7 +1735,7 @@ mod tests {
     fn test_scan_content_finds_google_api_key() {
         // AIza + exactly 35 alphanumeric/dash/underscore chars
         let content = "GOOGLE_KEY=AIzaSyC1234567890abcdefghijklmnop123456";
-        let findings = scan_content(content, "config.js", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(content, "config.js", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             findings.iter().any(|f| f.pattern_id == "gcp_api_key"),
             "Should detect Google/GCP API Key"
@@ -1476,7 +1745,7 @@ mod tests {
     #[test]
     fn test_scan_content_finds_laravel_app_key() {
         let content = "APP_KEY=base64:SomeBase64EncodedKeyHereThatIsLongEnoughToMatch==";
-        let findings = scan_content(content, ".env", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(content, ".env", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             findings.iter().any(|f| f.pattern_id == "laravel_app_key"),
             "Should detect Laravel APP_KEY"
@@ -1487,7 +1756,7 @@ mod tests {
     fn test_no_private_ip_false_positive() {
         // Private IPs no longer trigger any finding
         let content = "db_host = 192.168.1.100";
-        let findings = scan_content(content, "config.ini", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(content, "config.ini", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             !findings.iter().any(|f| f.pattern_id == "private_ip"),
             "Private IP should not be flagged"
@@ -1498,7 +1767,7 @@ mod tests {
     fn test_no_s3_url_false_positive() {
         // S3 URLs no longer trigger a MEDIUM finding
         let content = "endpoint = https://mybucket.s3.amazonaws.com";
-        let findings = scan_content(content, "config.ini", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(content, "config.ini", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             !findings.iter().any(|f| f.pattern_id == "s3_url"),
             "S3 URL should not be flagged"
@@ -1509,7 +1778,7 @@ mod tests {
     fn test_no_entropy_medium_finding() {
         // Entropy check is removed; quoted high-entropy strings should not produce MEDIUM findings
         let content = r#"some_field = "R2l0UmVjb25Jc0F3ZXNvbWVUb29sRm9yU2VjdXJpdHk=""#;
-        let findings = scan_content(content, "file.txt", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(content, "file.txt", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             !findings.iter().any(|f| f.severity == "MEDIUM"),
             "Entropy check should not produce MEDIUM findings"
@@ -1602,7 +1871,7 @@ mod tests {
         // 48 alphanumeric chars after sk-
         let key = format!("sk-{}", "A".repeat(48));
         let content = format!("OPENAI_API_KEY={}", key);
-        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             findings.iter().any(|f| f.pattern_id == "openai_key"),
             "Should detect legacy OpenAI API key (sk-<48 chars>)"
@@ -1614,7 +1883,7 @@ mod tests {
         // Project key: sk-proj-<86 chars of A-Za-z0-9_->
         let key = format!("sk-proj-{}", "A".repeat(86));
         let content = format!("key={}", key);
-        let findings = scan_content(&content, "config.py", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(&content, "config.py", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             findings.iter().any(|f| f.pattern_id == "openai_key"),
             "Should detect OpenAI project key (sk-proj-<86 chars>)"
@@ -1625,7 +1894,7 @@ mod tests {
     fn test_scan_content_finds_anthropic_key() {
         let key = format!("sk-ant-{}", "A".repeat(95));
         let content = format!("ANTHROPIC_API_KEY={}", key);
-        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             findings.iter().any(|f| f.pattern_id == "anthropic_key"),
             "Should detect Anthropic API key"
@@ -1636,7 +1905,7 @@ mod tests {
     fn test_scan_content_finds_huggingface_token() {
         let token = format!("hf_{}", "a".repeat(36));
         let content = format!("HF_TOKEN={}", token);
-        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             findings.iter().any(|f| f.pattern_id == "huggingface_token"),
             "Should detect HuggingFace token"
@@ -1647,7 +1916,7 @@ mod tests {
     fn test_scan_content_finds_digitalocean_pat() {
         let token = format!("dop_v1_{}", "a".repeat(64));
         let content = format!("DO_TOKEN={}", token);
-        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             findings.iter().any(|f| f.pattern_id == "digitalocean_pat"),
             "Should detect DigitalOcean PAT"
@@ -1659,7 +1928,7 @@ mod tests {
         // dapi + exactly 32 hex chars; constructed at runtime to avoid secret-scanner false positives
         let token = ["dapi", &"a".repeat(32)].concat();
         let content = format!("DATABRICKS_TOKEN={}", token);
-        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             findings.iter().any(|f| f.pattern_id == "databricks_token"),
             "Should detect Databricks API token"
@@ -1670,7 +1939,7 @@ mod tests {
     fn test_scan_content_finds_vault_hvs_token() {
         let token = format!("hvs.{}", "A".repeat(30));
         let content = format!("VAULT_TOKEN={}", token);
-        let findings = scan_content(&content, "config.sh", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(&content, "config.sh", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             findings.iter().any(|f| f.pattern_id == "vault_token"),
             "Should detect HashiCorp Vault hvs token"
@@ -1679,7 +1948,7 @@ mod tests {
     fn test_scan_content_finds_planetscale_token() {
         let token = format!("pscale_tkn_{}", "A".repeat(43));
         let content = format!("DATABASE_TOKEN={}", token);
-        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             findings.iter().any(|f| f.pattern_id == "planetscale_token"),
             "Should detect PlanetScale token"
@@ -1690,7 +1959,7 @@ mod tests {
     fn test_scan_content_finds_supabase_key() {
         let key = format!("sbp_{}", "A".repeat(40));
         let content = format!("SUPABASE_KEY={}", key);
-        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             findings.iter().any(|f| f.pattern_id == "supabase_key"),
             "Should detect Supabase service role key"
@@ -1701,7 +1970,7 @@ mod tests {
     fn test_scan_content_finds_linear_key() {
         let key = format!("lin_api_{}", "A".repeat(40));
         let content = format!("LINEAR_KEY={}", key);
-        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             findings.iter().any(|f| f.pattern_id == "linear_key"),
             "Should detect Linear API key"
@@ -1766,7 +2035,7 @@ mod tests {
     #[test]
     fn test_scan_content_finds_shopify_token() {
         let content = format!("SHOPIFY_TOKEN=shpat_{}", "A".repeat(32));
-        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             findings.iter().any(|f| f.pattern_id == "shopify_token"),
             "Should detect Shopify Admin API token"
@@ -1776,7 +2045,7 @@ mod tests {
     #[test]
     fn test_scan_content_finds_jira_token() {
         let content = format!("JIRA_TOKEN=ATATT{}", "A".repeat(30));
-        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             findings.iter().any(|f| f.pattern_id == "jira_token"),
             "Should detect Atlassian/Jira API token"
@@ -1787,7 +2056,7 @@ mod tests {
     fn test_scan_content_finds_sentry_dsn() {
         let dsn = format!("https://{}@o1234.ingest.sentry.io/5678", "a".repeat(32));
         let content = format!("SENTRY_DSN={}", dsn);
-        let findings = scan_content(&content, "sentry.properties", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(&content, "sentry.properties", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             findings.iter().any(|f| f.pattern_id == "sentry_dsn"),
             "Should detect Sentry DSN"
@@ -1797,7 +2066,7 @@ mod tests {
     #[test]
     fn test_scan_content_finds_cloudinary_url() {
         let content = "CLOUDINARY_URL=cloudinary://apikey:apisecret@cloudname";
-        let findings = scan_content(content, ".env", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(content, ".env", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             findings.iter().any(|f| f.pattern_id == "cloudinary_url"),
             "Should detect Cloudinary credentials URL"
@@ -1807,7 +2076,7 @@ mod tests {
     #[test]
     fn test_scan_content_finds_notion_token() {
         let content = format!("NOTION_TOKEN=secret_{}", "A".repeat(43));
-        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             findings.iter().any(|f| f.pattern_id == "notion_token"),
             "Should detect Notion integration token"
@@ -1817,7 +2086,7 @@ mod tests {
     #[test]
     fn test_scan_content_finds_grafana_token() {
         let content = format!("GRAFANA_TOKEN=glsa_{}_ABCD1234", "A".repeat(32));
-        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             findings.iter().any(|f| f.pattern_id == "grafana_token"),
             "Should detect Grafana service account token"
@@ -1827,7 +2096,7 @@ mod tests {
     #[test]
     fn test_scan_content_finds_mongodb_atlas_uri() {
         let content = "MONGO_URI=mongodb+srv://user:password@cluster.mongodb.net/db";
-        let findings = scan_content(content, ".env", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(content, ".env", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             findings.iter().any(|f| f.pattern_id == "mongodb_atlas"),
             "Should detect MongoDB Atlas connection string"
@@ -1837,7 +2106,7 @@ mod tests {
     #[test]
     fn test_scan_content_finds_discord_webhook() {
         let content = format!("DISCORD_WEBHOOK=https://discord.com/api/webhooks/123456789012345678/{}", "A".repeat(68));
-        let findings = scan_content(&content, "config.js", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(&content, "config.js", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             findings.iter().any(|f| f.pattern_id == "discord_webhook"),
             "Should detect Discord webhook URL"
@@ -1979,7 +2248,7 @@ mod tests {
         let line  = r#"secret = "xK9mQz3rN7wT2vB5sL0pJ4hY8uE6fA1d""#;
         let lines = vec![line];
         let mut out = Vec::new();
-        scan_entropy_line(line, 0, "config.py", &sha, false, &lines, &mut out);
+        scan_entropy_line(line, 0, "config.py", &sha, false, &lines, &mut out, 4.5);
         assert!(
             out.iter().any(|f| f.pattern_id == "high_entropy_secret"),
             "Should fire for high-entropy quoted value in keyword context"
@@ -1993,7 +2262,7 @@ mod tests {
         let line  = r#"description = "xK9mQz3rN7wT2vB5sL0pJ4hY8uE6fA1d""#;
         let lines = vec![line];
         let mut out = Vec::new();
-        scan_entropy_line(line, 0, "config.py", &sha, false, &lines, &mut out);
+        scan_entropy_line(line, 0, "config.py", &sha, false, &lines, &mut out, 4.5);
         assert!(out.is_empty(), "Should not fire when no keyword context present");
     }
 
@@ -2002,7 +2271,7 @@ mod tests {
     #[test]
     fn test_scan_content_finds_razorpay_key() {
         let content = format!("RAZORPAY_KEY=rzp_live_{}", "A".repeat(14));
-        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             findings.iter().any(|f| f.pattern_id == "razorpay_key"),
             "Should detect Razorpay key"
@@ -2012,7 +2281,7 @@ mod tests {
     #[test]
     fn test_scan_content_finds_flyio_token() {
         let content = format!("FLY_TOKEN=fo1_{}", "A".repeat(40));
-        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             findings.iter().any(|f| f.pattern_id == "flyio_token"),
             "Should detect Fly.io token"
@@ -2022,7 +2291,7 @@ mod tests {
     #[test]
     fn test_scan_content_finds_render_api_key() {
         let content = format!("RENDER_KEY=rnd_{}", "A".repeat(32));
-        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             findings.iter().any(|f| f.pattern_id == "render_api_key"),
             "Should detect Render API key"
@@ -2032,7 +2301,7 @@ mod tests {
     #[test]
     fn test_scan_content_finds_scaleway_secret() {
         let content = "SCW_SECRET_KEY=12345678-1234-1234-1234-123456789abc";
-        let findings = scan_content(content, ".env", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(content, ".env", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             findings.iter().any(|f| f.pattern_id == "scaleway_secret_key"),
             "Should detect Scaleway secret key"
@@ -2042,7 +2311,7 @@ mod tests {
     #[test]
     fn test_scan_content_finds_square_key() {
         let content = format!("SQUARE_TOKEN=sq0csp-{}", "A".repeat(43));
-        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             findings.iter().any(|f| f.pattern_id == "square_api_key"),
             "Should detect Square API key"
@@ -2052,7 +2321,7 @@ mod tests {
     #[test]
     fn test_scan_content_finds_mapbox_token() {
         let content = "MAPBOX_TOKEN=pk.eyJhIjoiYWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoifQ.ABCDEFGHIJKLMNOPQRS";
-        let findings = scan_content(content, ".env", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(content, ".env", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             findings.iter().any(|f| f.pattern_id == "mapbox_token"),
             "Should detect Mapbox access token"
@@ -2064,7 +2333,7 @@ mod tests {
     fn test_unique_findings_deduplicates() {
         let sha = "a".repeat(40);
         let content = "AKIAZ9XYZMNOP1234567\nAKIAZ9XYZMNOP1234567";
-        let raw = scan_content(content, "file.sh", &sha, false, &[]);
+        let raw = scan_content(content, "file.sh", &sha, false, &[], 4.5);
         // Build a StreamResult manually
         let sr = super::StreamResult {
             findings: raw,
@@ -2093,7 +2362,7 @@ mod tests {
             regex: regex::Regex::new(r"CUSTOM_[A-Z0-9]{8}").unwrap(),
         };
         let content = "TOKEN=CUSTOM_ABCD1234";
-        let findings = scan_content(content, "config.sh", "a".repeat(40).as_str(), false, &[dyn_pat]);
+        let findings = scan_content(content, "config.sh", "a".repeat(40).as_str(), false, &[dyn_pat], 4.5);
         assert!(
             findings.iter().any(|f| f.pattern_id == "custom_token"),
             "Should detect custom dynamic pattern"
@@ -2139,7 +2408,7 @@ mod tests {
         let line = r#"api_key = "AbCdEfGhIjKlMnOpQrStUvWxYz12345678""#;
         let lines = vec![line];
         let mut out = Vec::new();
-        scan_entropy_line(line, 0, "config.py", &sha, false, &lines, &mut out);
+        scan_entropy_line(line, 0, "config.py", &sha, false, &lines, &mut out, 4.5);
         assert!(
             !out.iter().any(|f| f.severity == "MEDIUM"),
             "Entropy scanner must never produce MEDIUM-severity findings (threshold is 4.5)"
@@ -2154,7 +2423,7 @@ mod tests {
         let line = r#"password = "aababababababababab""#;
         let lines = vec![line];
         let mut out = Vec::new();
-        scan_entropy_line(line, 0, "config.py", &sha, false, &lines, &mut out);
+        scan_entropy_line(line, 0, "config.py", &sha, false, &lines, &mut out, 4.5);
         assert!(out.is_empty(), "Low-entropy value (< 4.5 bits/char) must not produce findings");
     }
 
@@ -2190,7 +2459,7 @@ mod tests {
         let sha = "a".repeat(40);
         // Bare token without any label (common FP source: order IDs, tracking numbers)
         let content = "order_id=1234567890:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi";
-        let findings = scan_content(content, "config.php", &sha, false, &[]);
+        let findings = scan_content(content, "config.php", &sha, false, &[], 4.5);
         assert!(
             !findings.iter().any(|f| f.pattern_id == "telegram_bot"),
             "Bare numeric:token without 'telegram'/'bot' context must not be flagged as Telegram Bot Token"
@@ -2202,7 +2471,7 @@ mod tests {
     fn test_telegram_bot_fires_with_context_keyword() {
         let sha = "a".repeat(40);
         let content = "TELEGRAM_BOT_TOKEN=1234567890:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi";
-        let findings = scan_content(content, ".env", &sha, false, &[]);
+        let findings = scan_content(content, ".env", &sha, false, &[], 4.5);
         assert!(
             findings.iter().any(|f| f.pattern_id == "telegram_bot"),
             "Telegram bot token with 'TELEGRAM_BOT_TOKEN=' label must be detected"
@@ -2214,7 +2483,7 @@ mod tests {
     #[test]
     fn test_scan_content_finds_github_fine_pat() {
         let content = format!("TOKEN=github_pat_{}", "A".repeat(82));
-        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             findings.iter().any(|f| f.pattern_id == "github_fine_pat"),
             "Should detect GitHub fine-grained PAT"
@@ -2224,7 +2493,7 @@ mod tests {
     #[test]
     fn test_scan_content_finds_groq_key() {
         let content = format!("GROQ_KEY=gsk_{}", "A".repeat(52));
-        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             findings.iter().any(|f| f.pattern_id == "groq_key"),
             "Should detect Groq API key"
@@ -2234,7 +2503,7 @@ mod tests {
     #[test]
     fn test_scan_content_finds_replicate_token() {
         let content = format!("REPLICATE_TOKEN=r8_{}", "A".repeat(40));
-        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             findings.iter().any(|f| f.pattern_id == "replicate_token"),
             "Should detect Replicate API token"
@@ -2244,7 +2513,7 @@ mod tests {
     #[test]
     fn test_scan_content_finds_contentful_token() {
         let content = format!("CONTENTFUL_TOKEN=CFPAT-{}", "A".repeat(43));
-        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             findings.iter().any(|f| f.pattern_id == "contentful_token"),
             "Should detect Contentful token"
@@ -2254,7 +2523,7 @@ mod tests {
     #[test]
     fn test_scan_content_finds_postman_key() {
         let content = format!("POSTMAN_KEY=PMAK-{}-{}", "A".repeat(24), "B".repeat(34));
-        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             findings.iter().any(|f| f.pattern_id == "postman_key"),
             "Should detect Postman API key"
@@ -2264,7 +2533,7 @@ mod tests {
     #[test]
     fn test_scan_content_finds_tencent_secret_id() {
         let content = format!("TENCENT_ID=AKID{}", "A".repeat(32));
-        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             findings.iter().any(|f| f.pattern_id == "tencent_secret_id"),
             "Should detect Tencent Cloud SecretId"
@@ -2274,7 +2543,7 @@ mod tests {
     #[test]
     fn test_scan_content_finds_age_secret_key() {
         let content = "AGE-SECRET-KEY-1QPZRY9X8GF2TVDW0S3JN54KHCE6MUA7LQPZRY9X8GF2TVDW0S3JN54KHCE6M";
-        let findings = scan_content(content, ".env", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(content, ".env", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             findings.iter().any(|f| f.pattern_id == "age_secret_key"),
             "Should detect Age encryption secret key"
@@ -2284,7 +2553,7 @@ mod tests {
     #[test]
     fn test_scan_content_finds_clerk_secret() {
         let content = format!("CLERK_SECRET=sk_live_{}", "A".repeat(30));
-        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             findings.iter().any(|f| f.pattern_id == "clerk_secret"),
             "Should detect Clerk secret key"
@@ -2398,7 +2667,7 @@ mod tests {
     fn test_scan_content_on_commit_message_finds_secret() {
         // Simulate scanning a commit message that contains a secret
         let content = "fix: update config\n\nAWS_KEY=AKIAZ9XYZMNOP1234567";
-        let findings = scan_content(content, "[commit:abcd1234:message]", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(content, "[commit:abcd1234:message]", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             findings.iter().any(|f| f.pattern_id == "aws_key_id"),
             "Should detect secrets in commit messages"
@@ -2411,7 +2680,7 @@ mod tests {
     fn test_scan_content_finds_smtp_credentials_php_array() {
         // PHP array format: 'smtp_pass' => 'p4ncasona@23'
         let content = r#"'smtp_pass' => 'p4ncasona@23',"#;
-        let findings = scan_content(content, "email.php", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(content, "email.php", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             findings.iter().any(|f| f.pattern_id == "smtp_credentials"),
             "Should detect smtp_pass in PHP array format"
@@ -2421,7 +2690,7 @@ mod tests {
     #[test]
     fn test_scan_content_finds_smtp_credentials_env() {
         let content = "SMTP_PASS=secretpassword123";
-        let findings = scan_content(content, ".env", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(content, ".env", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             findings.iter().any(|f| f.pattern_id == "smtp_credentials"),
             "Should detect SMTP_PASS in .env format"
@@ -2431,7 +2700,7 @@ mod tests {
     #[test]
     fn test_scan_content_finds_smtp_password_yaml() {
         let content = "smtp_password: mysecretpassword";
-        let findings = scan_content(content, "config.yaml", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(content, "config.yaml", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             findings.iter().any(|f| f.pattern_id == "smtp_credentials"),
             "Should detect smtp_password in YAML format"
@@ -2441,7 +2710,7 @@ mod tests {
     #[test]
     fn test_scan_content_finds_smtp_url_with_credentials() {
         let content = "MAIL_URL=smtps://mailuser:secretpass@smtp.acme.net:465";
-        let findings = scan_content(content, ".env", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(content, ".env", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             findings.iter().any(|f| f.pattern_id == "smtp_url"),
             "Should detect SMTP URL with embedded credentials"
@@ -2451,7 +2720,7 @@ mod tests {
     #[test]
     fn test_scan_content_finds_imap_credentials() {
         let content = r#"'imap_pass' => 'mailboxSecret99',"#;
-        let findings = scan_content(content, "config.php", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(content, "config.php", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             findings.iter().any(|f| f.pattern_id == "imap_credentials"),
             "Should detect IMAP credentials"
@@ -2461,7 +2730,7 @@ mod tests {
     #[test]
     fn test_scan_content_finds_pop3_credentials() {
         let content = "pop3_password = 'inbox_secret_pass'";
-        let findings = scan_content(content, "mail.conf", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(content, "mail.conf", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             findings.iter().any(|f| f.pattern_id == "imap_credentials"),
             "Should detect POP3 credentials"
@@ -2471,7 +2740,7 @@ mod tests {
     #[test]
     fn test_scan_content_finds_ftp_credentials() {
         let content = r#"'ftp_pass' => 'ftpS3cret!',"#;
-        let findings = scan_content(content, "deploy.php", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(content, "deploy.php", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             findings.iter().any(|f| f.pattern_id == "ftp_credentials"),
             "Should detect FTP credentials"
@@ -2481,7 +2750,7 @@ mod tests {
     #[test]
     fn test_scan_content_finds_sftp_credentials() {
         let content = "SFTP_PASSWORD=deploy_secret_key";
-        let findings = scan_content(content, ".env", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(content, ".env", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             findings.iter().any(|f| f.pattern_id == "ftp_credentials"),
             "Should detect SFTP credentials"
@@ -2491,7 +2760,7 @@ mod tests {
     #[test]
     fn test_scan_content_finds_ftp_url_with_credentials() {
         let content = "FTP_URL=ftp://ftpuser:ftppassword@ftp.acme.net";
-        let findings = scan_content(content, ".env", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(content, ".env", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             findings.iter().any(|f| f.pattern_id == "ftp_url"),
             "Should detect FTP URL with embedded credentials"
@@ -2501,7 +2770,7 @@ mod tests {
     #[test]
     fn test_scan_content_finds_amqp_url_with_credentials() {
         let content = "AMQP_URL=amqp://rabbitmq:r4bbitPass@localhost:5672/vhost";
-        let findings = scan_content(content, ".env", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(content, ".env", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             findings.iter().any(|f| f.pattern_id == "amqp_url"),
             "Should detect AMQP connection URL with credentials"
@@ -2511,7 +2780,7 @@ mod tests {
     #[test]
     fn test_scan_content_finds_amqps_url_with_credentials() {
         let content = "RABBITMQ_URL=amqps://admin:amqpSecret@mq.acme.net:5671";
-        let findings = scan_content(content, "config.sh", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(content, "config.sh", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             findings.iter().any(|f| f.pattern_id == "amqp_url"),
             "Should detect AMQPS (TLS) connection URL with credentials"
@@ -2521,7 +2790,7 @@ mod tests {
     #[test]
     fn test_scan_content_finds_ldap_credentials() {
         let content = "LDAP_URL=ldap://cn=admin:ldapSecret@ldap.acme.net";
-        let findings = scan_content(content, ".env", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(content, ".env", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             findings.iter().any(|f| f.pattern_id == "ldap_credentials"),
             "Should detect LDAP URL with embedded credentials"
@@ -2531,7 +2800,7 @@ mod tests {
     #[test]
     fn test_smtp_credentials_placeholder_filtered() {
         let content = "smtp_pass = 'changeme'";
-        let findings = scan_content(content, "config.php", "a".repeat(40).as_str(), false, &[]);
+        let findings = scan_content(content, "config.php", "a".repeat(40).as_str(), false, &[], 4.5);
         assert!(
             !findings.iter().any(|f| f.pattern_id == "smtp_credentials"),
             "Placeholder SMTP password 'changeme' should be filtered"

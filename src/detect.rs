@@ -91,6 +91,7 @@ pub struct ProbeDetail {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct DetectResult {
     pub url: String,
     pub git_url: String,
@@ -107,6 +108,7 @@ pub struct DetectResult {
 }
 
 impl DetectResult {
+    #[allow(dead_code)]
     pub fn actionable(&self) -> bool {
         self.confidence >= 45
     }

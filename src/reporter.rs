@@ -4,15 +4,19 @@
 
 use std::path::Path;
 use colored::*;
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 use crate::detect::DetectResult;
 use crate::mapper::MapResult;
 use crate::streamer::StreamResult;
 
+#[derive(Clone)]
+#[allow(dead_code)]
 pub struct Reporter {
-    #[allow(dead_code)]
     pub no_color: bool,
 }
 
+#[allow(dead_code)]
 impl Reporter {
     pub fn new(no_color: bool) -> Self {
         if no_color {
@@ -286,5 +290,168 @@ impl Reporter {
         else if score >= 40 { s.yellow() }
         else if score >= 15 { s.bright_yellow() }
         else                { s.green() }
+    }
+
+    // O-2: SARIF 2.1.0 output format
+    pub fn save_sarif(&self, path: &str, _target: &str, stream_r: Option<&StreamResult>) -> std::io::Result<()> {
+        let mut rules = Vec::new();
+        let mut results = Vec::new();
+
+        if let Some(s) = stream_r {
+            for f in &s.findings {
+                let level = match f.severity.as_str() {
+                    "CRITICAL" | "HIGH" => "error",
+                    "MEDIUM" => "warning",
+                    _ => "note",
+                };
+                rules.push(serde_json::json!({
+                    "id": f.pattern_id,
+                    "name": f.pattern_id,
+                    "shortDescription": {"text": f.description}
+                }));
+                results.push(serde_json::json!({
+                    "ruleId": f.pattern_id,
+                    "level": level,
+                    "message": {"text": f.description},
+                    "locations": [{
+                        "physicalLocation": {
+                            "artifactLocation": {"uri": f.filename},
+                            "region": {"startLine": f.line}
+                        }
+                    }]
+                }));
+            }
+        }
+
+        let sarif = serde_json::json!({
+            "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
+            "version": "2.1.0",
+            "runs": [{
+                "tool": {"driver": {"name": "GitRecon", "version": "3.2.0", "rules": rules}},
+                "results": results
+            }]
+        });
+
+        let parent = Path::new(path).parent().unwrap_or(Path::new("."));
+        std::fs::create_dir_all(parent)?;
+        let json_str = serde_json::to_string_pretty(&sarif).map_err(std::io::Error::other)?;
+        std::fs::write(path, json_str)
+    }
+
+    // O-3: CSV output format
+    pub fn save_csv(&self, path: &str, stream_r: Option<&StreamResult>) -> std::io::Result<()> {
+        let parent = Path::new(path).parent().unwrap_or(Path::new("."));
+        std::fs::create_dir_all(parent)?;
+        let mut out = String::from("file,line,severity,type,description,match,deleted\n");
+        if let Some(s) = stream_r {
+            for f in &s.findings {
+                let m = f.match_str.replace('"', "\"\"");
+                let desc = f.description.replace('"', "\"\"");
+                out.push_str(&format!(
+                    "{},{},{},{},\"{}\",\"{}\",{}\n",
+                    f.filename, f.line, f.severity, f.pattern_id, desc, m, f.is_deleted
+                ));
+            }
+        }
+        std::fs::write(path, out)
+    }
+
+    // O-3: NDJSON output format
+    pub fn save_ndjson(&self, path: &str, stream_r: Option<&StreamResult>) -> std::io::Result<()> {
+        let parent = Path::new(path).parent().unwrap_or(Path::new("."));
+        std::fs::create_dir_all(parent)?;
+        let mut out = String::new();
+        if let Some(s) = stream_r {
+            for f in &s.findings {
+                if let Ok(line) = serde_json::to_string(&f.to_dict()) {
+                    out.push_str(&line);
+                    out.push('\n');
+                }
+            }
+        }
+        std::fs::write(path, out)
+    }
+
+    // O-3: Markdown output format
+    pub fn save_markdown(&self, path: &str, target: &str, stream_r: Option<&StreamResult>) -> std::io::Result<()> {
+        let parent = Path::new(path).parent().unwrap_or(Path::new("."));
+        std::fs::create_dir_all(parent)?;
+        let mut out = format!("# GitRecon Report\n\n**Target:** {}\n\n", target);
+        out.push_str("| Severity | Type | File | Line | Match |\n");
+        out.push_str("|----------|------|------|------|-------|\n");
+        if let Some(s) = stream_r {
+            for f in &s.findings {
+                let emoji = match f.severity.as_str() {
+                    "CRITICAL" => "🔴",
+                    "HIGH"     => "🟡",
+                    "MEDIUM"   => "🟠",
+                    "LOW"      => "🔵",
+                    _          => "⚪",
+                };
+                let m = &f.match_str[..f.match_str.len().min(60)];
+                out.push_str(&format!(
+                    "| {} {} | {} | {} | {} | `{}` |\n",
+                    emoji, f.severity, f.pattern_id, f.filename, f.line, m
+                ));
+            }
+        }
+        std::fs::write(path, out)
+    }
+
+    // O-3: HTML output format
+    pub fn save_html(&self, path: &str, target: &str, stream_r: Option<&StreamResult>) -> std::io::Result<()> {
+        let parent = Path::new(path).parent().unwrap_or(Path::new("."));
+        std::fs::create_dir_all(parent)?;
+        let mut rows = String::new();
+        if let Some(s) = stream_r {
+            for f in &s.findings {
+                let color = match f.severity.as_str() {
+                    "CRITICAL" => "#ff4444",
+                    "HIGH"     => "#ff8800",
+                    "MEDIUM"   => "#ffbb00",
+                    "LOW"      => "#4488ff",
+                    _          => "#888888",
+                };
+                let m = &f.match_str[..f.match_str.len().min(80)];
+                rows.push_str(&format!(
+                    "<tr><td style='color:{}'>{}</td><td>{}</td><td>{}</td><td>{}</td><td><code>{}</code></td></tr>\n",
+                    color, f.severity, f.pattern_id, f.filename, f.line, m
+                ));
+            }
+        }
+        let html = format!(r#"<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>GitRecon Report</title>
+<style>body{{font-family:sans-serif;margin:2em}}table{{border-collapse:collapse;width:100%}}th,td{{border:1px solid #ddd;padding:8px;text-align:left}}th{{background:#222;color:#fff}}</style>
+</head><body>
+<h1>GitRecon Report</h1>
+<p><strong>Target:</strong> {}</p>
+<table><thead><tr><th>Severity</th><th>Type</th><th>File</th><th>Line</th><th>Match</th></tr></thead>
+<tbody>{}</tbody></table>
+</body></html>"#, target, rows);
+        std::fs::write(path, html)
+    }
+
+    // O-4: Webhook integration
+    fn compute_hmac_sha256(key: &str, data: &str) -> String {
+        type HmacSha256 = Hmac<Sha256>;
+        let mut mac = HmacSha256::new_from_slice(key.as_bytes()).expect("HMAC init");
+        mac.update(data.as_bytes());
+        hex::encode(mac.finalize().into_bytes())
+    }
+
+    pub async fn send_webhook(
+        &self,
+        url: &str,
+        secret: Option<&str>,
+        body: &str,
+        client: &crate::http_client::HttpClient,
+    ) -> bool {
+        let mut extra_headers = Vec::new();
+        if let Some(key) = secret {
+            let sig = Self::compute_hmac_sha256(key, body);
+            extra_headers.push(("X-GitRecon-Signature".to_string(), sig));
+        }
+        let resp = client.post(url, body, &extra_headers).await;
+        resp.status >= 200 && resp.status < 300
     }
 }

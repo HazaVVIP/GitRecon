@@ -1,6 +1,6 @@
 [package]
 name = "gitrecon"
-version = "3.1.0"
+version = "3.2.0"
 edition = "2021"
 description = "GitRecon — Streaming Git Exposure Scanner (Rust rewrite)"
 authors = ["GitRecon Contributors"]
@@ -38,6 +38,8 @@ flate2 = "1.1"
 
 # Hashing
 sha1 = "0.10"
+sha2 = "0.10"
+hmac = "0.12"
 hex = "0.4"
 
 # Terminal colors
