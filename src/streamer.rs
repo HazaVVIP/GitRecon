@@ -1515,6 +1515,33 @@ fn scan_multiline(content: &str, filename: &str, sha1: &str, is_deleted: bool) -
     findings
 }
 
+// ════════════════════════════════════════════════
+// PUBLIC SCAN API (used by --token mode)
+// ════════════════════════════════════════════════
+
+/// Scan arbitrary text content for secrets using all built-in patterns plus
+/// any caller-supplied extra patterns.
+///
+/// * `text`              — UTF-8 content to scan
+/// * `source`            — file path / label used in the returned [`Finding`]s
+/// * `dyn_patterns`      — additional runtime-loaded patterns (from `--patterns`)
+/// * `entropy_threshold` — minimum Shannon entropy for the high-entropy scanner
+///   (pass `4.5` for the default)
+///
+/// All findings returned have `is_deleted = false` and `commit_sha1 = None`
+/// because there is no Git object SHA in this context.
+pub fn scan_text(
+    text:              &str,
+    source:            &str,
+    dyn_patterns:      &[DynPattern],
+    entropy_threshold: f64,
+) -> Vec<Finding> {
+    let mut findings = scan_content(text, source, "", false, dyn_patterns, entropy_threshold);
+    findings.extend(scan_yaml_nextline_secrets(text, source, "", false));
+    findings.extend(scan_db_config_blocks(text, source, "", false));
+    findings
+}
+
 // S-3: Binary file string extraction
 fn extract_printable_strings(data: &[u8], min_len: usize) -> Vec<String> {
     let mut result = Vec::new();
