@@ -68,6 +68,11 @@ gitrecon https://target.com --fuzz
 # Stop on first critical finding
 gitrecon https://target.com --stop-on-critical
 
+# Authenticate with a GitHub Personal Access Token
+gitrecon https://target.com --token ghp_xxxxxxxxxxxxxxxxxxxx
+# or via environment variable
+GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx gitrecon https://target.com
+
 # Load custom patterns from a JSON file
 gitrecon https://target.com --patterns my_patterns.json
 
@@ -97,6 +102,7 @@ gitrecon https://target.com --no-color -q --output ./results
 | `--min-confidence PCT` | 45 | Minimum confidence to continue (0–100) |
 | `--no-color` | off | Disable terminal colours |
 | `-q`, `--quiet` | off | Reduce terminal output |
+| `--token PAT` | — | GitHub Personal Access Token for authenticated requests (also reads `$GITHUB_TOKEN`) |
 
 ---
 

@@ -191,6 +191,10 @@ struct Cli {
     // A-6: pipe mode
     #[arg(long = "pipe")]
     pipe: bool,
+
+    /// GitHub Personal Access Token for authenticated requests (also reads $GITHUB_TOKEN)
+    #[arg(long = "token", value_name = "PAT")]
+    token: Option<String>,
 }
 
 // ════════════════════════════════════════════════
@@ -307,6 +311,11 @@ async fn main() {
     let mut extra_headers = parse_extra_headers(&args.headers);
     if args.ua_git {
         extra_headers.push(("Git-Protocol".to_string(), "version=2".to_string()));
+    }
+    let token = args.token
+        .or_else(|| std::env::var("GITHUB_TOKEN").ok().filter(|t| !t.is_empty()));
+    if let Some(ref tok) = token {
+        extra_headers.push(("Authorization".to_string(), format!("Bearer {}", tok)));
     }
 
     let mut proxy_list = vec![];
