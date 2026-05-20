@@ -45,6 +45,8 @@ cargo build --release
 
 ```
 gitrecon <URL> [OPTIONS]
+gitrecon --token <PAT> [OPTIONS]
+gitrecon --dir <PATH> [OPTIONS]
 ```
 
 ### Basic examples
@@ -52,6 +54,9 @@ gitrecon <URL> [OPTIONS]
 ```bash
 # Detect and scan a target
 gitrecon https://target.com
+
+# Scan a local directory recursively (text files)
+gitrecon --dir ./my-project
 
 # Save reconstructed source to disk
 gitrecon https://target.com --save
@@ -79,6 +84,7 @@ gitrecon https://target.com --no-color -q --output ./results
 
 | Flag | Default | Description |
 |---|---|---|
+| `--dir PATH` | — | Scan local directory recursively (cannot be combined with URL/`--targets`/`--token`) |
 | `--save` | off | Reconstruct source code to disk after scan |
 | `-o`, `--output DIR` | `./gitrecon_output` | Output directory |
 | `--proxy URL` | — | Proxy URL (`socks5://`, `socks4://`, `http://`) |
@@ -97,6 +103,13 @@ gitrecon https://target.com --no-color -q --output ./results
 | `--min-confidence PCT` | 45 | Minimum confidence to continue (0–100) |
 | `--no-color` | off | Disable terminal colours |
 | `-q`, `--quiet` | off | Reduce terminal output |
+
+Mode selection:
+- `--token` mode: scan repositories accessible by GitHub PAT.
+- `--dir` mode: scan local directory files directly (no HTTP/.git detection pipeline).
+- URL/`--targets` mode: scan exposed `.git` endpoints remotely.
+
+`--dir` notes: symbolic links are skipped to avoid traversal loops, binary-like extensions are skipped, and files larger than `--max-blob-size` are ignored.
 
 ---
 
