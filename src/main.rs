@@ -262,7 +262,7 @@ const BINARY_DETECTION_PROBE_SIZE: usize = 8192;
 const NULL_BYTE_THRESHOLD: usize = 10;
 const RECENT_FINDINGS_WINDOW: usize = 20;
 
-fn collect_local_files(root: &Path) -> Vec<PathBuf> {
+fn collect_local_files(root: &Path) -> Vec<(PathBuf, u64)> {
     let mut files = Vec::new();
     let mut stack = vec![root.to_path_buf()];
 
@@ -287,7 +287,11 @@ fn collect_local_files(root: &Path) -> Vec<PathBuf> {
                 continue;
             }
             if file_type.is_file() {
-                files.push(path);
+                let size = match entry.metadata() {
+                    Ok(meta) => meta.len(),
+                    Err(_) => continue,
+                };
+                files.push((path, size));
             }
         }
     }
@@ -702,8 +706,9 @@ async fn run_dir_scan(
 
     let candidates: Vec<PathBuf> = all_files
         .into_iter()
-        .filter(|p| !is_binary_extension(&p.to_string_lossy()))
-        .filter(|p| std::fs::metadata(p).map(|m| m.len() <= max_blob_bytes as u64).unwrap_or(false))
+        .filter(|(p, _)| !is_binary_extension(&p.to_string_lossy()))
+        .filter(|(_, size)| *size <= max_blob_bytes as u64)
+        .map(|(p, _)| p)
         .collect();
 
     if verbose {
