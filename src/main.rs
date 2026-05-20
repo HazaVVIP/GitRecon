@@ -15,6 +15,7 @@
 //!   gitrecon https://target.com --no-color -q
 //!   gitrecon --token ghp_xxxxxxxxxxxxxxxxxxxx
 //!   gitrecon --token ghp_xxxx --format sarif --output ./results
+//!   gitrecon --dir ./project
 
 mod http_client;
 mod git_parser;
@@ -26,6 +27,7 @@ mod github_api;
 #[allow(dead_code)]
 mod reconstructor;
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -48,7 +50,7 @@ use streamer::StreamResult;
     version = "3.2.0",
     about = "GitRecon — Streaming Git Exposure Scanner (Rust)",
     long_about = None,
-    after_help = "Examples:\n  gitrecon https://target.com\n  gitrecon https://target.com --save\n  gitrecon https://target.com --proxy socks5://127.0.0.1:9050 --delay 1\n  gitrecon https://target.com --fuzz --timeout 15\n  gitrecon --targets urls.txt --parallel-targets 5\n  gitrecon https://target.com --format sarif --webhook https://alerts.example.com\n  gitrecon --token ghp_xxxxxxxxxxxxxxxxxxxx\n  gitrecon --token ghp_xxxx --format sarif --output ./results\n  gitrecon --token ghp_xxxx --workers 20 --max-blob-size 2"
+    after_help = "Examples:\n  gitrecon https://target.com\n  gitrecon https://target.com --save\n  gitrecon https://target.com --proxy socks5://127.0.0.1:9050 --delay 1\n  gitrecon https://target.com --fuzz --timeout 15\n  gitrecon --targets urls.txt --parallel-targets 5\n  gitrecon https://target.com --format sarif --webhook https://alerts.example.com\n  gitrecon --token ghp_xxxxxxxxxxxxxxxxxxxx\n  gitrecon --token ghp_xxxx --format sarif --output ./results\n  gitrecon --token ghp_xxxx --workers 20 --max-blob-size 2\n  gitrecon --dir ./project --format json"
 )]
 struct Cli {
     /// Target URL (optional when --targets or --token is used)
@@ -58,6 +60,10 @@ struct Cli {
     /// GitHub Personal Access Token — enumerate and scan all accessible repositories
     #[arg(long = "token", value_name = "PAT")]
     token: Option<String>,
+
+    /// Scan a local directory recursively for secrets
+    #[arg(long = "dir", value_name = "PATH")]
+    dir: Option<String>,
 
     /// Rekonstruksi source code ke disk setelah scan
     #[arg(long)]
@@ -232,6 +238,15 @@ fn target_name(url: &str) -> String {
         .collect()
 }
 
+fn dir_target_name(path: &Path) -> String {
+    let raw = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or("directory_scan");
+    target_name(raw)
+}
+
 fn parse_extra_headers(raw: &[String]) -> Vec<(String, String)> {
     raw.iter()
         .filter_map(|h| {
@@ -241,6 +256,61 @@ fn parse_extra_headers(raw: &[String]) -> Vec<(String, String)> {
             Some((k, v))
         })
         .collect()
+}
+
+const BINARY_DETECTION_PROBE_SIZE: usize = 8192;
+const NULL_BYTE_THRESHOLD: usize = 10;
+const RECENT_FINDINGS_WINDOW: usize = 20;
+
+fn collect_local_files(root: &Path) -> Vec<(PathBuf, u64)> {
+    let mut files = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+
+    while let Some(dir) = stack.pop() {
+        let read_dir = match std::fs::read_dir(&dir) {
+            Ok(rd) => rd,
+            Err(_) => continue,
+        };
+
+        for entry in read_dir.flatten() {
+            let file_type = match entry.file_type() {
+                Ok(ft) => ft,
+                Err(_) => continue,
+            };
+            let path = entry.path();
+
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if file_type.is_file() {
+                let size = match entry.metadata() {
+                    Ok(meta) => meta.len(),
+                    Err(_) => continue,
+                };
+                files.push((path, size));
+            }
+        }
+    }
+
+    files
+}
+
+fn should_stop_scan(
+    findings: &[streamer::Finding],
+    max_findings: usize,
+    stop_on_critical: bool,
+) -> bool {
+    (max_findings > 0 && findings.len() >= max_findings)
+        || (stop_on_critical
+            && findings
+                .iter()
+                .rev()
+                .take(RECENT_FINDINGS_WINDOW)
+                .any(|f| f.severity == "CRITICAL"))
 }
 
 /// Returns true for file extensions that indicate binary content unlikely to
@@ -443,9 +513,9 @@ async fn run_token_scan(
                     }
 
                     // Fast binary sniff: >10 null bytes in the first 8 KB
-                    let probe      = &data[..data.len().min(8192)];
+                    let probe      = &data[..data.len().min(BINARY_DETECTION_PROBE_SIZE)];
                     let null_count = probe.iter().filter(|&&b| b == 0).count();
-                    if null_count > 10 {
+                    if null_count > NULL_BYTE_THRESHOLD {
                         return (vec![], vec![]);
                     }
 
@@ -493,13 +563,10 @@ async fn run_token_scan(
             let mut all = all_findings.lock().await;
             all.extend(findings);
 
-            let hit_limit    = args.max_findings > 0 && all.len() >= args.max_findings;
-            let hit_critical = args.stop_on_critical
-                && all.iter().rev().take(20).any(|f| f.severity == "CRITICAL");
-            if hit_limit || hit_critical {
+            if should_stop_scan(&all, args.max_findings, args.stop_on_critical) {
                 stop_flag.store(true, Ordering::Relaxed);
                 if verbose {
-                    if hit_limit {
+                    if args.max_findings > 0 && all.len() >= args.max_findings {
                         println!("\n  [!] Reached --max-findings limit. Stopping scan.");
                     } else {
                         println!("\n  [!] --stop-on-critical triggered. Stopping scan.");
@@ -591,6 +658,239 @@ async fn run_token_scan(
             "mode":     "token",
             "user":     login,
             "repos":    total_repos,
+            "findings": stream_r.findings.len(),
+            "risk_score": stream_r.risk_score(),
+        });
+        println!("{}", serde_json::to_string(&summary).unwrap_or_default());
+    }
+
+    if verbose && !args.pipe {
+        println!("  ✔  Done\n");
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+async fn run_dir_scan(
+    args: &Cli,
+    rep: &Reporter,
+    client: &HttpClient,
+    dir: &str,
+    extra_patterns: Vec<streamer::DynPattern>,
+) {
+    let quiet = args.quiet || args.pipe;
+    let verbose = !quiet;
+
+    let root_path = Path::new(dir);
+    let canonical_root = match std::fs::canonicalize(root_path) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("  ✘  Cannot access directory '{}': {}", dir, e);
+            std::process::exit(1);
+        }
+    };
+
+    if !canonical_root.is_dir() {
+        eprintln!("  ✘  --dir must point to a directory.");
+        std::process::exit(1);
+    }
+
+    if !quiet {
+        rep.banner();
+        println!("  Mode  : Local Directory Scan");
+        println!("  Target: {}", canonical_root.display());
+        println!("  Output: {}\n", args.output);
+    }
+
+    let all_files = collect_local_files(&canonical_root);
+    let max_blob_bytes = args.max_blob_size * 1024 * 1024;
+
+    let candidates: Vec<PathBuf> = all_files
+        .into_iter()
+        .filter(|(p, _)| !is_binary_extension(&p.to_string_lossy()))
+        .filter(|(_, size)| *size <= max_blob_bytes as u64)
+        .map(|(p, _)| p)
+        .collect();
+
+    if verbose {
+        println!("  ◈  Found {} candidate files\n", candidates.len());
+    }
+
+    let t0 = Instant::now();
+    let all_findings = Arc::new(tokio::sync::Mutex::new(Vec::<streamer::Finding>::new()));
+    let tech_stack_set = Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::<String>::new()));
+    let blobs_scanned = Arc::new(AtomicUsize::new(0));
+    let blobs_failed = Arc::new(AtomicUsize::new(0));
+    let bytes_scanned = Arc::new(AtomicUsize::new(0));
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    let extra_pat_arc = Arc::new(extra_patterns);
+    let display_root = canonical_root.to_string_lossy().to_string();
+
+    let file_stream = futures::stream::iter(candidates)
+        .map(|path| {
+            let stop = stop_flag.clone();
+            let extra_patterns = extra_pat_arc.clone();
+            let root = canonical_root.clone();
+            let display_root = display_root.clone();
+            let entropy_thresh = args.entropy_threshold;
+            async move {
+                if stop.load(Ordering::Relaxed) {
+                    return (vec![], vec![], 0usize, false, true);
+                }
+
+                let data = match tokio::fs::read(&path).await {
+                    Ok(d) => d,
+                    Err(_) => return (vec![], vec![], 0usize, true, false),
+                };
+
+                if data.is_empty() {
+                    return (vec![], vec![], 0usize, false, false);
+                }
+
+                let probe = &data[..data.len().min(BINARY_DETECTION_PROBE_SIZE)];
+                let null_count = probe.iter().filter(|&&b| b == 0).count();
+                if null_count > NULL_BYTE_THRESHOLD {
+                    return (vec![], vec![], 0usize, false, false);
+                }
+
+                let text = String::from_utf8_lossy(&data);
+                let rel = path
+                    .strip_prefix(&root)
+                    .map(|p| p.to_string_lossy().replace('\\', "/"))
+                    .unwrap_or_else(|_| path.to_string_lossy().replace('\\', "/"));
+                let source = format!("{}/{}", display_root, rel);
+                let findings = streamer::scan_text(&text, &source, &extra_patterns, entropy_thresh);
+
+                let mut techs = Vec::new();
+                detect_tech_from_path(&rel, &mut techs);
+
+                (findings, techs, data.len(), false, false)
+            }
+        })
+        .buffer_unordered(args.workers);
+
+    futures::pin_mut!(file_stream);
+    while let Some((findings, techs, bytes, failed, skipped_by_stop)) = file_stream.next().await {
+        if skipped_by_stop {
+            continue;
+        }
+
+        if failed {
+            blobs_failed.fetch_add(1, Ordering::Relaxed);
+            continue;
+        }
+
+        if bytes > 0 {
+            blobs_scanned.fetch_add(1, Ordering::Relaxed);
+            bytes_scanned.fetch_add(bytes, Ordering::Relaxed);
+        }
+
+        if !techs.is_empty() {
+            let mut ts = tech_stack_set.lock().await;
+            for t in techs {
+                ts.insert(t);
+            }
+        }
+
+        if findings.is_empty() {
+            continue;
+        }
+
+        if args.live || args.pipe {
+            for f in &findings {
+                println!("{}", serde_json::to_string(&f.to_dict()).unwrap_or_default());
+            }
+        }
+
+        let mut all = all_findings.lock().await;
+        all.extend(findings);
+
+        if should_stop_scan(&all, args.max_findings, args.stop_on_critical) {
+            stop_flag.store(true, Ordering::Relaxed);
+            if verbose {
+                if args.max_findings > 0 && all.len() >= args.max_findings {
+                    println!("\n  [!] Reached --max-findings limit. Stopping scan.");
+                } else {
+                    println!("\n  [!] --stop-on-critical triggered. Stopping scan.");
+                }
+            }
+        }
+    }
+
+    let elapsed_s = t0.elapsed().as_secs_f64();
+    let findings = all_findings.lock().await.clone();
+    let mut ts_vec: Vec<String> = tech_stack_set.lock().await.iter().cloned().collect();
+    ts_vec.sort();
+
+    let stream_r = StreamResult {
+        findings,
+        contributors: vec![],
+        tech_stack: ts_vec,
+        commit_count: 0,
+        blobs_scanned: blobs_scanned.load(Ordering::Relaxed),
+        blobs_failed: blobs_failed.load(Ordering::Relaxed),
+        bytes_scanned: bytes_scanned.load(Ordering::Relaxed),
+        elapsed_s,
+        files_saved: 0,
+        files_save_failed: 0,
+    };
+
+    if verbose && !args.pipe {
+        rep.print_findings_summary(&stream_r.findings);
+    }
+
+    let dir_name = dir_target_name(&canonical_root);
+    let report_name = format!("dir_{}", dir_name);
+    let ext = match args.format.as_str() {
+        "sarif" => "sarif",
+        "csv" => "csv",
+        "ndjson" => "ndjson",
+        "md" => "md",
+        "html" => "html",
+        _ => "json",
+    };
+    let report_path = format!("{}/{}_report.{}", args.output, report_name, ext);
+
+    let save_result = match args.format.as_str() {
+        "sarif" => rep.save_sarif(&report_path, &display_root, Some(&stream_r)),
+        "csv" => rep.save_csv(&report_path, Some(&stream_r)),
+        "ndjson" => rep.save_ndjson(&report_path, Some(&stream_r)),
+        "md" => rep.save_markdown(&report_path, &display_root, Some(&stream_r)),
+        "html" => rep.save_html(&report_path, &display_root, Some(&stream_r)),
+        _ => rep.save_json(&report_path, &display_root, None, None, Some(&stream_r)),
+    };
+
+    if let Err(e) = save_result {
+        eprintln!("  ⚠   Could not save report: {}", e);
+    }
+
+    if verbose && !args.pipe {
+        rep.print_summary(&display_root, &stream_r, &report_path);
+    }
+
+    if let Some(ref webhook_url) = args.webhook {
+        if let Ok(json_body) = std::fs::read_to_string(&report_path) {
+            let sent = rep.send_webhook(
+                webhook_url,
+                args.webhook_secret.as_deref(),
+                &json_body,
+                client,
+            ).await;
+            if verbose {
+                if sent {
+                    println!("  ✔   Webhook delivered to {}", webhook_url);
+                } else {
+                    eprintln!("  ⚠   Webhook delivery failed");
+                }
+            }
+        }
+    }
+
+    if args.pipe {
+        let summary = serde_json::json!({
+            "type": "summary",
+            "mode": "dir",
+            "target": display_root,
+            "files_scanned": stream_r.blobs_scanned,
             "findings": stream_r.findings.len(),
             "risk_score": stream_r.risk_score(),
         });
@@ -747,16 +1047,32 @@ async fn main() {
         vec![]
     };
 
+    // Validate mutually exclusive modes
+    if args.token.is_some() && (args.dir.is_some() || args.targets.is_some() || args.url.is_some()) {
+        eprintln!("  ✘  --token mode cannot be combined with --dir, <URL>, or --targets.");
+        std::process::exit(1);
+    }
+    if args.dir.is_some() && (args.targets.is_some() || args.url.is_some()) {
+        eprintln!("  ✘  --dir mode cannot be combined with <URL> or --targets.");
+        std::process::exit(1);
+    }
+
     // ── Token mode: enumerate GitHub repos and scan ──
     if let Some(ref token) = args.token {
         run_token_scan(&args, &rep, base_cfg, token, extra_patterns).await;
         return;
     }
 
-    // Validate URL/targets (only required when not using --token)
+    // ── Directory mode: local recursive text scan ──
+    if let Some(ref dir) = args.dir {
+        run_dir_scan(&args, &rep, &client, dir, extra_patterns).await;
+        return;
+    }
+
+    // Validate URL/targets (only required when not using --token/--dir)
     let raw_url = match (&args.url, &args.targets) {
         (None, None) => {
-            eprintln!("  ✘  Either <URL>, --targets FILE, or --token PAT is required.");
+            eprintln!("  ✘  Either <URL>, --targets FILE, --dir PATH, or --token PAT is required.");
             std::process::exit(1);
         }
         (Some(u), _) => u.clone(),
@@ -1004,3 +1320,50 @@ fn load_extra_patterns(file_path: &str) -> Result<Vec<streamer::DynPattern>, Box
     Ok(result)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mk_find(severity: &str) -> streamer::Finding {
+        streamer::Finding {
+            filename: "a.txt".to_string(),
+            line: 1,
+            pattern_id: "p".to_string(),
+            description: "d".to_string(),
+            severity: severity.to_string(),
+            match_str: "m".to_string(),
+            context: "c".to_string(),
+            is_deleted: false,
+            commit_sha1: None,
+            confidence_adjustment: None,
+        }
+    }
+
+    #[test]
+    fn test_is_binary_extension_detects_known_types() {
+        assert!(is_binary_extension("foo.png"));
+        assert!(is_binary_extension("foo.sqlite"));
+        assert!(!is_binary_extension("foo.rs"));
+        assert!(!is_binary_extension("foo.env"));
+    }
+
+    #[test]
+    fn test_dir_target_name_fallback_and_sanitize() {
+        assert_eq!(dir_target_name(Path::new("/tmp/my repo")), "my_repo");
+        assert_eq!(dir_target_name(Path::new("/")), "directory_scan");
+    }
+
+    #[test]
+    fn test_should_stop_scan_by_limit() {
+        let findings = vec![mk_find("LOW"), mk_find("MEDIUM")];
+        assert!(should_stop_scan(&findings, 2, false));
+        assert!(!should_stop_scan(&findings, 3, false));
+    }
+
+    #[test]
+    fn test_should_stop_scan_by_critical() {
+        let findings = vec![mk_find("LOW"), mk_find("CRITICAL")];
+        assert!(should_stop_scan(&findings, 0, true));
+        assert!(!should_stop_scan(&findings, 0, false));
+    }
+}
