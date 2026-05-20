@@ -258,6 +258,10 @@ fn parse_extra_headers(raw: &[String]) -> Vec<(String, String)> {
         .collect()
 }
 
+const BINARY_DETECTION_PROBE_SIZE: usize = 8192;
+const NULL_BYTE_THRESHOLD: usize = 10;
+const RECENT_FINDINGS_WINDOW: usize = 20;
+
 fn collect_local_files(root: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
     let mut stack = vec![root.to_path_buf()];
@@ -297,7 +301,12 @@ fn should_stop_scan(
     stop_on_critical: bool,
 ) -> bool {
     (max_findings > 0 && findings.len() >= max_findings)
-        || (stop_on_critical && findings.iter().rev().take(20).any(|f| f.severity == "CRITICAL"))
+        || (stop_on_critical
+            && findings
+                .iter()
+                .rev()
+                .take(RECENT_FINDINGS_WINDOW)
+                .any(|f| f.severity == "CRITICAL"))
 }
 
 /// Returns true for file extensions that indicate binary content unlikely to
@@ -500,9 +509,9 @@ async fn run_token_scan(
                     }
 
                     // Fast binary sniff: >10 null bytes in the first 8 KB
-                    let probe      = &data[..data.len().min(8192)];
+                    let probe      = &data[..data.len().min(BINARY_DETECTION_PROBE_SIZE)];
                     let null_count = probe.iter().filter(|&&b| b == 0).count();
-                    if null_count > 10 {
+                    if null_count > NULL_BYTE_THRESHOLD {
                         return (vec![], vec![]);
                     }
 
@@ -732,9 +741,9 @@ async fn run_dir_scan(
                     return (vec![], vec![], 0usize, false, false);
                 }
 
-                let probe = &data[..data.len().min(8192)];
+                let probe = &data[..data.len().min(BINARY_DETECTION_PROBE_SIZE)];
                 let null_count = probe.iter().filter(|&&b| b == 0).count();
-                if null_count > 10 {
+                if null_count > NULL_BYTE_THRESHOLD {
                     return (vec![], vec![], 0usize, false, false);
                 }
 
