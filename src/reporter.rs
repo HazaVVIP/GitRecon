@@ -9,6 +9,7 @@ use sha2::Sha256;
 use crate::detect::DetectResult;
 use crate::mapper::MapResult;
 use crate::streamer::StreamResult;
+use crate::text_utils::truncate_utf8;
 
 #[derive(Clone)]
 #[allow(dead_code)]
@@ -211,9 +212,9 @@ impl Reporter {
             println!("│  {:<12}: {}{}", "Type", f.description, del_tag);
             println!("│  {:<12}: {}", "File",
                      format!("{}  ·  line {}", f.filename, f.line).cyan());
-            let m = &f.match_str[..f.match_str.len().min(100)];
+            let m = truncate_utf8(&f.match_str, 100);
             println!("│  {:<12}: {}", "Match", m);
-            let ctx = &f.context[..f.context.len().min(120)];
+            let ctx = truncate_utf8(&f.context, 120);
             println!("│  {:<12}: {}", "Context", ctx.dimmed());
             println!("└{}┘", "─".repeat(w));
         }
@@ -531,7 +532,7 @@ impl Reporter {
                     "LOW"      => "🔵",
                     _          => "⚪",
                 };
-                let m = &f.match_str[..f.match_str.len().min(60)];
+                let m = truncate_utf8(&f.match_str, 60);
                 out.push_str(&format!(
                     "| {} {} | {} | {} | {} | `{}` |\n",
                     emoji, f.severity, f.pattern_id, f.filename, f.line, m
@@ -555,7 +556,7 @@ impl Reporter {
                     "LOW"      => "#4488ff",
                     _          => "#888888",
                 };
-                let m = &f.match_str[..f.match_str.len().min(80)];
+                let m = truncate_utf8(&f.match_str, 80);
                 rows.push_str(&format!(
                     "<tr><td style='color:{}'>{}</td><td>{}</td><td>{}</td><td>{}</td><td><code>{}</code></td></tr>\n",
                     color, f.severity, f.pattern_id, f.filename, f.line, m
@@ -596,5 +597,82 @@ impl Reporter {
         }
         let resp = client.post(url, body, &extra_headers).await;
         resp.status >= 200 && resp.status < 300
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::streamer::{Finding, StreamResult};
+    use std::path::PathBuf;
+
+    struct TempDirGuard {
+        path: PathBuf,
+    }
+
+    impl TempDirGuard {
+        fn new(path: PathBuf) -> Self {
+            let _ = std::fs::create_dir_all(&path);
+            Self { path }
+        }
+    }
+
+    impl Drop for TempDirGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn unicode_finding() -> Finding {
+        Finding {
+            filename: "/tmp/demo.rs".to_string(),
+            line: 42,
+            pattern_id: "jwt_secret".to_string(),
+            description: "JWT Secret".to_string(),
+            severity: "CRITICAL".to_string(),
+            match_str: "secret🔐─你好🌍".repeat(16),
+            context: "const ECOMM_JWT_SECRET = process.env.ECOMM_JWT_SECRET || \"密钥─🔒\"".repeat(8),
+            is_deleted: false,
+            commit_sha1: Some("a".repeat(40)),
+            confidence_adjustment: None,
+        }
+    }
+
+    fn unicode_stream_result() -> StreamResult {
+        StreamResult {
+            findings: vec![unicode_finding()],
+            contributors: vec![],
+            tech_stack: vec![],
+            commit_count: 0,
+            blobs_scanned: 1,
+            blobs_failed: 0,
+            bytes_scanned: 10,
+            elapsed_s: 0.1,
+            files_saved: 0,
+            files_save_failed: 0,
+        }
+    }
+
+    #[test]
+    fn print_findings_summary_handles_unicode_without_panic() {
+        let rep = Reporter::new(true);
+        let findings = vec![unicode_finding()];
+        rep.print_findings_summary(&findings);
+    }
+
+    #[test]
+    fn save_markdown_and_html_handle_unicode_without_panic() {
+        let rep = Reporter::new(true);
+        let stream = unicode_stream_result();
+        let tmp = std::env::temp_dir().join(format!("gitrecon_reporter_test_{}", std::process::id()));
+        let _guard = TempDirGuard::new(tmp.clone());
+
+        let md_path = tmp.join("report.md");
+        let html_path = tmp.join("report.html");
+        let md_str = md_path.to_string_lossy().to_string();
+        let html_str = html_path.to_string_lossy().to_string();
+
+        rep.save_markdown(&md_str, "target", Some(&stream)).expect("save markdown");
+        rep.save_html(&html_str, "target", Some(&stream)).expect("save html");
     }
 }

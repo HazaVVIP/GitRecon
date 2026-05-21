@@ -15,6 +15,7 @@ use futures::StreamExt;
 use crate::http_client::HttpClient;
 use crate::git_parser::{ObjectParser, obj_path};
 use crate::mapper::MapResult;
+use crate::text_utils::truncate_utf8;
 
 // ════════════════════════════════════════════════
 // SECRET PATTERNS
@@ -557,8 +558,8 @@ impl Finding {
             "type":      self.pattern_id,
             "desc":      self.description,
             "severity":  self.severity,
-            "match":     &self.match_str[..self.match_str.len().min(120)],
-            "context":   &self.context[..self.context.len().min(200)],
+            "match":     truncate_utf8(&self.match_str, 120),
+            "context":   truncate_utf8(&self.context, 200),
             "deleted":   self.is_deleted,
             "blob_sha1": self.commit_sha1,
             "confidence_adjustment": self.confidence_adjustment,
@@ -626,7 +627,7 @@ impl StreamResult {
         let mut seen = HashSet::new();
         self.findings.iter()
             .filter(|f| {
-                let key = (f.pattern_id.as_str(), &f.match_str[..f.match_str.len().min(80)]);
+                let key = (f.pattern_id.as_str(), truncate_utf8(&f.match_str, 80));
                 seen.insert(key)
             })
             .collect()
@@ -638,7 +639,7 @@ impl StreamResult {
     pub fn unique_count(&self) -> usize {
         let mut seen = HashSet::new();
         for f in &self.findings {
-            seen.insert((f.pattern_id.as_str(), &f.match_str[..f.match_str.len().min(80)]));
+            seen.insert((f.pattern_id.as_str(), truncate_utf8(&f.match_str, 80)));
         }
         seen.len()
     }
@@ -1318,7 +1319,7 @@ fn scan_minified_segments(
                     description: pat.desc.to_string(),
                     severity:    pat.sev.to_string(),
                     match_str:   val,
-                    context:     format!("[minified] {}", &seg[..seg.len().min(200)]),
+                    context:     format!("[minified] {}", truncate_utf8(seg, 200)),
                     is_deleted,
                     commit_sha1: Some(sha1.to_string()),
                     confidence_adjustment: None,
@@ -1484,7 +1485,7 @@ fn scan_multiline(content: &str, filename: &str, sha1: &str, is_deleted: bool) -
                 pattern_id: "pem_key_multiline".to_string(),
                 description: "PEM Private Key (multi-line)".to_string(),
                 severity: "CRITICAL".to_string(),
-                match_str: val[..val.len().min(100)].to_string(),
+                match_str: truncate_utf8(&val, 100).to_string(),
                 context: "multi-line PEM block".to_string(),
                 is_deleted,
                 commit_sha1: Some(sha1.to_string()),
@@ -1503,7 +1504,7 @@ fn scan_multiline(content: &str, filename: &str, sha1: &str, is_deleted: bool) -
                     pattern_id: "json_nested_secret".to_string(),
                     description: format!("JSON secret: {}", cap.get(1).unwrap().as_str()),
                     severity: "HIGH".to_string(),
-                    match_str: v[..v.len().min(100)].to_string(),
+                    match_str: truncate_utf8(v, 100).to_string(),
                     context: "multi-line JSON".to_string(),
                     is_deleted,
                     commit_sha1: Some(sha1.to_string()),
@@ -1588,7 +1589,7 @@ fn scan_db_config_blocks(content: &str, filename: &str, sha1: &str, is_deleted: 
                     pattern_id: "django_db_password".to_string(),
                     description: "Django/Python database password".to_string(),
                     severity: "HIGH".to_string(),
-                    match_str: v[..v.len().min(100)].to_string(),
+                    match_str: truncate_utf8(v, 100).to_string(),
                     context: "DB config block".to_string(),
                     is_deleted,
                     commit_sha1: Some(sha1.to_string()),
@@ -1608,7 +1609,7 @@ fn scan_db_config_blocks(content: &str, filename: &str, sha1: &str, is_deleted: 
                     pattern_id: "db_url_password".to_string(),
                     description: "Database connection string with password".to_string(),
                     severity: "HIGH".to_string(),
-                    match_str: v[..v.len().min(100)].to_string(),
+                    match_str: truncate_utf8(v, 100).to_string(),
                     context: "DB connection URL".to_string(),
                     is_deleted,
                     commit_sha1: Some(sha1.to_string()),
@@ -2832,5 +2833,74 @@ mod tests {
             !findings.iter().any(|f| f.pattern_id == "smtp_credentials"),
             "Placeholder SMTP password 'changeme' should be filtered"
         );
+    }
+
+    #[test]
+    fn test_finding_to_dict_truncates_unicode_safely() {
+        let finding = Finding {
+            filename: "file.txt".to_string(),
+            line: 1,
+            pattern_id: "jwt_secret".to_string(),
+            description: "JWT Secret".to_string(),
+            severity: "CRITICAL".to_string(),
+            match_str: "密钥🔐─".repeat(80),
+            context: "context─你好🌍".repeat(80),
+            is_deleted: false,
+            commit_sha1: Some("a".repeat(40)),
+            confidence_adjustment: None,
+        };
+        let dict = finding.to_dict();
+        let m = dict["match"].as_str().expect("match as str");
+        let c = dict["context"].as_str().expect("context as str");
+        assert!(m.chars().count() <= 120, "match must be truncated by char count");
+        assert!(c.chars().count() <= 200, "context must be truncated by char count");
+    }
+
+    #[test]
+    fn test_unique_findings_handles_unicode_without_panic() {
+        let finding_a = Finding {
+            filename: "a.txt".to_string(),
+            line: 1,
+            pattern_id: "jwt_secret".to_string(),
+            description: "JWT Secret".to_string(),
+            severity: "CRITICAL".to_string(),
+            match_str: "token─🔐你好".repeat(20),
+            context: "ctx".to_string(),
+            is_deleted: false,
+            commit_sha1: Some("a".repeat(40)),
+            confidence_adjustment: None,
+        };
+        let finding_b = finding_a.clone();
+        let stream = StreamResult {
+            findings: vec![finding_a, finding_b],
+            contributors: vec![],
+            tech_stack: vec![],
+            commit_count: 0,
+            blobs_scanned: 0,
+            blobs_failed: 0,
+            bytes_scanned: 0,
+            elapsed_s: 0.0,
+            files_saved: 0,
+            files_save_failed: 0,
+        };
+        assert_eq!(stream.unique_count(), 1);
+        assert_eq!(stream.unique_findings().len(), 1);
+    }
+
+    #[test]
+    fn test_scan_minified_segments_unicode_context_is_safe() {
+        let mut out = Vec::new();
+        let line = format!(
+            "const key='{} AKIAZ9XYZMNOP1234567';",
+            "─你好🔐".repeat(70)
+        );
+        scan_minified_segments(&line, 0, "bundle.min.js", &"a".repeat(40), false, &mut out);
+        assert!(!out.is_empty(), "Expected at least one finding from AWS key pattern");
+        assert!(
+            out.iter().any(|f| f.pattern_id == "aws_key_id"),
+            "Expected aws_key_id finding from minified segment"
+        );
+        let ctx = out[0].context.strip_prefix("[minified] ").unwrap_or(&out[0].context);
+        assert!(ctx.chars().count() <= 200, "Minified context must be truncated by char count");
     }
 }
