@@ -31,6 +31,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
+use std::io::{self, Write};
 
 use clap::Parser;
 use futures::StreamExt;
@@ -50,14 +51,14 @@ use streamer::StreamResult;
     version = "3.2.0",
     about = "GitRecon — Streaming Git Exposure Scanner (Rust)",
     long_about = None,
-    after_help = "Examples:\n  gitrecon https://target.com\n  gitrecon https://target.com --save\n  gitrecon https://target.com --proxy socks5://127.0.0.1:9050 --delay 1\n  gitrecon https://target.com --fuzz --timeout 15\n  gitrecon --targets urls.txt --parallel-targets 5\n  gitrecon https://target.com --format sarif --webhook https://alerts.example.com\n  gitrecon --token ghp_xxxxxxxxxxxxxxxxxxxx\n  gitrecon --token ghp_xxxx --format sarif --output ./results\n  gitrecon --token ghp_xxxx --workers 20 --max-blob-size 2\n  gitrecon --dir ./project --format json"
+    after_help = "Examples:\n  gitrecon https://target.com\n  gitrecon https://target.com --save\n  gitrecon https://target.com --proxy socks5://127.0.0.1:9050 --delay 1\n  gitrecon https://target.com --fuzz --timeout 15\n  gitrecon --targets urls.txt --parallel-targets 5\n  gitrecon https://target.com --format sarif --webhook https://alerts.example.com\n  gitrecon --token ghp_xxxxxxxxxxxxxxxxxxxx\n  gitrecon --token ghp_xxxx --format sarif --output ./results\n  gitrecon --token ghp_xxxx --workers 20 --max-blob-size 2\n  gitrecon --dir ./project --format json\n\nToken mode interactive flow:\n  1) Repositories are listed with numbers\n  2) Choose one number, comma-separated numbers, or 'all'\n  3) Confirm whether reconstruction should be saved [Y/N]"
 )]
 struct Cli {
     /// Target URL (optional when --targets or --token is used)
     #[arg(value_name = "URL", required = false)]
     url: Option<String>,
 
-    /// GitHub Personal Access Token — enumerate and scan all accessible repositories
+    /// GitHub Personal Access Token — interactive repo selection then scan selected repositories
     #[arg(long = "token", value_name = "PAT")]
     token: Option<String>,
 
@@ -66,6 +67,7 @@ struct Cli {
     dir: Option<String>,
 
     /// Rekonstruksi source code ke disk setelah scan
+    /// (in --token quiet/pipe mode, used as non-interactive default)
     #[arg(long)]
     save: bool,
 
@@ -299,6 +301,111 @@ fn collect_local_files(root: &Path) -> Vec<(PathBuf, u64)> {
     files
 }
 
+fn normalize_repo_relative_path(path: &str) -> Option<PathBuf> {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for comp in Path::new(path).components() {
+        match comp {
+            Component::Normal(seg) => out.push(seg),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    if out.as_os_str().is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+fn parse_repo_selection_input(input: &str, max_repo: usize) -> Result<Vec<usize>, String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err("Input tidak boleh kosong.".to_string());
+    }
+    if trimmed.eq_ignore_ascii_case("all") {
+        return Ok((0..max_repo).collect());
+    }
+    let mut picked = std::collections::BTreeSet::new();
+    for raw in trimmed.split(',') {
+        let item = raw.trim();
+        if item.is_empty() {
+            return Err("Format daftar nomor tidak valid.".to_string());
+        }
+        let num: usize = item
+            .parse()
+            .map_err(|_| format!("'{}' bukan nomor valid.", item))?;
+        if num == 0 || num > max_repo {
+            return Err(format!("Nomor {} di luar rentang 1..{}.", num, max_repo));
+        }
+        picked.insert(num - 1);
+    }
+    Ok(picked.into_iter().collect())
+}
+
+fn parse_yes_no_choice(input: &str) -> Option<bool> {
+    let s = input.trim().to_ascii_lowercase();
+    match s.as_str() {
+        "y" | "yes" => Some(true),
+        "n" | "no" => Some(false),
+        _ => None,
+    }
+}
+
+fn prompt_line(prompt: &str) -> io::Result<String> {
+    print!("{}", prompt);
+    io::stdout().flush()?;
+    let mut line = String::new();
+    let read = io::stdin().read_line(&mut line)?;
+    if read == 0 {
+        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "stdin closed"));
+    }
+    Ok(line)
+}
+
+fn prompt_repo_selection(repos: &[github_api::GhRepo]) -> Vec<usize> {
+    println!("  ◈  Pilih repository yang ingin di-scan:");
+    for (idx, repo) in repos.iter().enumerate() {
+        println!("      {:>4}. {}", idx + 1, repo.full_name);
+    }
+    println!("      Input: satu nomor (contoh: 3), banyak nomor (1,3,7), atau all");
+
+    loop {
+        match prompt_line("  > Pilihan repo: ") {
+            Ok(input) => match parse_repo_selection_input(&input, repos.len()) {
+                Ok(v) => return v,
+                Err(msg) => eprintln!("  ✘  {} Coba lagi.", msg),
+            },
+            Err(_) => {
+                eprintln!("  ⚠   Input tidak tersedia, default ke all.");
+                return (0..repos.len()).collect();
+            }
+        }
+    }
+}
+
+fn prompt_save_choice(default: bool) -> bool {
+    println!("\n  ◈  Simpan hasil rekonstruksi/clone source repo terpilih? [Y/N]");
+    loop {
+        match prompt_line("  > Simpan source ke disk (Y/N): ") {
+            Ok(input) => {
+                if let Some(v) = parse_yes_no_choice(&input) {
+                    return v;
+                }
+                eprintln!("  ✘  Input tidak valid. Gunakan Y atau N.");
+            }
+            Err(_) => {
+                eprintln!(
+                    "  ⚠   Input tidak tersedia, fallback ke default (--save={}): {}",
+                    if default { "on" } else { "off" },
+                    if default { "Y" } else { "N" }
+                );
+                return default;
+            }
+        }
+    }
+}
+
 fn should_stop_scan(
     findings: &[streamer::Finding],
     max_findings: usize,
@@ -414,30 +521,80 @@ async fn run_token_scan(
     let mut seen_names = std::collections::HashSet::new();
     all_repos.retain(|r| seen_names.insert(r.full_name.clone()));
     let total_repos = all_repos.len();
+    if total_repos == 0 {
+        if verbose {
+            println!("  ⚠   Tidak ada repository yang bisa di-scan.\n");
+        }
+        return;
+    }
 
     if verbose { println!("  ✔  Found {} repositories\n", total_repos); }
 
-    // ── 4. Scan all repositories ─────────────────
+    let interactive = !args.quiet && !args.pipe;
+    let selected_indexes = if interactive {
+        prompt_repo_selection(&all_repos)
+    } else {
+        (0..all_repos.len()).collect()
+    };
+    let selected_repos: Vec<github_api::GhRepo> = selected_indexes
+        .into_iter()
+        .filter_map(|i| all_repos.get(i).cloned())
+        .collect();
+    let selected_repo_count = selected_repos.len();
+    if selected_repo_count == 0 {
+        eprintln!("  ✘  Tidak ada repository valid yang dipilih.");
+        return;
+    }
+
+    if verbose {
+        println!("  ✔  Selected {} repositories for scanning", selected_repo_count);
+    }
+
+    let persist_source = if interactive {
+        prompt_save_choice(args.save)
+    } else {
+        args.save
+    };
+    if verbose {
+        println!(
+            "  ◈  Source persistence: {}\n",
+            if persist_source { "enabled (--save behavior)" } else { "disabled (temporary workspace)" }
+        );
+    }
+
+    // ── 4. Acquire source workspace and scan selected repositories ─────
     let t0              = Instant::now();
     let all_findings    = Arc::new(tokio::sync::Mutex::new(Vec::<streamer::Finding>::new()));
     let tech_stack_set  = Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::<String>::new()));
     let blobs_scanned   = Arc::new(AtomicUsize::new(0));
+    let blobs_failed    = Arc::new(AtomicUsize::new(0));
     let bytes_scanned   = Arc::new(AtomicUsize::new(0));
     let stop_flag       = Arc::new(AtomicBool::new(false));
 
     let max_blob_bytes = args.max_blob_size * 1024 * 1024;
     let extra_pat_arc  = Arc::new(extra_patterns);
-    let save_root      = if args.save {
+    let save_root      = if persist_source {
         Some(std::path::PathBuf::from(&args.output).join(format!("token_{}", login)))
     } else {
         None
     };
+    let temp_root = if persist_source {
+        None
+    } else {
+        let p = std::env::temp_dir().join(format!(
+            "gitrecon_token_scan_{}_{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        let _ = std::fs::create_dir_all(&p);
+        Some(p)
+    };
 
-    for (repo_idx, repo) in all_repos.iter().enumerate() {
+    for (repo_idx, repo) in selected_repos.iter().enumerate() {
         if stop_flag.load(Ordering::Relaxed) { break; }
 
         if verbose {
-            println!("  ▶  [{}/{}] {}", repo_idx + 1, total_repos, repo.full_name);
+            println!("  ▶  [{}/{}] {}", repo_idx + 1, selected_repo_count, repo.full_name);
         }
 
         // Get HEAD SHA for the default branch
@@ -464,90 +621,128 @@ async fn run_token_scan(
             }
         };
 
-        // Filter: keep only text-like blobs within the size budget
+        let repo_workspace = if let Some(root) = save_root.as_ref() {
+            root.join(repo.full_name.replace('/', "_"))
+        } else if let Some(root) = temp_root.as_ref() {
+            root.join(repo.full_name.replace('/', "_"))
+        } else {
+            continue;
+        };
+        let _ = std::fs::create_dir_all(&repo_workspace);
+
+        // Reconstruct source workspace from tree blobs
         let blobs: Vec<_> = tree.into_iter()
             .filter(|e| e.obj_type == "blob")
-            .filter(|e| !is_binary_extension(&e.path))
             .filter(|e| e.size.is_none_or(|s| s <= max_blob_bytes as u64))
             .collect();
 
-        let blob_count = blobs.len();
-        if verbose && blob_count > 0 {
-            println!("      {} blobs to scan", blob_count);
+        if verbose && !blobs.is_empty() {
+            println!("      Reconstructing {} files into workspace", blobs.len());
         }
 
-        // Prepare per-repo save directory
-        let repo_save_dir: Option<Arc<std::path::PathBuf>> = save_root.as_ref().map(|root| {
-            let dir = root.join(repo.full_name.replace('/', "_"));
-            let _ = std::fs::create_dir_all(&dir);
-            Arc::new(dir)
-        });
-
-        // Scan blobs concurrently (buffer_unordered up to --workers)
-        let blob_stream = futures::stream::iter(blobs)
+        let reconstruct_stream = futures::stream::iter(blobs)
             .map(|entry| {
                 let client          = gh_client.clone();
                 let owner           = repo.owner.clone();
                 let name            = repo.name.clone();
-                let full_name       = repo.full_name.clone();
-                let extra_patterns  = extra_pat_arc.clone();
-                let blobs_s         = blobs_scanned.clone();
-                let bytes_s         = bytes_scanned.clone();
-                let stop            = stop_flag.clone();
-                let entropy_thresh  = args.entropy_threshold;
-                let save_dir        = repo_save_dir.clone();
+                let workspace       = repo_workspace.clone();
                 async move {
-                    if stop.load(Ordering::Relaxed) {
-                        return (vec![], vec![]);
-                    }
                     let data = match github_api::get_blob_content(&client, &owner, &name, &entry.sha).await {
                         Ok(d)  => d,
-                        Err(_) => return (vec![], vec![]),
+                        Err(_) => return false,
                     };
-                    blobs_s.fetch_add(1, Ordering::Relaxed);
-                    bytes_s.fetch_add(data.len(), Ordering::Relaxed);
-
-                    // Double-check decoded size
                     if data.len() > max_blob_bytes {
-                        return (vec![], vec![]);
+                        return false;
                     }
-
-                    // Fast binary sniff: >10 null bytes in the first 8 KB
-                    let probe      = &data[..data.len().min(BINARY_DETECTION_PROBE_SIZE)];
-                    let null_count = probe.iter().filter(|&&b| b == 0).count();
-                    if null_count > NULL_BYTE_THRESHOLD {
-                        return (vec![], vec![]);
+                    let rel = match normalize_repo_relative_path(&entry.path) {
+                        Some(r) => r,
+                        None => return false,
+                    };
+                    let local_path = workspace.join(rel);
+                    if !local_path.starts_with(&workspace) {
+                        return false;
                     }
-
-                    // Optionally save to disk
-                    if let Some(ref dir) = save_dir {
-                        let local_path = {
-                            let normalized = entry.path.replace('/', std::path::MAIN_SEPARATOR_STR);
-                            dir.join(&normalized)
-                        };
-                        if let Some(parent) = local_path.parent() {
-                            let _ = std::fs::create_dir_all(parent);
-                        }
-                        if local_path.starts_with(dir.as_ref()) {
-                            let _ = std::fs::write(&local_path, &data);
+                    if let Some(parent) = local_path.parent() {
+                        if std::fs::create_dir_all(parent).is_err() {
+                            return false;
                         }
                     }
-
-                    let text   = String::from_utf8_lossy(&data);
-                    let source = format!("{}/{}", full_name, entry.path);
-                    let findings = streamer::scan_text(&text, &source, &extra_patterns, entropy_thresh);
-
-                    // Detect tech stack from filename
-                    let mut techs = Vec::new();
-                    detect_tech_from_path(&entry.path, &mut techs);
-
-                    (findings, techs)
+                    std::fs::write(local_path, &data).is_ok()
                 }
             })
             .buffer_unordered(args.workers);
 
-        futures::pin_mut!(blob_stream);
-        while let Some((findings, techs)) = blob_stream.next().await {
+        futures::pin_mut!(reconstruct_stream);
+        while let Some(ok) = reconstruct_stream.next().await {
+            if !ok {
+                blobs_failed.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        let candidates: Vec<PathBuf> = collect_local_files(&repo_workspace)
+            .into_iter()
+            .filter(|(p, size)| !is_binary_extension(&p.to_string_lossy()) && *size <= max_blob_bytes as u64)
+            .map(|(p, _)| p)
+            .collect();
+
+        if verbose {
+            println!("      Scanning {} workspace files", candidates.len());
+        }
+
+        let file_stream = futures::stream::iter(candidates)
+            .map(|path| {
+                let stop = stop_flag.clone();
+                let extra_patterns = extra_pat_arc.clone();
+                let root = repo_workspace.clone();
+                let full_name = repo.full_name.clone();
+                let entropy_thresh = args.entropy_threshold;
+                async move {
+                    if stop.load(Ordering::Relaxed) {
+                        return (vec![], vec![], 0usize, false, true);
+                    }
+                    let data = match tokio::fs::read(&path).await {
+                        Ok(d) => d,
+                        Err(_) => return (vec![], vec![], 0usize, true, false),
+                    };
+                    if data.is_empty() {
+                        return (vec![], vec![], 0usize, false, false);
+                    }
+                    let probe = &data[..data.len().min(BINARY_DETECTION_PROBE_SIZE)];
+                    let null_count = probe.iter().filter(|&&b| b == 0).count();
+                    if null_count > NULL_BYTE_THRESHOLD {
+                        return (vec![], vec![], 0usize, false, false);
+                    }
+
+                    let text = String::from_utf8_lossy(&data);
+                    let rel = path
+                        .strip_prefix(&root)
+                        .map(|p| p.to_string_lossy().replace('\\', "/"))
+                        .unwrap_or_else(|_| path.to_string_lossy().replace('\\', "/"));
+                    let source = format!("{}/{}", full_name, rel);
+                    let findings = streamer::scan_text(&text, &source, &extra_patterns, entropy_thresh);
+
+                    let mut techs = Vec::new();
+                    detect_tech_from_path(&rel, &mut techs);
+
+                    (findings, techs, data.len(), false, false)
+                }
+            })
+            .buffer_unordered(args.workers);
+
+        futures::pin_mut!(file_stream);
+        while let Some((findings, techs, bytes, failed, skipped_by_stop)) = file_stream.next().await {
+            if skipped_by_stop {
+                continue;
+            }
+            if failed {
+                blobs_failed.fetch_add(1, Ordering::Relaxed);
+                continue;
+            }
+            if bytes > 0 {
+                blobs_scanned.fetch_add(1, Ordering::Relaxed);
+                bytes_scanned.fetch_add(bytes, Ordering::Relaxed);
+            }
+
             if !techs.is_empty() {
                 let mut ts = tech_stack_set.lock().await;
                 for t in techs { ts.insert(t); }
@@ -577,6 +772,12 @@ async fn run_token_scan(
         }
     }
 
+    if !persist_source {
+        if let Some(root) = temp_root {
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
     // ── 5. Assemble result ───────────────────────
     let elapsed_s   = t0.elapsed().as_secs_f64();
     let findings    = all_findings.lock().await.clone();
@@ -589,7 +790,7 @@ async fn run_token_scan(
         tech_stack:        ts_vec,
         commit_count:      0,
         blobs_scanned:     blobs_scanned.load(Ordering::Relaxed),
-        blobs_failed:      0,
+        blobs_failed:      blobs_failed.load(Ordering::Relaxed),
         bytes_scanned:     bytes_scanned.load(Ordering::Relaxed),
         elapsed_s,
         files_saved:       0,
@@ -619,7 +820,7 @@ async fn run_token_scan(
         "ndjson" => rep.save_ndjson(&report_path, Some(&stream_r)),
         "md"     => rep.save_markdown(&report_path, &report_name, Some(&stream_r)),
         "html"   => rep.save_html(&report_path, &report_name, Some(&stream_r)),
-        _        => rep.save_token_report(&report_path, &login, total_repos, &stream_r),
+        _        => rep.save_token_report(&report_path, &login, selected_repo_count, &stream_r),
     };
 
     if let Err(e) = save_result {
@@ -627,7 +828,7 @@ async fn run_token_scan(
     }
 
     if verbose && !args.pipe {
-        rep.print_token_report(&login, total_repos, &stream_r, &report_path);
+        rep.print_token_report(&login, selected_repo_count, &stream_r, &report_path);
     }
 
     // ── 8. Webhook delivery ──────────────────────
@@ -657,7 +858,7 @@ async fn run_token_scan(
             "type":     "summary",
             "mode":     "token",
             "user":     login,
-            "repos":    total_repos,
+            "repos":    selected_repo_count,
             "findings": stream_r.findings.len(),
             "risk_score": stream_r.risk_score(),
         });
@@ -1365,5 +1566,45 @@ mod tests {
         let findings = vec![mk_find("LOW"), mk_find("CRITICAL")];
         assert!(should_stop_scan(&findings, 0, true));
         assert!(!should_stop_scan(&findings, 0, false));
+    }
+
+    #[test]
+    fn test_parse_repo_selection_input_all() {
+        assert_eq!(parse_repo_selection_input("all", 3).unwrap(), vec![0, 1, 2]);
+        assert_eq!(parse_repo_selection_input("ALL", 2).unwrap(), vec![0, 1]);
+    }
+
+    #[test]
+    fn test_parse_repo_selection_input_multi_and_dedup() {
+        assert_eq!(parse_repo_selection_input(" 3,1,3, 2 ", 4).unwrap(), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn test_parse_repo_selection_input_invalid() {
+        assert!(parse_repo_selection_input("", 3).is_err());
+        assert!(parse_repo_selection_input("0", 3).is_err());
+        assert!(parse_repo_selection_input("4", 3).is_err());
+        assert!(parse_repo_selection_input("1,,2", 3).is_err());
+        assert!(parse_repo_selection_input("x", 3).is_err());
+    }
+
+    #[test]
+    fn test_parse_yes_no_choice() {
+        assert_eq!(parse_yes_no_choice("Y"), Some(true));
+        assert_eq!(parse_yes_no_choice("yes"), Some(true));
+        assert_eq!(parse_yes_no_choice("N"), Some(false));
+        assert_eq!(parse_yes_no_choice("no"), Some(false));
+        assert_eq!(parse_yes_no_choice("maybe"), None);
+    }
+
+    #[test]
+    fn test_normalize_repo_relative_path() {
+        assert_eq!(
+            normalize_repo_relative_path("src/main.rs"),
+            Some(PathBuf::from("src/main.rs"))
+        );
+        assert_eq!(normalize_repo_relative_path("../etc/passwd"), None);
+        assert_eq!(normalize_repo_relative_path("/abs/path"), None);
+        assert_eq!(normalize_repo_relative_path(""), None);
     }
 }

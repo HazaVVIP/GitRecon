@@ -67,6 +67,9 @@ gitrecon https://target.com --proxy socks5://127.0.0.1:9050
 # Add request delay and custom timeout
 gitrecon https://target.com --delay 1.5 --timeout 15
 
+# Token mode (interactive repo picker: single, comma list, or all)
+gitrecon --token ghp_xxxxxxxxxxxxxxxxxxxx
+
 # Fuzz non-standard .git paths (api/.git, admin/.git, .git.bak, _git, …)
 gitrecon https://target.com --fuzz
 
@@ -85,7 +88,7 @@ gitrecon https://target.com --no-color -q --output ./results
 | Flag | Default | Description |
 |---|---|---|
 | `--dir PATH` | — | Scan local directory recursively (cannot be combined with URL/`--targets`/`--token`) |
-| `--save` | off | Reconstruct source code to disk after scan |
+| `--save` | off | Reconstruct source code to disk after scan (for `--token`, used as default only in non-interactive `--quiet`/`--pipe`) |
 | `-o`, `--output DIR` | `./gitrecon_output` | Output directory |
 | `--proxy URL` | — | Proxy URL (`socks5://`, `socks4://`, `http://`) |
 | `--timeout SEC` | 10 | HTTP request timeout |
@@ -105,7 +108,7 @@ gitrecon https://target.com --no-color -q --output ./results
 | `-q`, `--quiet` | off | Reduce terminal output |
 
 Mode selection:
-- `--token` mode: scan repositories accessible by GitHub PAT.
+- `--token` mode: enumerate repositories accessible by GitHub PAT, show numbered list, ask selection (`1`, `1,3,7`, or `all`), then ask whether to save reconstruction (`Y/N`) before scanning.
 - `--dir` mode: scan local directory files directly (no HTTP/.git detection pipeline).
 - URL/`--targets` mode: scan exposed `.git` endpoints remotely.
 
