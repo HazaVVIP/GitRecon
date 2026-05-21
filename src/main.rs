@@ -24,6 +24,7 @@ mod mapper;
 mod streamer;
 mod reporter;
 mod github_api;
+mod text_utils;
 #[allow(dead_code)]
 mod reconstructor;
 
