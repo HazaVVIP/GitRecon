@@ -2890,8 +2890,17 @@ mod tests {
     #[test]
     fn test_scan_minified_segments_unicode_context_is_safe() {
         let mut out = Vec::new();
-        let line = format!("const s='{}';", "─你好🔐".repeat(700));
+        let line = format!(
+            "const key='{} AKIAZ9XYZMNOP1234567';",
+            "─你好🔐".repeat(70)
+        );
         scan_minified_segments(&line, 0, "bundle.min.js", &"a".repeat(40), false, &mut out);
-        assert!(out.is_empty(), "No known secret pattern expected in this synthetic input");
+        assert!(!out.is_empty(), "Expected at least one finding from AWS key pattern");
+        assert!(
+            out.iter().any(|f| f.pattern_id == "aws_key_id"),
+            "Expected aws_key_id finding from minified segment"
+        );
+        let ctx = out[0].context.strip_prefix("[minified] ").unwrap_or(&out[0].context);
+        assert!(ctx.chars().count() <= 200, "Minified context must be truncated by char count");
     }
 }

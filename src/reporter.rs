@@ -604,6 +604,24 @@ impl Reporter {
 mod tests {
     use super::*;
     use crate::streamer::{Finding, StreamResult};
+    use std::path::PathBuf;
+
+    struct TempDirGuard {
+        path: PathBuf,
+    }
+
+    impl TempDirGuard {
+        fn new(path: PathBuf) -> Self {
+            let _ = std::fs::create_dir_all(&path);
+            Self { path }
+        }
+    }
+
+    impl Drop for TempDirGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
 
     fn unicode_finding() -> Finding {
         Finding {
@@ -647,7 +665,7 @@ mod tests {
         let rep = Reporter::new(true);
         let stream = unicode_stream_result();
         let tmp = std::env::temp_dir().join(format!("gitrecon_reporter_test_{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&tmp);
+        let _guard = TempDirGuard::new(tmp.clone());
 
         let md_path = tmp.join("report.md");
         let html_path = tmp.join("report.html");
@@ -656,9 +674,5 @@ mod tests {
 
         rep.save_markdown(&md_str, "target", Some(&stream)).expect("save markdown");
         rep.save_html(&html_str, "target", Some(&stream)).expect("save html");
-
-        let _ = std::fs::remove_file(md_path);
-        let _ = std::fs::remove_file(html_path);
-        let _ = std::fs::remove_dir_all(tmp);
     }
 }
