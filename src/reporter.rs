@@ -3,6 +3,7 @@
 //! The only thing written to disk is the report file.
 
 use std::path::Path;
+use std::collections::HashMap;
 use colored::*;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
@@ -19,6 +20,22 @@ pub struct Reporter {
 
 #[allow(dead_code)]
 impl Reporter {
+    fn ai_summary(findings: &[crate::streamer::Finding]) -> (usize, HashMap<String, usize>) {
+        let mut total = 0usize;
+        let mut by_category: HashMap<String, usize> = HashMap::new();
+        for f in findings {
+            let (is_ai, cat, _) = crate::streamer::ai_metadata_for_finding(f);
+            if !is_ai {
+                continue;
+            }
+            total += 1;
+            if let Some(c) = cat {
+                *by_category.entry(c).or_insert(0) += 1;
+            }
+        }
+        (total, by_category)
+    }
+
     pub fn new(no_color: bool) -> Self {
         if no_color {
             colored::control::set_override(false);
@@ -224,6 +241,7 @@ impl Reporter {
     /// Compact intelligence report footer shown after saving the report file.
     pub fn print_report(&self, _detect: &DetectResult, _map_r: &MapResult, stream_r: &StreamResult, report_path: &str) {
         let counts  = stream_r.severity_counts();
+        let (ai_total, _) = Self::ai_summary(&stream_r.findings);
         let risk    = stream_r.risk_score();
         let risk_label = if risk >= 70 { "CRITICAL" } else if risk >= 40 { "HIGH" } else if risk >= 15 { "MEDIUM" } else { "CLEAR" };
         let risk_s  = format!("{}/100  {}", risk, risk_label);
@@ -240,6 +258,7 @@ impl Reporter {
                  format!("CRIT:{}", counts["CRITICAL"]).red().bold(),
                  format!("HIGH:{}", counts["HIGH"]).yellow(),
                  format!("MED:{}", counts["MEDIUM"]).bright_yellow());
+        println!("│  {:<14}: {}", "AI Findings", ai_total.to_string().magenta());
         if !stream_r.tech_stack.is_empty() {
             println!("│  {:<14}: {}", "Tech Stack", stream_r.tech_stack.join(", "));
         }
@@ -312,9 +331,12 @@ impl Reporter {
 
         if let Some(s) = stream_r {
             let counts = s.severity_counts();
+            let (ai_total, ai_categories) = Self::ai_summary(&s.findings);
             report["result"] = serde_json::json!({
                 "risk_score":      s.risk_score(),
                 "secrets_total":   s.findings.len(),
+                "ai_findings_total": ai_total,
+                "ai_category_counts": ai_categories,
                 "severity_counts": counts,
                 "tech_stack":      s.tech_stack,
                 "commit_count":    s.commit_count,
@@ -348,6 +370,7 @@ impl Reporter {
     ) -> std::io::Result<()> {
         let now    = chrono::Utc::now().to_rfc3339();
         let counts = stream_r.severity_counts();
+        let (ai_total, ai_categories) = Self::ai_summary(&stream_r.findings);
         let report = serde_json::json!({
             "tool":       "GitRecon",
             "version":    "3.2.0",
@@ -358,6 +381,8 @@ impl Reporter {
             "result": {
                 "risk_score":      stream_r.risk_score(),
                 "secrets_total":   stream_r.findings.len(),
+                "ai_findings_total": ai_total,
+                "ai_category_counts": ai_categories,
                 "severity_counts": counts,
                 "tech_stack":      stream_r.tech_stack,
                 "blobs_scanned":   stream_r.blobs_scanned,
@@ -382,6 +407,7 @@ impl Reporter {
         report_path: &str,
     ) {
         let counts     = stream_r.severity_counts();
+        let (ai_total, _) = Self::ai_summary(&stream_r.findings);
         let risk       = stream_r.risk_score();
         let risk_label = if risk >= 70 { "CRITICAL" } else if risk >= 40 { "HIGH" } else if risk >= 15 { "MEDIUM" } else { "CLEAR" };
         let risk_s     = format!("{}/100  {}", risk, risk_label);
@@ -391,18 +417,19 @@ impl Reporter {
         println!("\n╔{}╗", "═".repeat(w));
         println!("║  {:<width$}║", "TOKEN SCAN REPORT", width = w - 2);
         println!("╚{}╝", "═".repeat(w));
-        println!("│  {:<16}: {}", "GitHub User", login.cyan().bold());
-        println!("│  {:<16}: {}", "Repos Scanned", repo_count);
-        println!("│  {:<16}: {}", "Risk Score", risk_colored);
-        println!("│  {:<16}: {}  [ {} {} {} ]",
+        println!("│  {:<14}: {}", "GitHub User", login.cyan().bold());
+        println!("│  {:<14}: {}", "Repos Scanned", repo_count);
+        println!("│  {:<14}: {}", "Risk Score", risk_colored);
+        println!("│  {:<14}: {}  [ {} {} {} ]",
                  "Findings",
                  stream_r.findings.len().to_string().bold(),
                  format!("CRIT:{}", counts["CRITICAL"]).red().bold(),
                  format!("HIGH:{}", counts["HIGH"]).yellow(),
                  format!("MED:{}", counts["MEDIUM"]).bright_yellow());
-        println!("│  {:<16}: {} KB", "Data Processed", stream_r.bytes_scanned / 1024);
-        println!("│  {:<16}: {:.1}s", "Elapsed", stream_r.elapsed_s);
-        println!("│  {:<16}: {}  {}", "Report", report_path.green(), "✔".green().bold());
+        println!("│  {:<14}: {}", "AI Findings", ai_total.to_string().magenta());
+        println!("│  {:<14}: {} KB", "Data Processed", stream_r.bytes_scanned / 1024);
+        println!("│  {:<14}: {:.1}s", "Elapsed", stream_r.elapsed_s);
+        println!("│  {:<14}: {}  {}", "Report", report_path.green(), "✔".green().bold());
         println!("│");
         println!("└{}┘\n", "─".repeat(w));
     }
@@ -457,6 +484,9 @@ impl Reporter {
                     "ruleId": f.pattern_id,
                     "level": level,
                     "message": {"text": f.description},
+                    "properties": {
+                        "gitrecon": f.to_dict()
+                    },
                     "locations": [{
                         "physicalLocation": {
                             "artifactLocation": {"uri": f.filename},
@@ -486,14 +516,19 @@ impl Reporter {
     pub fn save_csv(&self, path: &str, stream_r: Option<&StreamResult>) -> std::io::Result<()> {
         let parent = Path::new(path).parent().unwrap_or(Path::new("."));
         std::fs::create_dir_all(parent)?;
-        let mut out = String::from("file,line,severity,type,description,match,deleted\n");
+        // CSV schema:
+        // file,line,severity,type,description,match,deleted,ai_related,ai_category,ai_tags
+        let mut out = String::from("file,line,severity,type,description,match,deleted,ai_related,ai_category,ai_tags\n");
         if let Some(s) = stream_r {
             for f in &s.findings {
                 let m = f.match_str.replace('"', "\"\"");
                 let desc = f.description.replace('"', "\"\"");
+                let (ai_related, ai_category, ai_tags) = crate::streamer::ai_metadata_for_finding(f);
+                let ai_category = ai_category.unwrap_or_default();
+                let ai_tags = ai_tags.join("|");
                 out.push_str(&format!(
-                    "{},{},{},{},\"{}\",\"{}\",{}\n",
-                    f.filename, f.line, f.severity, f.pattern_id, desc, m, f.is_deleted
+                    "{},{},{},{},\"{}\",\"{}\",{},{},\"{}\",\"{}\"\n",
+                    f.filename, f.line, f.severity, f.pattern_id, desc, m, f.is_deleted, ai_related, ai_category, ai_tags
                 ));
             }
         }
@@ -521,8 +556,8 @@ impl Reporter {
         let parent = Path::new(path).parent().unwrap_or(Path::new("."));
         std::fs::create_dir_all(parent)?;
         let mut out = format!("# GitRecon Report\n\n**Target:** {}\n\n", target);
-        out.push_str("| Severity | Type | File | Line | Match |\n");
-        out.push_str("|----------|------|------|------|-------|\n");
+        out.push_str("| Severity | Type | File | Line | AI | Match |\n");
+        out.push_str("|----------|------|------|------|----|-------|\n");
         if let Some(s) = stream_r {
             for f in &s.findings {
                 let emoji = match f.severity.as_str() {
@@ -533,9 +568,15 @@ impl Reporter {
                     _          => "⚪",
                 };
                 let m = truncate_utf8(&f.match_str, 60);
+                let (ai_related, ai_category, _) = crate::streamer::ai_metadata_for_finding(f);
+                let ai_col = if ai_related {
+                    format!("✅ {}", ai_category.unwrap_or_else(|| "ai".to_string()))
+                } else {
+                    "—".to_string()
+                };
                 out.push_str(&format!(
-                    "| {} {} | {} | {} | {} | `{}` |\n",
-                    emoji, f.severity, f.pattern_id, f.filename, f.line, m
+                    "| {} {} | {} | {} | {} | {} | `{}` |\n",
+                    emoji, f.severity, f.pattern_id, f.filename, f.line, ai_col, m
                 ));
             }
         }
@@ -557,9 +598,15 @@ impl Reporter {
                     _          => "#888888",
                 };
                 let m = truncate_utf8(&f.match_str, 80);
+                let (ai_related, ai_category, _) = crate::streamer::ai_metadata_for_finding(f);
+                let ai_col = if ai_related {
+                    ai_category.unwrap_or_else(|| "ai".to_string())
+                } else {
+                    "no".to_string()
+                };
                 rows.push_str(&format!(
-                    "<tr><td style='color:{}'>{}</td><td>{}</td><td>{}</td><td>{}</td><td><code>{}</code></td></tr>\n",
-                    color, f.severity, f.pattern_id, f.filename, f.line, m
+                    "<tr><td style='color:{}'>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td><code>{}</code></td></tr>\n",
+                    color, f.severity, f.pattern_id, f.filename, f.line, ai_col, m
                 ));
             }
         }
@@ -569,7 +616,7 @@ impl Reporter {
 </head><body>
 <h1>GitRecon Report</h1>
 <p><strong>Target:</strong> {}</p>
-<table><thead><tr><th>Severity</th><th>Type</th><th>File</th><th>Line</th><th>Match</th></tr></thead>
+<table><thead><tr><th>Severity</th><th>Type</th><th>File</th><th>Line</th><th>AI</th><th>Match</th></tr></thead>
 <tbody>{}</tbody></table>
 </body></html>"#, target, rows);
         std::fs::write(path, html)

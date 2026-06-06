@@ -680,11 +680,12 @@ async fn run_token_scan(
             }
         }
 
-        let candidates: Vec<PathBuf> = collect_local_files(&repo_workspace)
+        let mut candidates: Vec<PathBuf> = collect_local_files(&repo_workspace)
             .into_iter()
             .filter(|(p, size)| !is_binary_extension(&p.to_string_lossy()) && *size <= max_blob_bytes as u64)
             .map(|(p, _)| p)
             .collect();
+        candidates.sort_by_key(|p| if streamer::is_ai_sensitive_path(&p.to_string_lossy()) { 0 } else { 1 });
 
         if verbose {
             println!("      Scanning {} workspace files", candidates.len());
@@ -906,12 +907,13 @@ async fn run_dir_scan(
     let all_files = collect_local_files(&canonical_root);
     let max_blob_bytes = args.max_blob_size * 1024 * 1024;
 
-    let candidates: Vec<PathBuf> = all_files
+    let mut candidates: Vec<PathBuf> = all_files
         .into_iter()
         .filter(|(p, _)| !is_binary_extension(&p.to_string_lossy()))
         .filter(|(_, size)| *size <= max_blob_bytes as u64)
         .map(|(p, _)| p)
         .collect();
+    candidates.sort_by_key(|p| if streamer::is_ai_sensitive_path(&p.to_string_lossy()) { 0 } else { 1 });
 
     if verbose {
         println!("  ◈  Found {} candidate files\n", candidates.len());
