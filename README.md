@@ -11,7 +11,7 @@ It detects exposed `.git` directories on web servers and recovers secrets, crede
 
 - 🔍 **Phase 1 – Detect** — Discovers exposed `.git` directories with confidence scoring and optional path fuzzing  
 - 🗺️ **Phase 2 – Map** — Reconstructs the full object graph (commits, trees, blobs) from the exposed repo  
-- 🌊 **Phase 3 – Stream & Scan** — Fetches every object concurrently, scans in-memory for 110 secret patterns (API keys, passwords, tokens, private keys, …) plus Shannon entropy analysis  
+- 🌊 **Phase 3 – Stream & Scan** — Fetches every object concurrently, scans in-memory for 110+ secret patterns (API keys, passwords, tokens, private keys, …), AI config/path artifacts (`.claude`, `.cursor`, `.continue`, `.aider`, Copilot prompts), plus Shannon entropy analysis  
 - 📄 **Phase 4 – Report** — Outputs a structured JSON report and optional on-disk source reconstruction  
 
 ---
@@ -131,8 +131,8 @@ AWS Access Key ID · AWS Secret Access Key · AWS MFA Serial · GCP Service Acco
 **Version control & CI/CD:**  
 GitHub PAT · GitHub OAuth · GitHub App Token · GitLab PAT · Bitbucket App Password · CircleCI Token · Travis CI Token · Jenkins API Token
 
-**AI providers:**  
-OpenAI API keys (legacy, project-scoped, service account) · Anthropic API keys · HuggingFace tokens · Cohere API Key
+**AI providers & tooling:**  
+OpenAI API keys (legacy, project-scoped, service account) · Anthropic API keys · HuggingFace tokens · Cohere API Key · OpenRouter API key · AI provider env-style key variables (Gemini/Google AI/xAI/DeepSeek/Mistral/Perplexity) · AI-sensitive config and workspace paths (`.claude`, `.cursor`, `.continue`, `.aider`, Copilot prompt/config files)
 
 **Payments & e-commerce:**  
 Stripe secret/publishable/webhook keys · PayPal Client ID/Secret · Shopify Admin API Token · Shopify Shared Secret · Square API Key · Adyen API Key · Razorpay API Key · Braintree Access Token · Coinbase API Key

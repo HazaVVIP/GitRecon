@@ -238,6 +238,10 @@ lazy_static! {
              r"\bhf_[A-Za-z0-9]{34,}\b"),
         pat!("cohere_key",    "HIGH", "Cohere API Key",
              r#"(?i)cohere[_\-]?api[_\-]?key\s*[=:]\s*['"]?([A-Za-z0-9]{40})['"]?"#),
+        pat!("openrouter_key", "CRITICAL", "OpenRouter API Key",
+             r#"(?i)\bopenrouter[_\-]?api[_\-]?key\s*[=:]\s*['"]?(sk-or-v1-[A-Za-z0-9_\-]{20,})['"]?"#),
+        pat!("ai_provider_env_key", "HIGH", "AI Provider API Key Variable",
+             r#"(?i)\b(gemini_api_key|google_ai_api_key|xai_api_key|deepseek_api_key|mistral_api_key|perplexity_api_key)\s*[=:]\s*['"]?([A-Za-z0-9_\-]{20,})['"]?"#),
         // Infrastructure / PaaS
         pat!("digitalocean_pat", "CRITICAL", "DigitalOcean Personal Access Token",
              r"\bdop_v1_[a-f0-9]{64}\b"),
@@ -552,6 +556,7 @@ pub struct Finding {
 
 impl Finding {
     pub fn to_dict(&self) -> serde_json::Value {
+        let (ai_related, ai_category, ai_tags) = ai_metadata_for_finding(self);
         serde_json::json!({
             "file":      self.filename,
             "line":      self.line,
@@ -563,6 +568,9 @@ impl Finding {
             "deleted":   self.is_deleted,
             "blob_sha1": self.commit_sha1,
             "confidence_adjustment": self.confidence_adjustment,
+            "ai_related": ai_related,
+            "ai_category": ai_category,
+            "ai_tags": ai_tags,
         })
     }
 }
@@ -1140,6 +1148,9 @@ fn scan_content(
     let lines: Vec<&str> = content.lines().collect();
     let mut findings     = Vec::new();
     let is_js            = is_js_file(filename);
+    if let Some(path_finding) = ai_path_finding(filename, sha1, is_deleted) {
+        findings.push(path_finding);
+    }
 
     for (lineno, &line) in lines.iter().enumerate() {
         if line.len() > 2000 {
@@ -1262,11 +1273,153 @@ fn detect_tech(filename: &str, stack: &mut HashSet<String>) {
 }
 
 fn is_sensitive_file(filename: &str) -> bool {
-    SENSITIVE_NAMES.is_match(filename)
+    SENSITIVE_NAMES.is_match(filename) || classify_ai_path(filename).is_some()
 }
 
 fn is_placeholder(s: &str) -> bool {
     PLACEHOLDERS.iter().any(|p| s.contains(p))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AiPathCategory {
+    Config,
+    PromptHistory,
+    State,
+    Credential,
+}
+
+impl AiPathCategory {
+    fn pattern_id(self) -> &'static str {
+        match self {
+            Self::Config => "ai_path_config",
+            Self::PromptHistory => "ai_path_prompt_history",
+            Self::State => "ai_path_state",
+            Self::Credential => "ai_path_credential",
+        }
+    }
+    fn description(self) -> &'static str {
+        match self {
+            Self::Config => "AI configuration path exposed",
+            Self::PromptHistory => "AI prompt/history path exposed",
+            Self::State => "AI runtime state/session path exposed",
+            Self::Credential => "AI credential/token path exposed",
+        }
+    }
+    fn severity(self) -> &'static str {
+        match self {
+            Self::Credential => "HIGH",
+            Self::Config | Self::PromptHistory => "MEDIUM",
+            Self::State => "LOW",
+        }
+    }
+    fn label(self) -> &'static str {
+        match self {
+            Self::Config => "config_path",
+            Self::PromptHistory => "prompt_history_path",
+            Self::State => "state_path",
+            Self::Credential => "credential_path",
+        }
+    }
+}
+
+fn ai_ecosystem_tags(path_lc: &str) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    if path_lc.contains(".claude/") || path_lc.starts_with(".claude/") { out.push("claude"); }
+    if path_lc.contains(".cursor/") || path_lc.starts_with(".cursor/") { out.push("cursor"); }
+    if path_lc.contains(".continue/") || path_lc.starts_with(".continue/") { out.push("continue"); }
+    if path_lc.contains(".aider") || path_lc.contains("/aider") { out.push("aider"); }
+    if path_lc.contains(".windsurf/") || path_lc.starts_with(".windsurf/") { out.push("windsurf"); }
+    if path_lc.contains("copilot") || path_lc.contains(".github/prompts") { out.push("copilot"); }
+    out
+}
+
+fn classify_ai_path(path: &str) -> Option<AiPathCategory> {
+    let p = path.replace('\\', "/").to_lowercase();
+    let ai_scope = p.contains("/.claude/") || p.starts_with(".claude/")
+        || p.contains("/.cursor/") || p.starts_with(".cursor/")
+        || p.contains("/.continue/") || p.starts_with(".continue/")
+        || p.contains(".aider")
+        || p.contains("/.windsurf/") || p.starts_with(".windsurf/")
+        || p.contains(".github/copilot")
+        || p.contains(".github/prompts")
+        || p.contains("/copilot-instructions.md")
+        || p.ends_with("/copilot-instructions.md");
+    if !ai_scope {
+        return None;
+    }
+
+    if p.contains("credential") || p.contains("secret") || p.contains("token")
+        || p.contains("api_key") || p.contains("apikey")
+        || p.ends_with(".env") || p.contains(".env.")
+    {
+        return Some(AiPathCategory::Credential);
+    }
+    if p.contains("prompt") || p.contains("history") || p.contains("chat")
+        || p.contains("conversation")
+    {
+        return Some(AiPathCategory::PromptHistory);
+    }
+    if p.contains("cache") || p.contains("state") || p.contains("session")
+        || p.contains("workspace")
+    {
+        return Some(AiPathCategory::State);
+    }
+    Some(AiPathCategory::Config)
+}
+
+fn ai_path_finding(path: &str, sha1: &str, is_deleted: bool) -> Option<Finding> {
+    let category = classify_ai_path(path)?;
+    Some(Finding {
+        filename: path.to_string(),
+        line: 1,
+        pattern_id: category.pattern_id().to_string(),
+        description: category.description().to_string(),
+        severity: category.severity().to_string(),
+        match_str: path.to_string(),
+        context: format!("ai_path_category={}", category.label()),
+        is_deleted,
+        commit_sha1: if sha1.is_empty() { None } else { Some(sha1.to_string()) },
+        confidence_adjustment: None,
+    })
+}
+
+fn ai_provider_tag_from_pattern(pattern_id: &str) -> Option<&'static str> {
+    if pattern_id.starts_with("openai") { return Some("openai"); }
+    if pattern_id.starts_with("anthropic") { return Some("anthropic"); }
+    if pattern_id.starts_with("huggingface") { return Some("huggingface"); }
+    if pattern_id.starts_with("cohere") { return Some("cohere"); }
+    if pattern_id.starts_with("openrouter") { return Some("openrouter"); }
+    if pattern_id == "ai_provider_env_key" { return Some("multi_provider"); }
+    if pattern_id.starts_with("groq") { return Some("groq"); }
+    None
+}
+
+pub fn ai_metadata_for_finding(f: &Finding) -> (bool, Option<String>, Vec<String>) {
+    if let Some(provider) = ai_provider_tag_from_pattern(&f.pattern_id) {
+        return (
+            true,
+            Some("provider_key".to_string()),
+            vec!["ai".to_string(), "key_material".to_string(), provider.to_string()],
+        );
+    }
+
+    let path_cat = if let Some(rest) = f.pattern_id.strip_prefix("ai_path_") {
+        Some(rest.to_string())
+    } else {
+        classify_ai_path(&f.filename).map(|c| c.label().to_string())
+    };
+
+    if let Some(category) = path_cat {
+        let mut tags = vec!["ai".to_string(), "path".to_string()];
+        tags.push(category.clone());
+        let path_lc = f.filename.to_lowercase();
+        for tag in ai_ecosystem_tags(&path_lc) {
+            tags.push(tag.to_string());
+        }
+        return (true, Some(category), tags);
+    }
+
+    (false, None, Vec::new())
 }
 
 // ── New helpers ────────────────────────────────────────────────
@@ -1930,6 +2083,38 @@ mod tests {
     }
 
     #[test]
+    fn test_scan_content_finds_openrouter_key() {
+        let key = format!("sk-or-v1-{}", "A".repeat(30));
+        let content = format!("OPENROUTER_API_KEY={}", key);
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[], 4.5);
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "openrouter_key"),
+            "Should detect OpenRouter API key"
+        );
+    }
+
+    #[test]
+    fn test_scan_content_finds_ai_provider_env_key() {
+        let key = "ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890";
+        let content = format!("DEEPSEEK_API_KEY={}", key);
+        let findings = scan_content(&content, ".env", "a".repeat(40).as_str(), false, &[], 4.5);
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "ai_provider_env_key"),
+            "Should detect AI provider env-style API key"
+        );
+    }
+
+    #[test]
+    fn test_scan_content_ai_provider_env_placeholder_filtered() {
+        let content = "GEMINI_API_KEY=your_api_key_here";
+        let findings = scan_content(content, ".env", "a".repeat(40).as_str(), false, &[], 4.5);
+        assert!(
+            !findings.iter().any(|f| f.pattern_id == "ai_provider_env_key"),
+            "Placeholder AI env key should be filtered"
+        );
+    }
+
+    #[test]
     fn test_scan_content_finds_huggingface_token() {
         let token = format!("hf_{}", "a".repeat(36));
         let content = format!("HF_TOKEN={}", token);
@@ -2153,6 +2338,73 @@ mod tests {
     fn test_sensitive_names_ssh_config() {
         assert!(is_sensitive_file(".ssh/config"), ".ssh/config should be sensitive");
         assert!(is_sensitive_file("authorized_keys"), "authorized_keys should be sensitive");
+    }
+
+    #[test]
+    fn test_classify_ai_path_config() {
+        assert_eq!(
+            classify_ai_path(".claude/settings.json"),
+            Some(AiPathCategory::Config)
+        );
+    }
+
+    #[test]
+    fn test_classify_ai_path_prompt_history() {
+        assert_eq!(
+            classify_ai_path(".cursor/prompts/system.md"),
+            Some(AiPathCategory::PromptHistory)
+        );
+    }
+
+    #[test]
+    fn test_scan_content_emits_ai_path_finding() {
+        let findings = scan_content(
+            "model = \"claude-3\"",
+            ".claude/settings.json",
+            "a".repeat(40).as_str(),
+            false,
+            &[],
+            4.5,
+        );
+        assert!(
+            findings.iter().any(|f| f.pattern_id == "ai_path_config"),
+            "AI path finding should be emitted even without key regex matches"
+        );
+    }
+
+    #[test]
+    fn test_ai_metadata_for_finding_provider_key() {
+        let key = format!("sk-proj-{}", "A".repeat(86));
+        let findings = scan_content(
+            &format!("OPENAI_API_KEY={}", key),
+            ".env",
+            "a".repeat(40).as_str(),
+            false,
+            &[],
+            4.5,
+        );
+        let openai = findings.iter().find(|f| f.pattern_id == "openai_key").expect("openai finding");
+        let (is_ai, category, tags) = ai_metadata_for_finding(openai);
+        assert!(is_ai, "OpenAI key should be AI-related");
+        assert_eq!(category.as_deref(), Some("provider_key"));
+        assert!(tags.iter().any(|t| t == "openai"));
+    }
+
+    #[test]
+    fn test_ai_metadata_for_finding_path() {
+        let findings = scan_content(
+            "last_model: claude-3-opus",
+            ".claude/history/session.log",
+            "a".repeat(40).as_str(),
+            false,
+            &[],
+            4.5,
+        );
+        let path_finding = findings.iter().find(|f| f.pattern_id == "ai_path_prompt_history").expect("ai path finding");
+        let (is_ai, category, tags) = ai_metadata_for_finding(path_finding);
+        assert!(is_ai);
+        assert_eq!(category.as_deref(), Some("prompt_history_path"));
+        assert!(tags.iter().any(|t| t == "claude"));
     }
 
     #[test]
