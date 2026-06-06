@@ -447,18 +447,6 @@ fn is_binary_extension(path: &str) -> bool {
     )
 }
 
-fn is_ai_priority_path(path: &str) -> bool {
-    let p = path.replace('\\', "/").to_lowercase();
-    p.contains("/.claude/") || p.starts_with(".claude/")
-        || p.contains("/.cursor/") || p.starts_with(".cursor/")
-        || p.contains("/.continue/") || p.starts_with(".continue/")
-        || p.contains(".aider")
-        || p.contains("/.windsurf/") || p.starts_with(".windsurf/")
-        || p.contains(".github/copilot")
-        || p.contains(".github/prompts")
-        || p.ends_with("/copilot-instructions.md")
-}
-
 // ════════════════════════════════════════════════
 // TOKEN SCAN PIPELINE
 // ════════════════════════════════════════════════
@@ -697,7 +685,7 @@ async fn run_token_scan(
             .filter(|(p, size)| !is_binary_extension(&p.to_string_lossy()) && *size <= max_blob_bytes as u64)
             .map(|(p, _)| p)
             .collect();
-        candidates.sort_by_key(|p| if is_ai_priority_path(&p.to_string_lossy()) { 0 } else { 1 });
+        candidates.sort_by_key(|p| if streamer::is_ai_sensitive_path(&p.to_string_lossy()) { 0 } else { 1 });
 
         if verbose {
             println!("      Scanning {} workspace files", candidates.len());
@@ -925,7 +913,7 @@ async fn run_dir_scan(
         .filter(|(_, size)| *size <= max_blob_bytes as u64)
         .map(|(p, _)| p)
         .collect();
-    candidates.sort_by_key(|p| if is_ai_priority_path(&p.to_string_lossy()) { 0 } else { 1 });
+    candidates.sort_by_key(|p| if streamer::is_ai_sensitive_path(&p.to_string_lossy()) { 0 } else { 1 });
 
     if verbose {
         println!("  ◈  Found {} candidate files\n", candidates.len());

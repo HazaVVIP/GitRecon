@@ -1273,7 +1273,7 @@ fn detect_tech(filename: &str, stack: &mut HashSet<String>) {
 }
 
 fn is_sensitive_file(filename: &str) -> bool {
-    SENSITIVE_NAMES.is_match(filename) || classify_ai_path(filename).is_some()
+    SENSITIVE_NAMES.is_match(filename) || is_ai_sensitive_path(filename)
 }
 
 fn is_placeholder(s: &str) -> bool {
@@ -1333,9 +1333,12 @@ fn ai_ecosystem_tags(path_lc: &str) -> Vec<&'static str> {
     out
 }
 
-fn classify_ai_path(path: &str) -> Option<AiPathCategory> {
-    let p = path.replace('\\', "/").to_lowercase();
-    let ai_scope = p.contains("/.claude/") || p.starts_with(".claude/")
+fn normalize_path_lc(path: &str) -> String {
+    path.replace('\\', "/").to_lowercase()
+}
+
+fn is_ai_scope_path_lc(p: &str) -> bool {
+    p.contains("/.claude/") || p.starts_with(".claude/")
         || p.contains("/.cursor/") || p.starts_with(".cursor/")
         || p.contains("/.continue/") || p.starts_with(".continue/")
         || p.contains(".aider")
@@ -1343,14 +1346,23 @@ fn classify_ai_path(path: &str) -> Option<AiPathCategory> {
         || p.contains(".github/copilot")
         || p.contains(".github/prompts")
         || p.contains("/copilot-instructions.md")
-        || p.ends_with("/copilot-instructions.md");
-    if !ai_scope {
+        || p.ends_with("/copilot-instructions.md")
+}
+
+fn classify_ai_path(path: &str) -> Option<AiPathCategory> {
+    let p = normalize_path_lc(path);
+    if !is_ai_scope_path_lc(&p) {
         return None;
     }
 
-    if p.contains("credential") || p.contains("secret") || p.contains("token")
-        || p.contains("api_key") || p.contains("apikey")
-        || p.ends_with(".env") || p.contains(".env.")
+    let credential_markers = [
+        "/credentials", "/credential",
+        "/secrets", "/secret",
+        "/tokens", "/token",
+        "/api_key", "/apikey",
+        ".env", "/auth.json",
+    ];
+    if credential_markers.iter().any(|m| p.contains(m))
     {
         return Some(AiPathCategory::Credential);
     }
@@ -1367,11 +1379,16 @@ fn classify_ai_path(path: &str) -> Option<AiPathCategory> {
     Some(AiPathCategory::Config)
 }
 
+pub fn is_ai_sensitive_path(path: &str) -> bool {
+    classify_ai_path(path).is_some()
+}
+
 fn ai_path_finding(path: &str, sha1: &str, is_deleted: bool) -> Option<Finding> {
+    const AI_PATH_FINDING_LINE: usize = 1;
     let category = classify_ai_path(path)?;
     Some(Finding {
         filename: path.to_string(),
-        line: 1,
+        line: AI_PATH_FINDING_LINE,
         pattern_id: category.pattern_id().to_string(),
         description: category.description().to_string(),
         severity: category.severity().to_string(),
@@ -1412,7 +1429,7 @@ pub fn ai_metadata_for_finding(f: &Finding) -> (bool, Option<String>, Vec<String
     if let Some(category) = path_cat {
         let mut tags = vec!["ai".to_string(), "path".to_string()];
         tags.push(category.clone());
-        let path_lc = f.filename.to_lowercase();
+        let path_lc = normalize_path_lc(&f.filename);
         for tag in ai_ecosystem_tags(&path_lc) {
             tags.push(tag.to_string());
         }
@@ -2094,6 +2111,34 @@ mod tests {
     }
 
     #[test]
+    fn test_scan_content_openrouter_key_min_boundary() {
+        let key = format!("sk-or-v1-{}", "A".repeat(20));
+        let findings = scan_content(
+            &format!("OPENROUTER_API_KEY={}", key),
+            ".env",
+            "a".repeat(40).as_str(),
+            false,
+            &[],
+            4.5,
+        );
+        assert!(findings.iter().any(|f| f.pattern_id == "openrouter_key"));
+    }
+
+    #[test]
+    fn test_scan_content_openrouter_key_below_boundary_not_detected() {
+        let key = format!("sk-or-v1-{}", "A".repeat(19));
+        let findings = scan_content(
+            &format!("OPENROUTER_API_KEY={}", key),
+            ".env",
+            "a".repeat(40).as_str(),
+            false,
+            &[],
+            4.5,
+        );
+        assert!(!findings.iter().any(|f| f.pattern_id == "openrouter_key"));
+    }
+
+    #[test]
     fn test_scan_content_finds_ai_provider_env_key() {
         let key = "ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890";
         let content = format!("DEEPSEEK_API_KEY={}", key);
@@ -2403,7 +2448,7 @@ mod tests {
         let path_finding = findings.iter().find(|f| f.pattern_id == "ai_path_prompt_history").expect("ai path finding");
         let (is_ai, category, tags) = ai_metadata_for_finding(path_finding);
         assert!(is_ai);
-        assert_eq!(category.as_deref(), Some("prompt_history_path"));
+        assert_eq!(category.as_deref(), Some("prompt_history"));
         assert!(tags.iter().any(|t| t == "claude"));
     }
 

@@ -417,19 +417,19 @@ impl Reporter {
         println!("\n╔{}╗", "═".repeat(w));
         println!("║  {:<width$}║", "TOKEN SCAN REPORT", width = w - 2);
         println!("╚{}╝", "═".repeat(w));
-        println!("│  {:<16}: {}", "GitHub User", login.cyan().bold());
-        println!("│  {:<16}: {}", "Repos Scanned", repo_count);
-        println!("│  {:<16}: {}", "Risk Score", risk_colored);
-        println!("│  {:<16}: {}  [ {} {} {} ]",
+        println!("│  {:<14}: {}", "GitHub User", login.cyan().bold());
+        println!("│  {:<14}: {}", "Repos Scanned", repo_count);
+        println!("│  {:<14}: {}", "Risk Score", risk_colored);
+        println!("│  {:<14}: {}  [ {} {} {} ]",
                  "Findings",
                  stream_r.findings.len().to_string().bold(),
                  format!("CRIT:{}", counts["CRITICAL"]).red().bold(),
                  format!("HIGH:{}", counts["HIGH"]).yellow(),
                  format!("MED:{}", counts["MEDIUM"]).bright_yellow());
-        println!("│  {:<16}: {}", "AI Findings", ai_total.to_string().magenta());
-        println!("│  {:<16}: {} KB", "Data Processed", stream_r.bytes_scanned / 1024);
-        println!("│  {:<16}: {:.1}s", "Elapsed", stream_r.elapsed_s);
-        println!("│  {:<16}: {}  {}", "Report", report_path.green(), "✔".green().bold());
+        println!("│  {:<14}: {}", "AI Findings", ai_total.to_string().magenta());
+        println!("│  {:<14}: {} KB", "Data Processed", stream_r.bytes_scanned / 1024);
+        println!("│  {:<14}: {:.1}s", "Elapsed", stream_r.elapsed_s);
+        println!("│  {:<14}: {}  {}", "Report", report_path.green(), "✔".green().bold());
         println!("│");
         println!("└{}┘\n", "─".repeat(w));
     }
@@ -516,6 +516,8 @@ impl Reporter {
     pub fn save_csv(&self, path: &str, stream_r: Option<&StreamResult>) -> std::io::Result<()> {
         let parent = Path::new(path).parent().unwrap_or(Path::new("."));
         std::fs::create_dir_all(parent)?;
+        // CSV schema:
+        // file,line,severity,type,description,match,deleted,ai_related,ai_category,ai_tags
         let mut out = String::from("file,line,severity,type,description,match,deleted,ai_related,ai_category,ai_tags\n");
         if let Some(s) = stream_r {
             for f in &s.findings {
