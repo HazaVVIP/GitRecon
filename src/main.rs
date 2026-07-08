@@ -1364,6 +1364,58 @@ async fn main() {
             println!("  ✔  Repository mapped: {} objects", total);
         }
 
+        // VERIFICATION: Check if git objects are actually accessible
+        // This catches partial exposure cases where only metadata is exposed
+        if !map_r.objects_accessible {
+            if verbose {
+                println!("  ⚠  PARTIAL EXPOSURE DETECTED: Git metadata accessible but objects return 404");
+                println!("  → Skipping analysis (no accessible objects to scan)");
+                println!("  → Detection downgraded from {} to PARTIAL", dr.label);
+            } else {
+                eprintln!("  ⚠  Partial exposure: metadata only, objects not accessible");
+            }
+
+            // Generate a report indicating partial exposure
+            let partial_report = format!("{}/{}_report_partial.json", args.output, target_name(url));
+            if let Err(e) = std::fs::write(
+                &partial_report,
+                serde_json::json!({
+                    "target": url,
+                    "timestamp": chrono::Utc::now().to_rfc3339(),
+                    "tool": "GitRecon",
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "detection": {
+                        "confidence": dr.confidence,
+                        "label": format!("{}_PARTIAL", dr.label),
+                        "git_url": dr.git_url,
+                        "exposure_type": "metadata_only"
+                    },
+                    "map": {
+                        "metadata_accessible": true,
+                        "objects_accessible": false,
+                        "blob_sha1s_found": map_r.blob_sha1s.len(),
+                        "branches": map_r.branches,
+                        "remote_urls": map_r.remote_urls
+                    },
+                    "result": {
+                        "blobs_scanned": 0,
+                        "findings": [],
+                        "severity_counts": {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0},
+                        "note": "Git metadata files (HEAD, config, index) are accessible, but git objects (blobs/trees/commits) return 404. This indicates partial .git exposure where only repository metadata is exposed."
+                    }
+                }).to_string()
+            ) {
+                if verbose {
+                    eprintln!("  ✗ Failed to write partial exposure report: {}", e);
+                }
+            } else if verbose {
+                println!("  → Partial exposure report saved: {}", partial_report);
+            }
+
+            // Skip to next target
+            continue;
+        }
+
         // ── Analysis ─────────────────────────────────────────────────
         if verbose {
             println!("  ◈  Deep object analysis...");

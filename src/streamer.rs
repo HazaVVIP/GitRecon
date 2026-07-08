@@ -760,21 +760,42 @@ impl Streamer {
         let save_dir_arc: Option<Arc<PathBuf>> = save_dir.map(Arc::new);
 
         // Build sha1→filename lookup and current-blob set upfront
-        let mut sha1_to_file: HashMap<String, String> = HashMap::with_capacity(map_result.index_entries.len());
-        for entry in &map_result.index_entries {
-            sha1_to_file.insert(entry.sha1.clone(), entry.filename.clone());
-        }
+        // FIXED: Use complete_sha1_to_file() which includes both index and graph-derived mappings
+        let sha1_to_file: HashMap<String, String> = map_result.complete_sha1_to_file();
         let current_blobs = map_result.blob_sha1s.clone();
         let sha1_to_file  = Arc::new(sha1_to_file);
         let current_blobs = Arc::new(current_blobs);
 
-        // Priority: blobs from index first (sensitive), then commit graph
+        // Priority: deleted & sensitive files first (high value historical secrets)
+        //           then deleted files, then sensitive files, then regular files
         let mut priority_blobs: Vec<String> = map_result.blob_sha1s.iter().cloned().collect();
         let other_sha1s: Vec<String>        = map_result.commit_sha1s.iter().cloned().collect();
 
-        // Sort: sensitive files first
-        priority_blobs.sort_by_key(|sha1| {
-            if is_sensitive_file(sha1_to_file.get(sha1).map(|f| f.as_str()).unwrap_or("")) { 0 } else { 1 }
+        // ENHANCED: Prioritize deleted files (historical secrets) and sensitive files
+        priority_blobs.sort_by(|a, b| {
+            let a_path = sha1_to_file.get(a).map(|s| s.as_str()).unwrap_or("");
+            let b_path = sha1_to_file.get(b).map(|s| s.as_str()).unwrap_or("");
+
+            let a_deleted = !current_blobs.contains(a);
+            let b_deleted = !current_blobs.contains(b);
+
+            let a_sensitive = is_sensitive_file(a_path);
+            let b_sensitive = is_sensitive_file(b_path);
+
+            // Priority order: deleted & sensitive > deleted > sensitive > regular
+            match (a_deleted && a_sensitive, b_deleted && b_sensitive) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => match (a_deleted, b_deleted) {
+                    (true, false) => std::cmp::Ordering::Less,
+                    (false, true) => std::cmp::Ordering::Greater,
+                    _ => match (a_sensitive, b_sensitive) {
+                        (true, false) => std::cmp::Ordering::Less,
+                        (false, true) => std::cmp::Ordering::Greater,
+                        _ => std::cmp::Ordering::Equal,
+                    }
+                }
+            }
         });
 
         // Deduplicate — the union of blob + commit sets can overlap after MapResult processing

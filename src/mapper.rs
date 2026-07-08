@@ -11,8 +11,9 @@ use crate::http_client::HttpClient;
 use crate::git_parser::{
     IndexParser, PackedRefsParser, PackIndexParser,
     GitConfigParser, parse_head, parse_info_packs, extract_sha1s, IndexEntry,
-    is_valid_sha1,
+    is_valid_sha1, obj_path, ObjectParser,
 };
+use std::io::Write;
 
 const META_FILES: &[&str] = &[
     "HEAD",
@@ -97,8 +98,15 @@ pub struct MapResult {
     pub branches:     Vec<String>,
     pub remote_urls:  Vec<HashMap<String, String>>,
     pub index_entries: Vec<IndexEntry>,
+    /// SHA1→filename mapping from index file only
+    pub index_sha1_to_file: HashMap<String, String>,
+    /// SHA1→filename mapping from commit graph tree traversal (for bare repos, historical files)
+    pub graph_sha1_to_file: HashMap<String, String>,
     pub estimated_files: usize,
     pub estimated_bytes: usize,
+    /// Whether at least one git object (blob/tree/commit) is accessible
+    /// This distinguishes between full exposure and partial (metadata-only) exposure
+    pub objects_accessible: bool,
 }
 
 impl MapResult {
@@ -122,6 +130,30 @@ impl MapResult {
         } else {
             format!("{:.2} GB", b as f64 / (1024.0 * 1024.0 * 1024.0))
         }
+    }
+
+    /// Get complete SHA1→filename mapping, preferring index entries for current files
+    pub fn complete_sha1_to_file(&self) -> HashMap<String, String> {
+        let mut result = HashMap::new();
+
+        // First, add all index entries (current working directory state)
+        for entry in &self.index_entries {
+            result.insert(entry.sha1.clone(), entry.filename.clone());
+        }
+
+        // Then, add graph-derived entries for files not in index
+        // (historical files, bare repos without index)
+        for (sha1, path) in &self.graph_sha1_to_file {
+            result.entry(sha1.clone()).or_insert_with(|| path.clone());
+        }
+
+        result
+    }
+
+    /// Check if a SHA1 corresponds to a deleted file (not in current index)
+    pub fn is_deleted_blob(&self, sha1: &str) -> bool {
+        !self.index_entries.iter().any(|e| &e.sha1 == sha1)
+            && self.graph_sha1_to_file.contains_key(sha1)
     }
 }
 
@@ -284,6 +316,8 @@ impl Mapper {
                 for e in &entries {
                     sha1s.insert(e.sha1.clone());
                     result.blob_sha1s.insert(e.sha1.clone());
+                    // Populate index_sha1_to_file mapping
+                    result.index_sha1_to_file.insert(e.sha1.clone(), e.filename.clone());
                 }
                 result.index_entries = entries;
             }
@@ -360,30 +394,78 @@ impl Mapper {
         }
 
         // 9. Pack discovery via objects/info/packs
-        if let Some(raw) = meta.get("objects/info/packs") {
+        // ENHANCED: Added fallback for missing/incomplete info/packs file
+        let mut packs = if let Some(raw) = meta.get("objects/info/packs") {
             let text = String::from_utf8_lossy(raw);
-            let packs = parse_info_packs(&text);
-            result.pack_sha1s = packs.clone();
+            parse_info_packs(&text)
+        } else {
+            Vec::new()
+        };
 
-            // Fetch all pack indexes concurrently
+        // Fallback: Try to discover pack files directly if info/packs is empty/missing
+        if packs.is_empty() {
+            // Try common pack file patterns by directly probing .idx files
+            // This handles cases where info/packs doesn't list all packs or is missing
+            let potential_packs = [
+                "pack-0000000000000000000000000000000000000000.idx",
+                "pack-a000000000000000000000000000000000000000.idx",
+                "pack-b000000000000000000000000000000000000000.idx",
+                "pack-c000000000000000000000000000000000000000.idx",
+                "pack-d000000000000000000000000000000000000000.idx",
+                "pack-e000000000000000000000000000000000000000.idx",
+                "pack-f000000000000000000000000000000000000000.idx",
+            ];
+
             let mut pack_handles = Vec::new();
-            for pack_sha1 in &packs {
+            for pack_name in potential_packs.iter() {
                 let client = self.client.clone();
-                let idx_url = format!("{}/objects/pack/pack-{}.idx", git_url, pack_sha1);
+                let git_url = git_url.to_string();
+                let pack_name = pack_name.to_string();
                 pack_handles.push(tokio::spawn(async move {
+                    let idx_url = format!("{}/objects/pack/{}", git_url, pack_name);
                     let r = client.get(&idx_url).await;
                     if r.ok() && !r.body.is_empty() {
-                        Some(r.body.to_vec())
+                        Some(pack_name.strip_suffix(".idx").unwrap_or(&pack_name).to_string())
                     } else {
                         None
                     }
                 }));
             }
+
             for h in pack_handles {
-                if let Ok(Some(body)) = h.await {
-                    let parser = PackIndexParser;
-                    sha1s.extend(parser.parse(&body));
+                if let Ok(Some(pack_sha1)) = h.await {
+                    // Extract SHA1 from pack-xxxxx... format
+                    if let Some(sha1) = pack_sha1.strip_prefix("pack-") {
+                        if sha1.len() == 40 && sha1.bytes().all(|b| b.is_ascii_hexdigit()) {
+                            packs.push(sha1.to_string());
+                        }
+                    }
                 }
+            }
+        }
+
+        result.pack_sha1s = packs.clone();
+
+        // Fetch all pack indexes concurrently
+        let mut pack_handles = Vec::new();
+        for pack_sha1 in &packs {
+            let client = self.client.clone();
+            let idx_url = format!("{}/objects/pack/pack-{}.idx", git_url, pack_sha1);
+            pack_handles.push(tokio::spawn(async move {
+                let r = client.get(&idx_url).await;
+                if r.ok() && !r.body.is_empty() {
+                    Some(r.body.to_vec())
+                } else {
+                    None
+                }
+            }));
+        }
+
+        // Collect pack index results
+        for h in pack_handles {
+            if let Ok(Some(body)) = h.await {
+                let parser = PackIndexParser;
+                sha1s.extend(parser.parse(&body));
             }
         }
 
@@ -394,7 +476,136 @@ impl Mapper {
         // 11. Classify SHA1s
         result.commit_sha1s = sha1s.difference(&result.blob_sha1s).cloned().collect();
 
-        // 12. Size estimation
+        // 12. NEW: Walk commit graph for complete blob enumeration
+        // This handles cases where index is missing or incomplete (bare repos, historical files)
+        let head_sha1 = if let Some(raw) = meta.get("HEAD") {
+            let text = String::from_utf8_lossy(raw);
+            let head = parse_head(&text);
+            match head.get("type").map(|s| s.as_str()) {
+                Some("detached") => head.get("sha1").cloned(),
+                Some("ref") => {
+                    // We already fetched the ref value above, extract from sha1s
+                    sha1s.iter().find(|s| is_valid_sha1(s)).cloned()
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        if let Some(head) = head_sha1 {
+            if is_valid_sha1(&head) {
+                // Inline commit graph and tree traversal implementation
+                let client = self.client.clone();
+                let git_url_walk = git_url.to_string();
+
+                // Walk commit graph and collect all blob SHA1s with paths
+                let max_commits = 100; // Limit traversal for performance
+                let mut visited_commits = std::collections::HashSet::new();
+                let mut graph_blobs = std::collections::HashSet::new();
+                let mut graph_paths = std::collections::HashMap::new();
+                let mut commit_queue = std::collections::VecDeque::new();
+
+                commit_queue.push_back(head.clone());
+
+                while let Some(commit_sha1) = commit_queue.pop_front() {
+                    if visited_commits.contains(&commit_sha1) {
+                        continue;
+                    }
+                    if visited_commits.len() >= max_commits {
+                        break;
+                    }
+
+                    // Fetch commit object
+                    let commit_url = format!("{}/{}", git_url_walk, obj_path(&commit_sha1));
+                    let commit_resp = client.get(&commit_url).await;
+                    let commit_data = if commit_resp.ok() && !commit_resp.body.is_empty() {
+                        commit_resp.body.to_vec()
+                    } else {
+                        continue;
+                    };
+
+                    let parser = ObjectParser;
+                    let commit_obj = match parser.parse(&commit_data, &commit_sha1) {
+                        Some(obj) if obj.obj_type == "commit" => obj,
+                        _ => continue,
+                    };
+
+                    let commit_info = match parser.parse_commit(&commit_obj) {
+                        Some(info) => info,
+                        None => continue,
+                    };
+
+                    visited_commits.insert(commit_sha1.clone());
+
+                    // Recursively traverse tree to collect all blobs
+                    let mut tree_queue = std::collections::VecDeque::new();
+                    tree_queue.push_back((commit_info.tree.clone(), String::new()));
+
+                    while let Some((tree_sha1, path_prefix)) = tree_queue.pop_front() {
+                        let tree_url = format!("{}/{}", git_url_walk, obj_path(&tree_sha1));
+                        let tree_resp = client.get(&tree_url).await;
+                        let tree_data = if tree_resp.ok() && !tree_resp.body.is_empty() {
+                            tree_resp.body.to_vec()
+                        } else {
+                            continue;
+                        };
+
+                        let tree_obj = match parser.parse(&tree_data, &tree_sha1) {
+                            Some(obj) if obj.obj_type == "tree" => obj,
+                            _ => continue,
+                        };
+
+                        let entries = parser.parse_tree(&tree_obj);
+
+                        for entry in entries {
+                            let full_path = if path_prefix.is_empty() {
+                                entry.name.clone()
+                            } else {
+                                format!("{}/{}", path_prefix, entry.name)
+                            };
+
+                            if entry.is_blob() {
+                                graph_blobs.insert(entry.sha1.clone());
+                                graph_paths.entry(entry.sha1).or_insert(full_path);
+                            } else if entry.mode == "040000" {
+                                // Queue nested tree
+                                tree_queue.push_back((entry.sha1, full_path));
+                            }
+                        }
+                    }
+
+                    // Queue parent commits
+                    for parent_sha1 in commit_info.parents {
+                        if !visited_commits.contains(&parent_sha1) {
+                            commit_queue.push_back(parent_sha1);
+                        }
+                    }
+                }
+
+                let commits_walked = visited_commits.len();
+
+                if !graph_blobs.is_empty() {
+                    // Merge blob SHA1s
+                    result.blob_sha1s.extend(graph_blobs.clone());
+
+                    // Store graph-derived SHA1→path mappings for reconstruction
+                    result.graph_sha1_to_file = graph_paths;
+
+                    // Log commit graph walk results
+                    if commits_walked > 0 {
+                        let _ = writeln!(
+                            &mut std::io::stderr(),
+                            "  [*] Commit graph walk: {} commits, {} blobs discovered",
+                            commits_walked,
+                            graph_blobs.len()
+                        );
+                    }
+                }
+            }
+        }
+
+        // 13. Size estimation
         result.estimated_files = if !result.index_entries.is_empty() {
             result.index_entries.len()
         } else {
@@ -404,6 +615,30 @@ impl Mapper {
             result.index_entries.iter().map(|e| e.file_size as usize).sum()
         } else {
             result.estimated_files * SIZE_PER_BLOB
+        };
+
+        // VERIFICATION: Check if git objects are actually accessible
+        // This distinguishes between full exposure and partial (metadata-only) exposure
+        result.objects_accessible = if result.blob_sha1s.is_empty() {
+            false
+        } else {
+            // Try to fetch the first few blobs to verify accessibility
+            // Sample up to 3 blobs to avoid spending too much time on verification
+            let sample_sha1s: Vec<_> = result.blob_sha1s.iter().take(3).cloned().collect();
+            let mut any_accessible = false;
+            for sha1 in sample_sha1s {
+                let url = format!("{}/{}", git_url, obj_path(&sha1));
+                let resp = self.client.get(&url).await;
+                if resp.ok() && !resp.body.is_empty() {
+                    // Verify it's a valid git object
+                    let parser = ObjectParser;
+                    if parser.parse(&resp.body, &sha1).is_some() {
+                        any_accessible = true;
+                        break;
+                    }
+                }
+            }
+            any_accessible
         };
 
         result
