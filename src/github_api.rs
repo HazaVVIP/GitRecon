@@ -5,9 +5,210 @@
 //! All requests are authenticated with `Authorization: token <PAT>` and target
 //! `https://api.github.com`.
 
+use crate::forge::{EnumScope, Forge, Platform, RateLimitInfo, Repository, TreeEntry};
 use crate::http_client::{HttpClient, HttpConfig};
+use async_trait::async_trait;
+use std::time::{Duration, Instant};
 
 const GH_API: &str = "https://api.github.com";
+
+// ════════════════════════════════════════════════
+// FORGE TRAIT IMPLEMENTATION
+// ════════════════════════════════════════════════
+
+/// GitHub API client implementing the Forge trait.
+pub struct GitHubForgeClient {
+    client: HttpClient,
+    rate_limit_remaining: std::sync::Arc<std::sync::Mutex<Option<(u32, Instant)>>>,
+}
+
+impl GitHubForgeClient {
+    /// Create a new GitHub forge client.
+    pub fn new(client: HttpClient) -> Self {
+        Self {
+            client,
+            rate_limit_remaining: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+
+    /// Update rate limit from response headers.
+    fn update_rate_limit(&self, headers: &std::collections::HashMap<String, String>) {
+        if let Some(remaining) = headers.get("x-ratelimit-remaining") {
+            if let Ok(r) = remaining.parse::<u32>() {
+                let reset_time = headers
+                    .get("x-ratelimit-reset")
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .map(|ts| {
+                        let reset = std::time::UNIX_EPOCH + Duration::from_secs(ts);
+                        let now = std::time::SystemTime::now();
+                        reset.duration_since(now).unwrap_or(Duration::from_secs(3600))
+                    })
+                    .unwrap_or(Duration::from_secs(3600));
+
+                *self.rate_limit_remaining.lock().unwrap() = Some((r, Instant::now() + reset_time));
+            }
+        }
+    }
+
+    /// Make a GET request and update rate limit tracking.
+    async fn get_with_rate_limit(&self, url: &str) -> anyhow::Result<crate::http_client::Response> {
+        let resp = self.client.get(url).await;
+
+        // Update rate limit from headers
+        if resp.status == 200 || resp.status == 0 {
+            // Try to parse rate limit headers
+            let mut headers = std::collections::HashMap::new();
+            for (k, v) in resp.headers.iter() {
+                headers.insert(k.to_lowercase(), v.clone());
+            }
+            self.update_rate_limit(&headers);
+        }
+
+        Ok(resp)
+    }
+}
+
+#[async_trait]
+impl Forge for GitHubForgeClient {
+    async fn authenticate(&mut self, token: &str) -> anyhow::Result<()> {
+        // Validate token by calling /user
+        let url = format!("{}/user", GH_API);
+        let resp = self.get_with_rate_limit(&url).await?;
+
+        if resp.status == 401 {
+            anyhow::bail!("Invalid or expired token (HTTP 401)");
+        }
+
+        if !resp.ok() {
+            anyhow::bail!("Authentication failed with HTTP {}", resp.status);
+        }
+
+        Ok(())
+    }
+
+    async fn enumerate_repos(&self, scope: EnumScope) -> anyhow::Result<Vec<Repository>> {
+        let mut repos = Vec::new();
+
+        let url = match &scope {
+            EnumScope::User => format!("{}/user/repos?per_page=100&type=all&sort=updated", GH_API),
+            EnumScope::Org(org) => format!("{}/orgs/{}/repos?per_page=100&type=all", GH_API, org),
+            EnumScope::All => {
+                // For "All", we'll start with user repos
+                format!("{}/user/repos?per_page=100&type=all&sort=updated", GH_API)
+            }
+        };
+
+        let mut current_url = url;
+        loop {
+            let resp = self.get_with_rate_limit(&current_url).await?;
+            if !resp.ok() {
+                anyhow::bail!("GET {} returned HTTP {}", current_url, resp.status);
+            }
+
+            let json: serde_json::Value = serde_json::from_slice(&resp.body)?;
+            let arr = json.as_array().ok_or_else(|| {
+                anyhow::anyhow!("Expected JSON array from repos endpoint")
+            })?;
+
+            for r in arr {
+                if let Some(gh_repo) = parse_repo(r) {
+                    repos.push(Repository {
+                        full_name: gh_repo.full_name.clone(),
+                        owner: gh_repo.owner.clone(),
+                        name: gh_repo.name.clone(),
+                        private: gh_repo.private,
+                        default_branch: gh_repo.default_branch.clone(),
+                        clone_url: gh_repo.clone_url.clone(),
+                        platform: Platform::GitHub,
+                        stars: r["stargazers_count"].as_u64().map(|v| v as u32),
+                        forks: r["forks_count"].as_u64().map(|v| v as u32),
+                        description: r["description"].as_str().map(|s| s.to_string()),
+                        updated_at: r["updated_at"].as_str().map(|s| s.to_string()),
+                    });
+                }
+            }
+
+            match resp.headers.get("link").and_then(|h| parse_next_link(h)) {
+                Some(next) => current_url = next,
+                None => break,
+            }
+        }
+
+        // For EnumScope::All, also fetch org repos
+        if let EnumScope::All = scope {
+            if let Ok(orgs) = list_user_orgs(&self.client).await {
+                for org in orgs {
+                    if let Ok(org_repos) = self.enumerate_repos(EnumScope::Org(org)).await {
+                        repos.extend(org_repos);
+                    }
+                }
+            }
+        }
+
+        // Deduplicate
+        let mut seen = std::collections::HashSet::new();
+        repos.retain(|r| seen.insert(r.full_name.clone()));
+
+        Ok(repos)
+    }
+
+    async fn get_tree(&self, repo: &Repository, branch: &str) -> anyhow::Result<Vec<TreeEntry>> {
+        let sha = self.get_head_sha(repo, branch).await?;
+        let url = format!("{}/repos/{}/{}/git/trees/{}?recursive=1", GH_API, repo.owner, repo.name, sha);
+        let resp = self.get_with_rate_limit(&url).await?;
+
+        if !resp.ok() {
+            anyhow::bail!("GET tree {} returned HTTP {}", url, resp.status);
+        }
+
+        let json: serde_json::Value = serde_json::from_slice(&resp.body)?;
+        let gh_entries = parse_tree_entries(&json);
+
+        // Convert to unified TreeEntry format
+        Ok(gh_entries
+            .into_iter()
+            .map(|e| TreeEntry {
+                path: e.path,
+                obj_type: e.obj_type,
+                sha: e.sha,
+                size: e.size,
+                mode: None, // GitHub API tree doesn't include mode in recursive response
+            })
+            .collect())
+    }
+
+    async fn get_blob(&self, repo: &Repository, sha: &str) -> anyhow::Result<Vec<u8>> {
+        get_blob_content(&self.client, &repo.owner, &repo.name, sha).await
+    }
+
+    fn rate_limit_remaining(&self) -> Option<(u32, Duration)> {
+        self.rate_limit_remaining
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|(remaining, reset)| (*remaining, reset.saturating_duration_since(Instant::now())))
+    }
+
+    fn rate_limit_info(&self) -> Option<RateLimitInfo> {
+        self.rate_limit_remaining().map(|(remaining, reset_in)| RateLimitInfo {
+            remaining,
+            reset_in,
+            limit: Platform::GitHub.default_rate_limit(),
+        })
+    }
+
+    fn platform(&self) -> Platform {
+        Platform::GitHub
+    }
+
+    async fn get_head_sha(&self, repo: &Repository, branch: &str) -> anyhow::Result<String> {
+        get_head_sha(&self.client, &repo.owner, &repo.name, branch).await
+    }
+
+    async fn whoami(&self) -> anyhow::Result<(String, String)> {
+        whoami(&self.client).await
+    }
+}
 
 // ════════════════════════════════════════════════
 // DATA STRUCTURES

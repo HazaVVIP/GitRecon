@@ -11,6 +11,7 @@ use crate::detect::DetectResult;
 use crate::mapper::MapResult;
 use crate::streamer::StreamResult;
 use crate::text_utils::truncate_utf8;
+use crate::validation;
 
 #[derive(Clone)]
 #[allow(dead_code)]
@@ -143,6 +144,19 @@ impl Reporter {
             println!("│  {:<16}: {}  Failed: {}", "Files saved", r.files_saved, r.files_save_failed);
         }
         println!("│  {:<16}: {:.1}s", "Elapsed", r.elapsed_s);
+        // PERF-005: Display cache stats
+        if r.cache_hits > 0 || r.cache_misses > 0 {
+            let total_requests = r.cache_hits + r.cache_misses;
+            let hit_rate = if total_requests > 0 {
+                (r.cache_hits as f64 / total_requests as f64) * 100.0
+            } else {
+                0.0
+            };
+            println!("│  {:<16}: {}/{} ({:.1}%)", "Cache hits", r.cache_hits, total_requests, hit_rate);
+            if let Some(ref stats) = r.cache_stats {
+                println!("│  {:<16}: {} entries, {}", "Cache size", stats.total_entries, stats.size_human);
+            }
+        }
         println!("│");
     }
 
@@ -521,14 +535,23 @@ impl Reporter {
         let mut out = String::from("file,line,severity,type,description,match,deleted,ai_related,ai_category,ai_tags\n");
         if let Some(s) = stream_r {
             for f in &s.findings {
-                let m = f.match_str.replace('"', "\"\"");
-                let desc = f.description.replace('"', "\"\"");
+                // Get AI metadata first
                 let (ai_related, ai_category, ai_tags) = crate::streamer::ai_metadata_for_finding(f);
-                let ai_category = ai_category.unwrap_or_default();
-                let ai_tags = ai_tags.join("|");
+
+                // SEC-005: CSV injection protection - sanitize all fields
+                let sanitized_filename = validation::sanitize_csv_field(&f.filename);
+                let sanitized_pattern = validation::sanitize_csv_field(&f.pattern_id);
+                let sanitized_desc = validation::sanitize_csv_field(&f.description);
+                let sanitized_match = validation::sanitize_csv_field(&f.match_str);
+                let sanitized_ai_category = validation::sanitize_csv_field(&ai_category.unwrap_or_default());
+                let sanitized_ai_tags = validation::sanitize_csv_field(&ai_tags.join("|"));
+
+                let desc = sanitized_desc.replace('"', "\"\"");
+                let m = sanitized_match.replace('"', "\"\"");
+
                 out.push_str(&format!(
                     "{},{},{},{},\"{}\",\"{}\",{},{},\"{}\",\"{}\"\n",
-                    f.filename, f.line, f.severity, f.pattern_id, desc, m, f.is_deleted, ai_related, ai_category, ai_tags
+                    sanitized_filename, f.line, f.severity, sanitized_pattern, desc, m, f.is_deleted, ai_related, sanitized_ai_category, sanitized_ai_tags
                 ));
             }
         }
@@ -697,6 +720,12 @@ mod tests {
             elapsed_s: 0.1,
             files_saved: 0,
             files_save_failed: 0,
+            rate_limit_allowed: 0,
+            rate_limit_dropped: 0,
+            rate_limit_wait_ms: 0,
+            cache_hits: 0,
+            cache_misses: 0,
+            cache_stats: None,
         }
     }
 

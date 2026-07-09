@@ -14,6 +14,7 @@ path = "src/main.rs"
 # Async runtime
 tokio = { version = "1.44", features = ["full"] }
 futures = "0.3"
+async-trait = "0.1"
 
 # HTTP client
 reqwest = { version = "0.12", features = ["json", "socks", "rustls-tls", "gzip", "deflate"], default-features = false }
@@ -63,6 +64,23 @@ base64 = "0.22"
 # Logging
 log = "0.4"
 env_logger = "0.11"
+
+# Checkpoint & Resume (R-1)
+dirs = "5.0"
+
+# SEC-004: Signal handling for cleanup
+signal-hook = "0.3"
+signal-hook-tokio = { version = "0.3", features = ["futures-v0_3"] }
+
+# Binary File Scanning (S-3)
+rusqlite = "0.32"
+zip = "2.2"
+
+# URL validation
+url = "2.5"
+
+# SEC-007: TOCTOU protection - libc for uid checks
+libc = "0.2"
 
 [profile.release]
 opt-level = 3

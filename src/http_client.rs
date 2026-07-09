@@ -1,12 +1,18 @@
 //! http_client.rs
 //! Async HTTP engine: retry, proxy, SSL bypass, UA rotation, rate limiting.
+//! PERF-002: Smart retry per status code with configurable strategies.
+//! PERF-004: Token bucket rate limiting with metrics tracking.
 
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use rand::seq::IndexedRandom;
 use reqwest::{Client, ClientBuilder, Proxy};
 use tokio::time::sleep;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+
+// PERF-004: Use the dedicated rate limiter module
+use crate::rate_limiter::{TokenBucket, RateLimitMetrics};
 
 // E-4: Expanded USER_AGENTS to 25+ entries
 const USER_AGENTS: &[&str] = &[
@@ -38,39 +44,133 @@ const USER_AGENTS: &[&str] = &[
     "Go-http-client/1.1",
 ];
 
-// E-1: Token bucket for rate limiting
-struct TokenBucket {
-    tokens: f64,
-    max_tokens: f64,
-    refill_rate: f64,
-    last_refill: std::time::Instant,
+/// PERF-002: Retry strategy for handling different failure scenarios.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RetryStrategy {
+    /// Aggressive: Maximum retries for bypassing rate limits and WAFs
+    Aggressive,
+    /// Standard: Balanced retry behavior (default)
+    #[default]
+    Standard,
+    /// Conservative: Minimal retries, fail fast
+    Conservative,
 }
 
-impl TokenBucket {
-    fn new(rps: f64) -> Self {
+impl RetryStrategy {
+    fn max_retries(&self) -> u32 {
+        match self {
+            Self::Aggressive => 10,
+            Self::Standard => 3,
+            Self::Conservative => 1,
+        }
+    }
+
+    fn max_backoff(&self) -> Duration {
+        match self {
+            Self::Aggressive => Duration::from_secs(60),
+            Self::Standard => Duration::from_secs(30),
+            Self::Conservative => Duration::from_secs(10),
+        }
+    }
+
+    /// Base delay in milliseconds for exponential backoff
+    fn base_delay_ms(&self) -> u64 {
+        match self {
+            Self::Aggressive => 100,
+            Self::Standard => 500,
+            Self::Conservative => 1000,
+        }
+    }
+}
+
+impl std::str::FromStr for RetryStrategy {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "aggressive" => Ok(Self::Aggressive),
+            "standard" => Ok(Self::Standard),
+            "conservative" => Ok(Self::Conservative),
+            _ => Err(format!("Invalid retry strategy: {}. Valid options: aggressive, standard, conservative", s)),
+        }
+    }
+}
+
+impl std::fmt::Display for RetryStrategy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Aggressive => write!(f, "aggressive"),
+            Self::Standard => write!(f, "standard"),
+            Self::Conservative => write!(f, "conservative"),
+        }
+    }
+}
+
+/// PERF-002: Retry metrics for status code aware retry tracking.
+#[derive(Debug)]
+pub struct RetryMetrics {
+    /// Number of 404 responses (no retries)
+    pub retry_404: AtomicUsize,
+    /// Number of 403 responses (no retries)
+    pub retry_403: AtomicUsize,
+    /// Number of 429 responses with retries
+    pub retry_429: AtomicUsize,
+    /// Number of 500 responses with retries
+    pub retry_500: AtomicUsize,
+    /// Number of 502 responses with retries
+    pub retry_502: AtomicUsize,
+    /// Number of 503 responses with retries
+    pub retry_503: AtomicUsize,
+    /// Number of 504 responses with retries
+    pub retry_504: AtomicUsize,
+    /// Total successful requests
+    pub success: AtomicUsize,
+    /// Total failed requests (after all retries exhausted)
+    pub failed: AtomicUsize,
+    /// Network errors retried
+    pub network_errors: AtomicUsize,
+}
+
+impl Default for RetryMetrics {
+    fn default() -> Self {
         Self {
-            tokens: rps,
-            max_tokens: rps,
-            refill_rate: rps / 1000.0,
-            last_refill: std::time::Instant::now(),
-        }
-    }
-
-    async fn consume(&mut self) {
-        let now = std::time::Instant::now();
-        let elapsed_ms = now.duration_since(self.last_refill).as_millis() as f64;
-        self.tokens = (self.tokens + self.refill_rate * elapsed_ms).min(self.max_tokens);
-        self.last_refill = now;
-        
-        if self.tokens >= 1.0 {
-            self.tokens -= 1.0;
-        } else {
-            let wait_ms = ((1.0 - self.tokens) / self.refill_rate) as u64;
-            sleep(Duration::from_millis(wait_ms)).await;
-            self.tokens = 0.0;
+            retry_404: AtomicUsize::new(0),
+            retry_403: AtomicUsize::new(0),
+            retry_429: AtomicUsize::new(0),
+            retry_500: AtomicUsize::new(0),
+            retry_502: AtomicUsize::new(0),
+            retry_503: AtomicUsize::new(0),
+            retry_504: AtomicUsize::new(0),
+            success: AtomicUsize::new(0),
+            failed: AtomicUsize::new(0),
+            network_errors: AtomicUsize::new(0),
         }
     }
 }
+
+impl RetryMetrics {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    /// Get summary as a map for reporting
+    pub fn summary(&self) -> HashMap<String, usize> {
+        let mut map = HashMap::new();
+        map.insert("404_no_retry".to_string(), self.retry_404.load(Ordering::Relaxed));
+        map.insert("403_no_retry".to_string(), self.retry_403.load(Ordering::Relaxed));
+        map.insert("429_retried".to_string(), self.retry_429.load(Ordering::Relaxed));
+        map.insert("500_retried".to_string(), self.retry_500.load(Ordering::Relaxed));
+        map.insert("502_retried".to_string(), self.retry_502.load(Ordering::Relaxed));
+        map.insert("503_retried".to_string(), self.retry_503.load(Ordering::Relaxed));
+        map.insert("504_retried".to_string(), self.retry_504.load(Ordering::Relaxed));
+        map.insert("network_errors".to_string(), self.network_errors.load(Ordering::Relaxed));
+        map.insert("success".to_string(), self.success.load(Ordering::Relaxed));
+        map.insert("failed".to_string(), self.failed.load(Ordering::Relaxed));
+        map
+    }
+}
+
+// PERF-004: Old TokenBucket implementation removed - now using rate_limiter module
 
 /// Configuration for the HTTP client.
 #[derive(Debug, Clone)]
@@ -90,6 +190,8 @@ pub struct HttpConfig {
     pub rate_limit_rps: Option<f64>,
     pub proxy_list: Vec<String>,
     pub ua_pool: Vec<String>,
+    /// PERF-002: Retry strategy for status-code-aware retry logic
+    pub retry_strategy: RetryStrategy,
 }
 
 impl Default for HttpConfig {
@@ -110,6 +212,7 @@ impl Default for HttpConfig {
             rate_limit_rps: None,
             proxy_list: vec![],
             ua_pool: vec![],
+            retry_strategy: RetryStrategy::Standard,
         }
     }
 }
@@ -144,9 +247,14 @@ pub struct HttpClient {
     client: Client,
     cfg: HttpConfig,
     latency_window: Arc<std::sync::Mutex<std::collections::VecDeque<u64>>>,
-    token_bucket: Option<Arc<tokio::sync::Mutex<TokenBucket>>>,
+    /// PERF-004: Token bucket for rate limiting (atomic, thread-safe)
+    token_bucket: Option<Arc<TokenBucket>>,
     proxy_clients: Vec<Client>,
     proxy_index: Arc<AtomicUsize>,
+    /// PERF-002: Retry metrics tracking
+    pub retry_metrics: Arc<RetryMetrics>,
+    /// PERF-004: Rate limit metrics tracking
+    pub rate_limit_metrics: Option<Arc<RateLimitMetrics>>,
 }
 
 impl HttpClient {
@@ -183,9 +291,13 @@ impl HttpClient {
             proxy_clients.push(pb);
         }
 
+        // PERF-004: Create token bucket for rate limiting
         let token_bucket = cfg.rate_limit_rps.map(|rps| {
-            Arc::new(tokio::sync::Mutex::new(TokenBucket::new(rps)))
+            Arc::new(TokenBucket::new(rps))
         });
+
+        // PERF-004: Extract rate limit metrics from the token bucket
+        let rate_limit_metrics = token_bucket.as_ref().map(|tb| tb.metrics());
 
         Ok(Self {
             client,
@@ -194,44 +306,167 @@ impl HttpClient {
             token_bucket,
             proxy_clients,
             proxy_index: Arc::new(AtomicUsize::new(0)),
+            retry_metrics: RetryMetrics::new(),
+            rate_limit_metrics,
         })
     }
 
-    /// Perform a GET request with retry and rate limiting.
+    /// PERF-002: Parse Retry-After header for 429 responses.
+    /// Supports both delay-seconds and HTTP-date formats.
+    fn parse_retry_after(headers: &std::collections::HashMap<String, String>, strategy: RetryStrategy) -> Duration {
+        headers
+            .get("retry-after")
+            .and_then(|v| {
+                // Try parsing as seconds first
+                if let Ok(secs) = v.parse::<u64>() {
+                    return Some(Duration::from_secs(secs.min(strategy.max_backoff().as_secs())));
+                }
+                // Try parsing as HTTP-date (e.g., "Wed, 21 Oct 2015 07:28:00 GMT")
+                if let Ok(dt) = chrono::DateTime::parse_from_rfc2822(v) {
+                    let delay = (dt.timestamp() as u64).saturating_sub(chrono::Utc::now().timestamp() as u64);
+                    return Some(Duration::from_secs(delay.min(strategy.max_backoff().as_secs())));
+                }
+                None
+            })
+            .unwrap_or_else(|| {
+                // Default backoff for 429 when no Retry-After header
+                Duration::from_secs(5)
+            })
+    }
+
+    /// PERF-002: Calculate exponential backoff delay based on attempt number.
+    fn calculate_backoff(attempt: u32, strategy: RetryStrategy) -> Duration {
+        let base_ms = strategy.base_delay_ms() as u128;
+        let exponential_multiplier = 2u128.pow(attempt.min(30)); // Cap exponent to avoid overflow
+        let exponential_ms = base_ms.saturating_mul(exponential_multiplier).min(u128::MAX);
+        let exponential = Duration::from_millis(exponential_ms as u64);
+        exponential.min(strategy.max_backoff())
+    }
+
+    /// PERF-002: Determine if a status code should be retried.
+    fn should_retry_status(status: u16, strategy: RetryStrategy) -> bool {
+        match status {
+            // PERF-002: 404 and 403 - never retry (not found / forbidden is not transient)
+            404 | 403 => false,
+            // PERF-002: 429 - always retry (rate limited, may succeed after delay)
+            429 => true,
+            // PERF-002: 500/502/503/504 - retry based on strategy
+            500 | 502 | 503 | 504 => {
+                matches!(strategy, RetryStrategy::Standard | RetryStrategy::Aggressive)
+            }
+            // Other 4xx errors - don't retry (client errors)
+            400..=499 => false,
+            // Other 5xx errors - retry with standard/aggressive strategy
+            500..=599 => matches!(strategy, RetryStrategy::Standard | RetryStrategy::Aggressive),
+            _ => false,
+        }
+    }
+
+    /// Perform a GET request with smart status-code-aware retry.
     pub async fn get(&self, url: &str) -> Response {
-        // Token bucket rate limiting (E-1)
+        // PERF-004: Token bucket rate limiting (atomic, thread-safe)
         if let Some(ref tb) = self.token_bucket {
-            tb.lock().await.consume().await;
+            tb.acquire().await;
         }
         self.rate_limit().await;
 
-#[allow(unused_assignments)]
-        let mut last_err = String::new();
-        let max_retries = self.cfg.retries;
+        let strategy = self.cfg.retry_strategy;
+        let max_retries = strategy.max_retries().max(self.cfg.retries);
         let mut attempt = 0u32;
 
         loop {
             match self.do_get(url).await {
                 Ok(r) => {
-                    // R-2: Smart retry per HTTP status code
-                    if r.status == 404 || r.status == 403 {
-                        return r;
+                    // PERF-002: Status-code-aware retry logic
+                    match r.status {
+                        // No retry for permanent failures
+                        404 => {
+                            self.retry_metrics.retry_404.fetch_add(1, Ordering::Relaxed);
+                            self.retry_metrics.failed.fetch_add(1, Ordering::Relaxed);
+                            return r;
+                        }
+                        403 => {
+                            self.retry_metrics.retry_403.fetch_add(1, Ordering::Relaxed);
+                            self.retry_metrics.failed.fetch_add(1, Ordering::Relaxed);
+                            return r;
+                        }
+                        // Rate limited - retry with Retry-After header
+                        429 => {
+                            self.retry_metrics.retry_429.fetch_add(1, Ordering::Relaxed);
+
+                            let wait = Self::parse_retry_after(&r.headers, strategy);
+
+                            if attempt >= max_retries {
+                                self.retry_metrics.failed.fetch_add(1, Ordering::Relaxed);
+                                return r;
+                            }
+
+                            sleep(wait).await;
+                            attempt += 1;
+                            continue;
+                        }
+                        // Server errors - retry with exponential backoff
+                        500 => {
+                            self.retry_metrics.retry_500.fetch_add(1, Ordering::Relaxed);
+                            if attempt >= max_retries || !Self::should_retry_status(500, strategy) {
+                                self.retry_metrics.failed.fetch_add(1, Ordering::Relaxed);
+                                return r;
+                            }
+                            let backoff = Self::calculate_backoff(attempt, strategy);
+                            sleep(backoff).await;
+                            attempt += 1;
+                            continue;
+                        }
+                        502 => {
+                            self.retry_metrics.retry_502.fetch_add(1, Ordering::Relaxed);
+                            if attempt >= max_retries || !Self::should_retry_status(502, strategy) {
+                                self.retry_metrics.failed.fetch_add(1, Ordering::Relaxed);
+                                return r;
+                            }
+                            let backoff = Self::calculate_backoff(attempt, strategy);
+                            sleep(backoff).await;
+                            attempt += 1;
+                            continue;
+                        }
+                        503 => {
+                            self.retry_metrics.retry_503.fetch_add(1, Ordering::Relaxed);
+                            if attempt >= max_retries || !Self::should_retry_status(503, strategy) {
+                                self.retry_metrics.failed.fetch_add(1, Ordering::Relaxed);
+                                return r;
+                            }
+                            let backoff = Self::calculate_backoff(attempt, strategy);
+                            sleep(backoff).await;
+                            attempt += 1;
+                            continue;
+                        }
+                        504 => {
+                            self.retry_metrics.retry_504.fetch_add(1, Ordering::Relaxed);
+                            if attempt >= max_retries || !Self::should_retry_status(504, strategy) {
+                                self.retry_metrics.failed.fetch_add(1, Ordering::Relaxed);
+                                return r;
+                            }
+                            let backoff = Self::calculate_backoff(attempt, strategy);
+                            sleep(backoff).await;
+                            attempt += 1;
+                            continue;
+                        }
+                        // Success or other status codes
+                        _ => {
+                            if r.status >= 200 && r.status < 300 {
+                                self.retry_metrics.success.fetch_add(1, Ordering::Relaxed);
+                            } else {
+                                self.retry_metrics.failed.fetch_add(1, Ordering::Relaxed);
+                            }
+                            return r;
+                        }
                     }
-                    if r.status == 429 {
-                        let wait_secs = r.headers.get("retry-after")
-                            .and_then(|v| v.parse::<u64>().ok())
-                            .unwrap_or(5)
-                            .min(30);
-                        sleep(Duration::from_secs(wait_secs)).await;
-                        attempt += 1;
-                        if attempt >= max_retries { return r; }
-                        continue;
-                    }
-                    return r;
                 }
                 Err(e) => {
-                    last_err = e.to_string();
+                    self.retry_metrics.network_errors.fetch_add(1, Ordering::Relaxed);
+
+                    let last_err = e.to_string();
                     if let Some(status) = e.status() {
+                        self.retry_metrics.failed.fetch_add(1, Ordering::Relaxed);
                         return Response {
                             url: url.to_string(),
                             status: status.as_u16(),
@@ -241,12 +476,17 @@ impl HttpClient {
                             error: Some(last_err),
                         };
                     }
-                    if attempt < max_retries - 1 {
-                        let backoff = Duration::from_millis(500 * 2u64.pow(attempt)).min(Duration::from_secs(30));
+
+                    // Network error - retry with exponential backoff
+                    if attempt < max_retries {
+                        let backoff = Self::calculate_backoff(attempt, strategy);
                         sleep(backoff).await;
+                        attempt += 1;
+                        continue;
                     }
-                    attempt += 1;
-                    if attempt >= max_retries { break; }
+
+                    self.retry_metrics.failed.fetch_add(1, Ordering::Relaxed);
+                    break;
                 }
             }
         }
@@ -257,7 +497,7 @@ impl HttpClient {
             body: bytes::Bytes::new(),
             headers: Default::default(),
             elapsed_ms: 0.0,
-            error: Some(last_err),
+            error: Some("Max retries exceeded".to_string()),
         }
     }
 
@@ -349,6 +589,10 @@ impl HttpClient {
 
     // O-4: POST method for webhook integration
     pub async fn post(&self, url: &str, body: &str, extra_headers: &[(String, String)]) -> Response {
+        // PERF-004: Apply rate limiting to POST requests as well
+        if let Some(ref tb) = self.token_bucket {
+            tb.acquire().await;
+        }
         self.rate_limit().await;
         let mut req = self.client.post(url)
             .header("Content-Type", "application/json")
