@@ -165,7 +165,7 @@ impl Mapper {
         Self { client }
     }
 
-    pub async fn run(&self, git_url: &str, branch: Option<&str>, skip_verification: bool) -> MapResult {
+    pub async fn run(&self, git_url: &str, branch: Option<&str>, verify_objects: bool) -> MapResult {
         let git_url = git_url.trim_end_matches('/');
         let mut result = MapResult::default();
         let mut meta: HashMap<String, Vec<u8>> = HashMap::new();
@@ -614,11 +614,11 @@ impl Mapper {
 
         // VERIFICATION: Check if git objects are actually accessible
         // This distinguishes between full exposure and partial (metadata-only) exposure
-        result.objects_accessible = if skip_verification {
-            // Skip verification and assume objects are accessible
+        // Only runs when verify_objects flag is explicitly enabled
+        result.objects_accessible = if !verify_objects || result.blob_sha1s.is_empty() {
+            // Default: skip verification and assume objects are accessible
+            // This avoids false negatives when verification is not explicitly requested
             true
-        } else if result.blob_sha1s.is_empty() {
-            false
         } else {
             // Try to fetch a sample of blobs to verify accessibility
             // Sample up to 10 blobs to get a better representation

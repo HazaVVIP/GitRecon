@@ -319,9 +319,10 @@ struct Cli {
     #[arg(long = "cache-ttl", default_value = "604800", value_name = "SECONDS")]
     cache_ttl: u64,
 
-    /// Skip object accessibility verification (forces scan even if metadata-only exposure detected)
-    #[arg(long = "skip-verification")]
-    skip_verification: bool,
+    /// Verify object accessibility before scanning (detects partial exposure)
+    /// Default: disabled for compatibility and to avoid false negatives
+    #[arg(long = "verify-objects")]
+    verify_objects: bool,
 }
 
 // ════════════════════════════════════════════════
@@ -3594,7 +3595,7 @@ async fn main() {
                 }
 
                 let mapper  = mapper::Mapper::new(client.clone());
-                let map_r   = mapper.run(&dr.git_url, dr.branch.as_deref(), args.skip_verification).await;
+                let map_r   = mapper.run(&dr.git_url, dr.branch.as_deref(), args.verify_objects).await;
 
                 // DX-4: --dry-run
                 if args.dry_run {
