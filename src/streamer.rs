@@ -955,7 +955,8 @@ impl AdaptiveConcurrency {
             new_workers = (old_workers + increase).min(target);
             // BUG-CONC-001: Use Release ordering for store
             self.current_workers.store(new_workers as u64, Ordering::Release);
-            if self.verbose {
+            // Only log if workers actually increased
+            if self.verbose && new_workers != old_workers {
                 eprintln!(
                     "  [ADAPTIVE] Headroom available ({:.1}% errors). Increasing workers: {} → {}",
                     error_rate * 100.0,
@@ -1349,11 +1350,13 @@ impl Streamer {
             if adaptive_enabled {
                 if let Some(ref mut ac) = adaptive_concurrency {
                     if ac.should_adjust(done) {
+                        let old_workers = current_workers.load(Ordering::Relaxed);
                         let new_workers = ac.adjust(done);
                         current_workers.store(new_workers, Ordering::Relaxed);
                         // Note: buffer_unordered worker count cannot be changed mid-stream
                         // The adjusted count will take effect on resume
-                        if self.verbose {
+                        // Only log if workers actually changed
+                        if self.verbose && new_workers != old_workers {
                             eprintln!("  [ADAPTIVE] Worker count adjusted: {} (will apply on next resume)", new_workers);
                         }
                     }
