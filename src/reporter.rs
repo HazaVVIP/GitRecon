@@ -6,17 +6,22 @@ use std::path::Path;
 use std::collections::HashMap;
 use colored::*;
 use hmac::{Hmac, Mac};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use sha2::Sha256;
 use crate::detect::DetectResult;
+use crate::layout;
 use crate::mapper::MapResult;
 use crate::streamer::StreamResult;
 use crate::text_utils::truncate_utf8;
+use crate::ui::{self, BannerStyle};
+use crate::ui::colors::ColorScheme;
 use crate::validation;
 
 #[derive(Clone)]
 #[allow(dead_code)]
 pub struct Reporter {
     pub no_color: bool,
+    pub theme: ui::theme::Theme,
 }
 
 #[allow(dead_code)]
@@ -37,26 +42,30 @@ impl Reporter {
         (total, by_category)
     }
 
-    pub fn new(no_color: bool) -> Self {
+    pub fn new(no_color: bool, theme: &ui::theme::Theme) -> Self {
         if no_color {
             colored::control::set_override(false);
         }
-        Self { no_color }
+        Self { no_color, theme: theme.clone() }
     }
 
     pub fn banner(&self) {
-        let art = r#"
-  ██████╗ ██╗████████╗██████╗ ███████╗ ██████╗ ██████╗ ███╗   ██╗
- ██╔════╝ ██║╚══██╔══╝██╔══██╗██╔════╝██╔════╝██╔═══██╗████╗  ██║
- ██║  ███╗██║   ██║   ██████╔╝█████╗  ██║     ██║   ██║██╔██╗ ██║
- ██║   ██║██║   ██║   ██╔══██╗██╔══╝  ██║     ██║   ██║██║╚██╗██║
- ╚██████╔╝██║   ██║   ██║  ██║███████╗╚██████╗╚██████╔╝██║ ╚████║
-  ╚═════╝ ╚═╝   ╚═╝   ╚═╝  ╚═╝╚══════╝ ╚═════╝ ╚═════╝ ╚═╝  ╚═══╝
-"#;
-        println!("{}", art.cyan().bold());
-        println!("{}", "  Enterprise Git Exposure Scanner".dimmed());
-        println!("{}", format!("  {}", "─".repeat(53)).dimmed());
-        println!();
+        // Use theme's banner style instead of defaulting to Full
+        let style = match self.theme.banner_style {
+            ui::theme::BannerStyle::Minimal => BannerStyle::Mini,  // Map Minimal -> Mini
+            ui::theme::BannerStyle::Standard => BannerStyle::Full, // Map Standard -> Full
+            ui::theme::BannerStyle::Full => BannerStyle::Full,
+            ui::theme::BannerStyle::None => BannerStyle::None,
+        };
+        self.banner_with_style(style);
+    }
+
+    /// Display banner with specified style
+    pub fn banner_with_style(&self, style: BannerStyle) {
+        let banner = ui::Banner::new()
+            .style(style)
+            .colored(!self.no_color);
+        banner.display_with_style(style);
     }
 
     pub fn print_detect(&self, r: &DetectResult) {
@@ -66,9 +75,9 @@ impl Reporter {
             "⚠".yellow().to_string()
         };
         let conf_str = format!("{} ({}%)", r.label, r.confidence);
-        let conf_colored = self.conf_color(&r.label, &conf_str);
+        let conf_colored = ColorScheme::confidence(&r.label, &conf_str);
 
-        let w = 58usize;
+        let w = layout::calculate_box_width(60, layout::get_terminal_width());
         println!("\n╔{}╗", "═".repeat(w));
         println!("║  {:<width$}║", "DETECTION", width = w - 2);
         println!("╚{}╝", "═".repeat(w));
@@ -89,7 +98,7 @@ impl Reporter {
 
     pub fn print_map(&self, m: &MapResult) {
         let all = m.all_sha1s();
-        let w = 58usize;
+        let w = layout::calculate_box_width(60, layout::get_terminal_width());
         println!("\n╔{}╗", "═".repeat(w));
         println!("║  {:<width$}║", "RECONNAISSANCE", width = w - 2);
         println!("╚{}╝", "═".repeat(w));
@@ -112,7 +121,7 @@ impl Reporter {
     }
 
     pub fn print_stream_start(&self, total: usize) {
-        let w = 58usize;
+        let w = layout::calculate_box_width(60, layout::get_terminal_width());
         println!("\n╔{}╗", "═".repeat(w));
         println!("║  {:<width$}║", "ANALYSIS", width = w - 2);
         println!("╚{}╝", "═".repeat(w));
@@ -120,7 +129,73 @@ impl Reporter {
                  total.to_string().cyan());
     }
 
-    pub fn progress_bar(&self, done: usize, total: usize, findings: usize) {
+    /// Create a new MultiProgress instance for multi-stage progress tracking.
+    /// Returns an indicatif MultiProgress that can manage multiple progress bars.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let multi = create_multi_stage_progress();
+    /// let pb1 = multi.add(ProgressBar::new(100));
+    /// let pb2 = multi.add(ProgressBar::new(50));
+    /// ```
+    pub fn create_multi_stage_progress() -> MultiProgress {
+        MultiProgress::new()
+    }
+
+    /// Enhanced progress bar with ETA and throughput using indicatif.
+    /// Shows spinner, elapsed time, progress bar, position/length, ETA, and items per second.
+    ///
+    /// This version creates a new ProgressBar each call and returns it for the caller
+    /// to manage. For multi-stage operations, use `create_multi_stage_progress`.
+    ///
+    /// # Parameters
+    /// - `done`: Current completed count
+    /// - `total`: Total items to process
+    /// - `findings`: Number of findings detected
+    ///
+    /// # Returns
+    /// A configured ProgressBar that the caller should increment with `.inc(1)` or `.set_position()`
+    ///
+    /// # Example
+    /// ```ignore
+    /// let pb = reporter.progress_bar(0, 1000, 0);
+    /// for i in 0..1000 {
+    ///     pb.inc(1);
+    ///     // ... work ...
+    /// }
+    /// pb.finish();
+    /// ```
+    pub fn progress_bar(&self, done: usize, total: usize, findings: usize) -> ProgressBar {
+        if total == 0 {
+            // Return a dummy/no-op bar for zero total
+            let pb = ProgressBar::hidden();
+            return pb;
+        }
+
+        let pb = ProgressBar::new(total as u64);
+        pb.set_position(done as u64);
+
+        // Template: {spinner} {elapsed} {bar} {pos}/{len} ETA: {eta} [{per_sec}]
+        let style = ProgressStyle::with_template(
+            "{spinner} {elapsed} {bar} {pos}/{len} ETA: {eta} [{per_sec}]"
+        )
+        .unwrap()
+        .progress_chars("=> ")
+        .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]);
+
+        pb.set_style(style);
+
+        // Add findings prefix if any
+        if findings > 0 {
+            pb.set_prefix(format!("FINDINGS: {}", findings.to_string().red().bold()));
+        }
+
+        pb
+    }
+
+    /// Simplified legacy progress bar (for backward compatibility).
+    /// This maintains the original inline progress display behavior.
+    pub fn progress_bar_legacy(&self, done: usize, total: usize, findings: usize) {
         if total == 0 { return; }
         let pct = done as f64 / total as f64;
         let bar = (pct * 30.0) as usize;
@@ -134,6 +209,72 @@ impl Reporter {
                bar_s, pct * 100.0, done, total, f_str);
         use std::io::Write;
         std::io::stdout().flush().ok();
+    }
+
+    /// Create a styled progress bar for multi-stage operations.
+    /// Returns a ProgressBar configured with the GitRecon style template.
+    ///
+    /// # Parameters
+    /// - `total`: Total items to process
+    /// - `prefix`: Optional prefix text (e.g., stage name)
+    ///
+    /// # Returns
+    /// A configured ProgressBar ready for use
+    pub fn create_progress_bar(&self, total: usize, prefix: Option<&str>) -> ProgressBar {
+        let pb = ProgressBar::new(total as u64);
+
+        let style = ProgressStyle::with_template(
+            "{spinner} {elapsed} {bar} {pos}/{len} ETA: {eta} [{per_sec}]"
+        )
+        .unwrap()
+        .progress_chars("=> ")
+        .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]);
+
+        pb.set_style(style);
+
+        if let Some(p) = prefix {
+            pb.set_prefix(p.to_string());
+        }
+
+        pb
+    }
+
+    /// Create a progress bar with custom styling options.
+    ///
+    /// # Parameters
+    /// - `total`: Total items to process
+    /// - `template`: Custom progress template (defaults to GitRecon style if None)
+    /// - `prefix`: Optional prefix text
+    /// - `message`: Optional static message
+    ///
+    /// # Returns
+    /// A configured ProgressBar
+    pub fn create_custom_progress_bar(
+        &self,
+        total: usize,
+        template: Option<&str>,
+        prefix: Option<&str>,
+        message: Option<&str>,
+    ) -> ProgressBar {
+        let pb = ProgressBar::new(total as u64);
+
+        let tmpl = template.unwrap_or("{spinner} {elapsed} {bar} {pos}/{len} ETA: {eta} [{per_sec}]");
+        let style = ProgressStyle::with_template(tmpl)
+            .unwrap()
+            .progress_chars("=> ")
+            .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]);
+
+        pb.set_style(style);
+
+        if let Some(p) = prefix {
+            pb.set_prefix(p.to_string());
+        }
+
+        if let Some(m) = message {
+            pb.set_message(m.to_string());
+        }
+
+        pb
     }
 
     pub fn print_stream_done(&self, r: &StreamResult) {
@@ -163,7 +304,7 @@ impl Reporter {
     /// Displays all deduplicated findings immediately after scanning, in card style.
     /// Shows a severity bar chart summary followed by individual finding cards.
     pub fn print_findings_summary(&self, findings: &[crate::streamer::Finding]) {
-        let w = 58usize;
+        let w = layout::calculate_box_width(60, layout::get_terminal_width());
         let sev_order = |s: &str| match s {
             "CRITICAL" => 0,
             "HIGH"     => 1,
@@ -213,7 +354,7 @@ impl Reporter {
         }
         if high > 0 {
             println!("│  {}  {:<8}  {:>3}  {}",
-                     "●".yellow(), "HIGH".yellow(), high, make_bar(high).yellow());
+                     "●".yellow().bold(), "HIGH".yellow().bold(), high, make_bar(high).yellow().bold());
         }
         if med > 0 {
             println!("│  {}  {:<8}  {:>3}  {}",
@@ -227,7 +368,7 @@ impl Reporter {
 
         // Individual finding cards (no cap — all findings shown)
         for (i, f) in deduped.iter().enumerate() {
-            let sev_colored = self.sev_color(&f.severity);
+            let sev_colored = ColorScheme::severity(&f.severity);
             let del_tag = if f.is_deleted { " · DELETED".dimmed().to_string() } else { String::new() };
 
             // Calculate right-side dashes: total line = 60 chars
@@ -235,7 +376,8 @@ impl Reporter {
             // prefix "┌─[" = 3, suffix "]" = 1, "┐" = 1 → fixed = 5 chars
             // header_plain used only for length, colored version in actual output
             let header_plain = format!(" #{} · {} ", i + 1, f.severity);
-            let right_dashes = 55usize.saturating_sub(header_plain.len());
+            let card_width = layout::calculate_box_width(60, layout::get_terminal_width());
+            let right_dashes = (card_width - 5).saturating_sub(header_plain.len());
             println!("\n┌─[ #{} · {} ]{}┐",
                      (i + 1).to_string().bold(),
                      sev_colored,
@@ -259,9 +401,9 @@ impl Reporter {
         let risk    = stream_r.risk_score();
         let risk_label = if risk >= 70 { "CRITICAL" } else if risk >= 40 { "HIGH" } else if risk >= 15 { "MEDIUM" } else { "CLEAR" };
         let risk_s  = format!("{}/100  {}", risk, risk_label);
-        let risk_colored = self.risk_color(risk, &risk_s);
+        let risk_colored = ColorScheme::risk(risk, &risk_s);
 
-        let w = 58usize;
+        let w = layout::calculate_box_width(60, layout::get_terminal_width());
         println!("\n╔{}╗", "═".repeat(w));
         println!("║  {:<width$}║", "INTELLIGENCE REPORT", width = w - 2);
         println!("╚{}╝", "═".repeat(w));
@@ -270,7 +412,7 @@ impl Reporter {
                  "Findings",
                  stream_r.findings.len().to_string().bold(),
                  format!("CRIT:{}", counts["CRITICAL"]).red().bold(),
-                 format!("HIGH:{}", counts["HIGH"]).yellow(),
+                 format!("HIGH:{}", counts["HIGH"]).yellow().bold(),
                  format!("MED:{}", counts["MEDIUM"]).bright_yellow());
         println!("│  {:<14}: {}", "AI Findings", ai_total.to_string().magenta());
         if !stream_r.tech_stack.is_empty() {
@@ -286,8 +428,8 @@ impl Reporter {
 
     pub fn print_summary(&self, target: &str, stream_r: &StreamResult, report_path: &str) {
         let risk_s  = format!("{}/100", stream_r.risk_score());
-        let risk_colored = self.risk_color(stream_r.risk_score(), &risk_s);
-        let w = 58usize;
+        let risk_colored = ColorScheme::risk(stream_r.risk_score(), &risk_s);
+        let w = layout::calculate_box_width(60, layout::get_terminal_width());
         println!("\n╔{}╗", "═".repeat(w));
         println!("║  {:<width$}║", "COMPLETE", width = w - 2);
         println!("╚{}╝", "═".repeat(w));
@@ -425,9 +567,9 @@ impl Reporter {
         let risk       = stream_r.risk_score();
         let risk_label = if risk >= 70 { "CRITICAL" } else if risk >= 40 { "HIGH" } else if risk >= 15 { "MEDIUM" } else { "CLEAR" };
         let risk_s     = format!("{}/100  {}", risk, risk_label);
-        let risk_colored = self.risk_color(risk, &risk_s);
+        let risk_colored = ColorScheme::risk(risk, &risk_s);
 
-        let w = 58usize;
+        let w = layout::calculate_box_width(60, layout::get_terminal_width());
         println!("\n╔{}╗", "═".repeat(w));
         println!("║  {:<width$}║", "TOKEN SCAN REPORT", width = w - 2);
         println!("╚{}╝", "═".repeat(w));
@@ -438,7 +580,7 @@ impl Reporter {
                  "Findings",
                  stream_r.findings.len().to_string().bold(),
                  format!("CRIT:{}", counts["CRITICAL"]).red().bold(),
-                 format!("HIGH:{}", counts["HIGH"]).yellow(),
+                 format!("HIGH:{}", counts["HIGH"]).yellow().bold(),
                  format!("MED:{}", counts["MEDIUM"]).bright_yellow());
         println!("│  {:<14}: {}", "AI Findings", ai_total.to_string().magenta());
         println!("│  {:<14}: {} KB", "Data Processed", stream_r.bytes_scanned / 1024);
@@ -446,35 +588,6 @@ impl Reporter {
         println!("│  {:<14}: {}  {}", "Report", report_path.green(), "✔".green().bold());
         println!("│");
         println!("└{}┘\n", "─".repeat(w));
-    }
-
-    // ── Color helpers ──────────────────────────────
-
-    fn sev_color(&self, sev: &str) -> ColoredString {
-        match sev {
-            "CRITICAL" => sev.red().bold(),
-            "HIGH"     => sev.yellow(),
-            "MEDIUM"   => sev.bright_yellow(),
-            "LOW"      => sev.cyan(),
-            _          => sev.normal(),
-        }
-    }
-
-    fn conf_color(&self, label: &str, s: &str) -> ColoredString {
-        match label {
-            "CONFIRMED" => s.red().bold(),
-            "HIGH"      => s.yellow(),
-            "MEDIUM"    => s.bright_yellow(),
-            "LOW"       => s.cyan(),
-            _           => s.dimmed(),
-        }
-    }
-
-    fn risk_color(&self, score: u32, s: &str) -> ColoredString {
-        if score >= 70      { s.red().bold() }
-        else if score >= 40 { s.yellow() }
-        else if score >= 15 { s.bright_yellow() }
-        else                { s.green() }
     }
 
     // O-2: SARIF 2.1.0 output format
@@ -671,6 +784,93 @@ impl Reporter {
         let resp = client.post(url, body, &extra_headers).await;
         resp.status >= 200 && resp.status < 300
     }
+
+    // Theme-aware helper methods
+
+    /// Get unicode symbol based on theme settings
+    pub fn unicode_symbol(&self, unicode: &str, ascii: &str) -> String {
+        if self.theme.unicode {
+            unicode.to_string()
+        } else {
+            ascii.to_string()
+        }
+    }
+
+    /// Get check mark symbol based on theme settings
+    pub fn check_mark(&self) -> String {
+        self.unicode_symbol("✔", "OK")
+    }
+
+    /// Get warning symbol based on theme settings
+    pub fn warning_symbol(&self) -> String {
+        self.unicode_symbol("⚠", "!")
+    }
+
+    /// Get cross mark symbol based on theme settings
+    pub fn cross_mark(&self) -> String {
+        self.unicode_symbol("✘", "X")
+    }
+
+    /// Get arrow symbol based on theme settings
+    pub fn arrow_symbol(&self) -> String {
+        self.unicode_symbol("▶", "->")
+    }
+
+    /// Get bullet symbol based on theme settings
+    pub fn bullet_symbol(&self) -> String {
+        self.unicode_symbol("●", "*")
+    }
+
+    /// Apply theme color scheme for severity
+    pub fn theme_severity(&self, severity: &str) -> colored::ColoredString {
+        let color = match severity {
+            "CRITICAL" => &self.theme.colors.critical,
+            "HIGH" => &self.theme.colors.high,
+            "MEDIUM" => &self.theme.colors.medium,
+            "LOW" => &self.theme.colors.low,
+            _ => &self.theme.colors.info,
+        };
+        match color.as_str() {
+            "red" => severity.red(),
+            "yellow" => severity.yellow(),
+            "green" => severity.green(),
+            "blue" => severity.blue(),
+            "cyan" => severity.cyan(),
+            "white" => severity.white(),
+            _ => severity.normal(),
+        }
+    }
+
+    /// Apply theme color scheme for success messages
+    pub fn theme_success(&self, text: &str) -> colored::ColoredString {
+        match self.theme.colors.success.as_str() {
+            "red" => text.red(),
+            "yellow" => text.yellow(),
+            "green" => text.green(),
+            "blue" => text.blue(),
+            "cyan" => text.cyan(),
+            "white" => text.white(),
+            _ => text.normal(),
+        }
+    }
+
+    /// Apply theme color scheme for info messages
+    pub fn theme_info(&self, text: &str) -> colored::ColoredString {
+        match self.theme.colors.info.as_str() {
+            "red" => text.red(),
+            "yellow" => text.yellow(),
+            "green" => text.green(),
+            "blue" => text.blue(),
+            "cyan" => text.cyan(),
+            "white" => text.white(),
+            _ => text.normal(),
+        }
+    }
+
+    /// Check if compact mode is enabled in theme
+    pub fn is_compact(&self) -> bool {
+        self.theme.compact
+    }
 }
 
 #[cfg(test)]
@@ -734,14 +934,14 @@ mod tests {
 
     #[test]
     fn print_findings_summary_handles_unicode_without_panic() {
-        let rep = Reporter::new(true);
+        let rep = Reporter::new(true, &ui::theme::Theme::default());
         let findings = vec![unicode_finding()];
         rep.print_findings_summary(&findings);
     }
 
     #[test]
     fn save_markdown_and_html_handle_unicode_without_panic() {
-        let rep = Reporter::new(true);
+        let rep = Reporter::new(true, &ui::theme::Theme::default());
         let stream = unicode_stream_result();
         let tmp = std::env::temp_dir().join(format!("gitrecon_reporter_test_{}", std::process::id()));
         let _guard = TempDirGuard::new(tmp.clone());

@@ -18,6 +18,7 @@
 //!   gitrecon --dir ./project
 
 mod http_client;
+mod layout;
 mod git_parser;
 mod detect;
 mod mapper;
@@ -39,6 +40,7 @@ mod cache; // PERF-005: SQLite cache layer
 #[allow(dead_code)]
 mod reconstructor;
 mod config;
+mod ui;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -54,6 +56,7 @@ use futures::StreamExt;
 use temp_cleanup::TempDirGuard; // SEC-004
 
 use colored::Colorize;
+use ui::theme::{Theme, BannerStyle as ThemeBannerStyle};
 use http_client::{HttpClient, HttpConfig};
 use reporter::Reporter;
 use streamer::StreamResult;
@@ -220,6 +223,10 @@ struct Cli {
     #[arg(short = 'q', long = "quiet")]
     quiet: bool,
 
+    /// Reduce output verbosity to minimal format (compact findings display)
+    #[arg(short = 'C', long = "compact")]
+    compact: bool,
+
     // DX-1: --patterns-help
     #[arg(long = "patterns-help")]
     patterns_help: bool,
@@ -331,6 +338,20 @@ struct Cli {
     /// Default: disabled for compatibility and to avoid false negatives
     #[arg(long = "verify-objects")]
     verify_objects: bool,
+
+    // Theme system
+    /// Theme configuration file path (default: ~/.config/gitrecon/theme.toml)
+    #[arg(long = "theme", value_name = "PATH")]
+    theme_file: Option<String>,
+
+    /// Banner display style (minimal, standard, full, none)
+    #[arg(long = "banner-style", value_name = "STYLE",
+          value_parser = ["minimal", "standard", "full", "none"])]
+    banner_style: Option<String>,
+
+    /// Disable unicode characters in output (use ASCII symbols)
+    #[arg(long = "no-unicode")]
+    no_unicode: bool,
 }
 
 // ════════════════════════════════════════════════
@@ -3273,10 +3294,47 @@ async fn main() {
         colored::control::set_override(false);
     }
 
+    // Theme system: Load theme at startup
+    let theme = if let Some(ref theme_path) = args.theme_file {
+        // Load from custom theme file
+        if let Ok(content) = std::fs::read_to_string(theme_path) {
+            if let Ok(custom_theme) = toml::from_str::<Theme>(&content) {
+                custom_theme
+            } else {
+                eprintln!("  ⚠   Failed to parse theme file, using defaults");
+                Theme::load()
+            }
+        } else {
+            eprintln!("  ⚠   Could not read theme file, using defaults");
+            Theme::load()
+        }
+    } else {
+        // Load from default config path or use defaults
+        Theme::load()
+    };
+
+    // Apply CLI overrides to theme
+    let mut theme = theme;
+    if args.no_unicode {
+        theme.unicode = false;
+    }
+    if args.compact {
+        theme.compact = true;
+    }
+    if let Some(ref banner_style) = args.banner_style {
+        theme.banner_style = match banner_style.to_lowercase().as_str() {
+            "minimal" => ThemeBannerStyle::Minimal,
+            "standard" => ThemeBannerStyle::Standard,
+            "full" => ThemeBannerStyle::Full,
+            "none" => ThemeBannerStyle::None,
+            _ => ThemeBannerStyle::Standard,
+        };
+    }
+
     // Setup reporter and flags — done early so token mode can use them
     let quiet   = args.quiet || args.pipe;
     let verbose = !quiet;
-    let rep     = Reporter::new(args.no_color);
+    let rep     = Reporter::new(args.no_color, &theme);
 
     // SEC-001: Validate output path
     let _validated_output = match validation::validate_output_path(&args.output) {
