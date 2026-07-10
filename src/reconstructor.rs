@@ -29,7 +29,10 @@ impl Reconstructor {
         progress_cb: Option<Arc<dyn Fn(usize, usize) + Send + Sync>>,
     ) -> std::collections::HashMap<&'static str, usize> {
         let git_url = git_url.trim_end_matches('/').to_string();
-        std::fs::create_dir_all(output_dir).ok();
+        if let Err(e) = std::fs::create_dir_all(output_dir) {
+            log::error!("Failed to create output directory {:?}: {}", output_dir, e);
+            return std::collections::HashMap::new();
+        }
 
         let total = sha1_to_file.len();
         let semaphore = Arc::new(Semaphore::new(self.workers));
@@ -40,7 +43,14 @@ impl Reconstructor {
         let mut handles = Vec::new();
 
         for (sha1, filename) in sha1_to_file {
-            let permit = semaphore.clone().acquire_owned().await.unwrap();
+            // BUG-ERR-014: Handle semaphore closure gracefully
+            let permit = match semaphore.clone().acquire_owned().await {
+                Ok(p) => p,
+                Err(_) => {
+                    log::debug!("Semaphore closed, skipping blob {}", sha1);
+                    continue;
+                }
+            };
             let client = self.client.clone();
             let git_url = git_url.clone();
             let sha1 = sha1.clone();
@@ -116,7 +126,10 @@ async fn save_blob(
     }
 
     if let Some(parent) = local_path.parent() {
-        std::fs::create_dir_all(parent).ok();
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            log::error!("Failed to create parent directory {:?} for {}: {}", parent, sha1, e);
+            return false;
+        }
     }
 
     std::fs::write(&local_path, &obj.data).is_ok()

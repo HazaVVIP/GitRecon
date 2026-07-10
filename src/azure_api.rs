@@ -52,7 +52,9 @@ impl AzureForgeClient {
                     })
                     .unwrap_or(Duration::from_secs(60));
 
-                *self.rate_limit_remaining.lock().unwrap() = Some((r, Instant::now() + reset_time));
+                if let Ok(mut guard) = self.rate_limit_remaining.lock() {
+                    *guard = Some((r, Instant::now() + reset_time));
+                }
             }
         }
     }
@@ -167,7 +169,9 @@ impl Forge for AzureForgeClient {
                     };
 
                     // Store the org URL for future calls
-                    *self.org_url.lock().unwrap() = Some(org_api_base.clone());
+                    if let Ok(mut guard) = self.org_url.lock() {
+                        *guard = Some(org_api_base.clone());
+                    }
 
                     // List projects in the organization
                     let projects_url = format!("{}/_apis/projects?api-version=7.0", org_api_base);
@@ -203,7 +207,9 @@ impl Forge for AzureForgeClient {
                     // For cloud, try to enumerate from the user's profile
                     // Store current API base
                     let current_api = self.api_base.clone();
-                    *self.org_url.lock().unwrap() = Some(current_api);
+                    if let Ok(mut guard) = self.org_url.lock() {
+                        *guard = Some(current_api);
+                    }
 
                     // We can't easily enumerate all orgs without additional API calls
                     // So we'll return repos from projects accessible via the base URL
@@ -286,9 +292,10 @@ impl Forge for AzureForgeClient {
     fn rate_limit_remaining(&self) -> Option<(u32, Duration)> {
         self.rate_limit_remaining
             .lock()
-            .unwrap()
-            .as_ref()
-            .map(|(remaining, reset)| (*remaining, reset.saturating_duration_since(Instant::now())))
+            .ok()
+            .and_then(|guard| guard.as_ref().map(|(remaining, reset)| {
+                (*remaining, reset.saturating_duration_since(Instant::now()))
+            }))
     }
 
     fn rate_limit_info(&self) -> Option<RateLimitInfo> {

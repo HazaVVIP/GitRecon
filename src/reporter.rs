@@ -646,11 +646,12 @@ impl Reporter {
     }
 
     // O-4: Webhook integration
-    fn compute_hmac_sha256(key: &str, data: &str) -> String {
+    fn compute_hmac_sha256(key: &str, data: &str) -> Result<String, anyhow::Error> {
         type HmacSha256 = Hmac<Sha256>;
-        let mut mac = HmacSha256::new_from_slice(key.as_bytes()).expect("HMAC init");
+        let mut mac = HmacSha256::new_from_slice(key.as_bytes())
+            .map_err(|_| anyhow::anyhow!("HMAC key must be at least 1 byte"))?;
         mac.update(data.as_bytes());
-        hex::encode(mac.finalize().into_bytes())
+        Ok(hex::encode(mac.finalize().into_bytes()))
     }
 
     pub async fn send_webhook(
@@ -662,8 +663,10 @@ impl Reporter {
     ) -> bool {
         let mut extra_headers = Vec::new();
         if let Some(key) = secret {
-            let sig = Self::compute_hmac_sha256(key, body);
-            extra_headers.push(("X-GitRecon-Signature".to_string(), sig));
+            if let Ok(sig) = Self::compute_hmac_sha256(key, body) {
+                extra_headers.push(("X-GitRecon-Signature".to_string(), sig));
+            }
+            // If HMAC fails, we proceed without signature
         }
         let resp = client.post(url, body, &extra_headers).await;
         resp.status >= 200 && resp.status < 300

@@ -9,6 +9,7 @@
 
 use std::collections::HashSet;
 use std::io::{Cursor, Read};
+use once_cell::sync::Lazy;
 
 /// Magic byte signatures for common binary formats
 pub mod magic {
@@ -388,9 +389,15 @@ fn extract_printable_strings(data: &[u8], min_length: usize) -> Vec<String> {
                 let region_end = i;
                 if region_end > region_start && region_end - region_start >= 16 {
                     let region = &data[region_start..region_end];
-                    if !is_high_entropy_region(region) {
-                        strings.push(current_string.clone());
+                    // BUG-LOGIC-002 FIX: Only add string if region is NOT high entropy
+                    // (high entropy = compressed/encrypted, should skip)
+                    if is_high_entropy_region(region) {
+                        // Skip this string - it's from a compressed/encrypted region
+                        current_string.clear();
+                        last_non_printable = i + 1;
+                        continue;
                     }
+                    strings.push(current_string.clone());
                 } else {
                     strings.push(current_string.clone());
                 }
@@ -423,19 +430,19 @@ fn extract_elf_strings(data: &[u8]) -> Vec<String> {
     extract_printable_strings(data, 4)
 }
 
+/// Static lazy regex patterns for secret detection
+static SECRET_PATTERNS: Lazy<[(regex::Regex, &str); 4]> = Lazy::new(|| {
+    [
+        (regex::Regex::new(r"\b(AKIA|ABIA|ACCA|ASIA)[A-Z0-9]{16}\b").unwrap(), "aws_key_id"),
+        (regex::Regex::new(r"\bAIza[0-9A-Za-z\-_]{35}\b").unwrap(), "gcp_api_key"),
+        (regex::Regex::new(r"ghp_[A-Za-z0-9]{36}").unwrap(), "github_pat"),
+        (regex::Regex::new(r"sk_(live|test)_[A-Za-z0-9]{24,}").unwrap(), "stripe_sk"),
+    ]
+});
+
 /// Check a string for common secret patterns (simplified)
 fn check_string_for_secrets(s: &str) -> Option<(String, String)> {
-    use regex::Regex;
-
-    // Simplified patterns for binary scanning
-    let patterns = [
-        ("aws_key_id", Regex::new(r"\b(AKIA|ABIA|ACCA|ASIA)[A-Z0-9]{16}\b").unwrap()),
-        ("gcp_api_key", Regex::new(r"\bAIza[0-9A-Za-z\-_]{35}\b").unwrap()),
-        ("github_pat", Regex::new(r"ghp_[A-Za-z0-9]{36}").unwrap()),
-        ("stripe_sk", Regex::new(r"sk_(live|test)_[A-Za-z0-9]{24,}").unwrap()),
-    ];
-
-    for (id, regex) in &patterns {
+    for (regex, id) in SECRET_PATTERNS.iter() {
         if let Some(mat) = regex.find(s) {
             return Some((id.to_string(), mat.as_str().to_string()));
         }

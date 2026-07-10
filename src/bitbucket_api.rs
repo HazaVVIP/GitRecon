@@ -10,6 +10,7 @@ use crate::forge::{EnumScope, Forge, Platform, RateLimitInfo, Repository, TreeEn
 use crate::http_client::{HttpClient, HttpConfig};
 use async_trait::async_trait;
 use std::time::{Duration, Instant};
+use anyhow::Context;
 
 const DEFAULT_BB_API: &str = "https://api.bitbucket.org/2.0";
 
@@ -54,7 +55,9 @@ impl BitbucketForgeClient {
                     })
                     .unwrap_or(Duration::from_secs(3600));
 
-                *self.rate_limit_remaining.lock().unwrap() = Some((r, Instant::now() + reset_time));
+                if let Ok(mut guard) = self.rate_limit_remaining.lock() {
+                    *guard = Some((r, Instant::now() + reset_time));
+                }
             }
         }
     }
@@ -77,8 +80,10 @@ impl BitbucketForgeClient {
 
     /// Get the authenticated user's username.
     async fn get_username(&self) -> anyhow::Result<String> {
-        if let Some(ref user) = *self.username.lock().unwrap() {
-            return Ok(user.clone());
+        if let Ok(guard) = self.username.lock() {
+            if let Some(ref user) = *guard {
+                return Ok(user.clone());
+            }
         }
 
         let url = format!("{}/user", self.api_base);
@@ -94,7 +99,9 @@ impl BitbucketForgeClient {
             .ok_or_else(|| anyhow::anyhow!("Missing username in response"))?
             .to_string();
 
-        *self.username.lock().unwrap() = Some(login.clone());
+        if let Ok(mut guard) = self.username.lock() {
+            *guard = Some(login.clone());
+        }
         Ok(login)
     }
 
@@ -124,16 +131,22 @@ impl BitbucketForgeClient {
         // Server: self-hosted, different response structure
         if let Some(content_type) = resp.headers.get("content-type") {
             if content_type.contains("application/vnd.atlassian.bitbucket+json") {
-                *self.is_cloud.lock().unwrap() = Some(true);
+                if let Ok(mut guard) = self.is_cloud.lock() {
+                    *guard = Some(true);
+                }
             }
         }
 
         // Also check the API base URL
         let base = self.api_base.to_lowercase();
         if base.contains("bitbucket.org") {
-            *self.is_cloud.lock().unwrap() = Some(true);
+            if let Ok(mut guard) = self.is_cloud.lock() {
+                *guard = Some(true);
+            }
         } else if base.contains("stash") || base.contains("bitbucket-server") {
-            *self.is_cloud.lock().unwrap() = Some(false);
+            if let Ok(mut guard) = self.is_cloud.lock() {
+                *guard = Some(false);
+            }
         }
     }
 }
@@ -162,7 +175,9 @@ impl Forge for BitbucketForgeClient {
         // Cache username for subsequent calls
         let json: serde_json::Value = serde_json::from_slice(&resp.body)?;
         if let Some(login) = json["username"].as_str() {
-            *self.username.lock().unwrap() = Some(login.to_string());
+            if let Ok(mut guard) = self.username.lock() {
+                *guard = Some(login.to_string());
+            }
         }
 
         Ok(())
@@ -285,9 +300,10 @@ impl Forge for BitbucketForgeClient {
     fn rate_limit_remaining(&self) -> Option<(u32, Duration)> {
         self.rate_limit_remaining
             .lock()
-            .unwrap()
-            .as_ref()
-            .map(|(remaining, reset)| (*remaining, reset.saturating_duration_since(Instant::now())))
+            .ok()
+            .and_then(|guard| guard.as_ref().map(|(remaining, reset)| {
+                (*remaining, reset.saturating_duration_since(Instant::now()))
+            }))
     }
 
     fn rate_limit_info(&self) -> Option<RateLimitInfo> {
@@ -529,11 +545,16 @@ pub async fn whoami(client: &HttpClient, api_base: &str) -> anyhow::Result<(Stri
     }
 
     let json: serde_json::Value = serde_json::from_slice(&resp.body)?;
+    // BUG-LOGIC-003 FIX: Validate response structure before accessing fields
     let login = json["username"].as_str()
         .or_else(|| json["display_name"].as_str())
-        .unwrap_or("")
+        .ok_or_else(|| anyhow::anyhow!("Missing username in /user response"))?
         .to_string();
-    let name = json["display_name"].as_str().unwrap_or("").to_string();
+
+    let name = json["display_name"].as_str()
+        .ok_or_else(|| anyhow::anyhow!("Missing display_name in /user response"))?
+        .to_string();
+
     Ok((login, name))
 }
 
@@ -550,7 +571,8 @@ pub async fn list_user_workspaces(client: &HttpClient, api_base: &str) -> anyhow
             break;
         }
 
-        let json: serde_json::Value = serde_json::from_slice(&resp.body).unwrap_or_default();
+        let json: serde_json::Value = serde_json::from_slice(&resp.body)
+            .with_context(|| format!("Failed to parse JSON response from {}", url))?;
 
         if let Some(values) = json["values"].as_array() {
             for ws in values {

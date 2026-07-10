@@ -51,7 +51,9 @@ impl GiteaForgeClient {
                     })
                     .unwrap_or(Duration::from_secs(3600));
 
-                *self.rate_limit_remaining.lock().unwrap() = Some((r, Instant::now() + reset_time));
+                if let Ok(mut guard) = self.rate_limit_remaining.lock() {
+                    *guard = Some((r, Instant::now() + reset_time));
+                }
             }
         }
     }
@@ -161,9 +163,10 @@ impl Forge for GiteaForgeClient {
     fn rate_limit_remaining(&self) -> Option<(u32, Duration)> {
         self.rate_limit_remaining
             .lock()
-            .unwrap()
-            .as_ref()
-            .map(|(remaining, reset)| (*remaining, reset.saturating_duration_since(Instant::now())))
+            .ok()
+            .and_then(|guard| guard.as_ref().map(|(remaining, reset)| {
+                (*remaining, reset.saturating_duration_since(Instant::now()))
+            }))
     }
 
     fn rate_limit_info(&self) -> Option<RateLimitInfo> {

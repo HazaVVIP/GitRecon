@@ -9,6 +9,7 @@ use crate::forge::{EnumScope, Forge, Platform, RateLimitInfo, Repository, TreeEn
 use crate::http_client::{HttpClient, HttpConfig};
 use async_trait::async_trait;
 use std::time::{Duration, Instant};
+use anyhow::Context;
 
 const GH_API: &str = "https://api.github.com";
 
@@ -45,7 +46,9 @@ impl GitHubForgeClient {
                     })
                     .unwrap_or(Duration::from_secs(3600));
 
-                *self.rate_limit_remaining.lock().unwrap() = Some((r, Instant::now() + reset_time));
+                if let Ok(mut guard) = self.rate_limit_remaining.lock() {
+                    *guard = Some((r, Instant::now() + reset_time));
+                }
             }
         }
     }
@@ -184,9 +187,10 @@ impl Forge for GitHubForgeClient {
     fn rate_limit_remaining(&self) -> Option<(u32, Duration)> {
         self.rate_limit_remaining
             .lock()
-            .unwrap()
-            .as_ref()
-            .map(|(remaining, reset)| (*remaining, reset.saturating_duration_since(Instant::now())))
+            .ok()
+            .and_then(|guard| guard.as_ref().map(|(remaining, reset)| {
+                (*remaining, reset.saturating_duration_since(Instant::now()))
+            }))
     }
 
     fn rate_limit_info(&self) -> Option<RateLimitInfo> {
@@ -362,7 +366,8 @@ pub async fn list_user_orgs(client: &HttpClient) -> anyhow::Result<Vec<String>> 
     loop {
         let resp = client.get(&url).await;
         if !resp.ok() { break; }
-        let json: serde_json::Value = serde_json::from_slice(&resp.body).unwrap_or_default();
+        let json: serde_json::Value = serde_json::from_slice(&resp.body)
+            .with_context(|| format!("Failed to parse JSON response from {}", url))?;
         let arr  = match json.as_array() {
             Some(a) => a,
             None    => break,
@@ -387,7 +392,8 @@ pub async fn list_org_repos(client: &HttpClient, org: &str) -> anyhow::Result<Ve
     loop {
         let resp = client.get(&url).await;
         if !resp.ok() { break; }
-        let json: serde_json::Value = serde_json::from_slice(&resp.body).unwrap_or_default();
+        let json: serde_json::Value = serde_json::from_slice(&resp.body)
+            .with_context(|| format!("Failed to parse JSON response from {}", url))?;
         let arr  = match json.as_array() {
             Some(a) => a,
             None    => break,

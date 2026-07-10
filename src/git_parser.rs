@@ -10,6 +10,20 @@ use lazy_static::lazy_static;
 use sha1::{Sha1, Digest};
 
 // ════════════════════════════════════════════════
+// HELPER FUNCTIONS
+// ════════════════════════════════════════════════
+
+/// Safely read a big-endian u32 from a slice at a given offset.
+/// Returns None if the slice is too short.
+fn read_u32_be(data: &[u8], offset: usize) -> Option<u32> {
+    if data.len() < offset + 4 {
+        return None;
+    }
+    let arr: [u8; 4] = data[offset..offset + 4].try_into().ok()?;
+    Some(u32::from_be_bytes(arr))
+}
+
+// ════════════════════════════════════════════════
 // DATA TYPES
 // ════════════════════════════════════════════════
 
@@ -87,8 +101,14 @@ impl IndexParser {
             return Err("Not a valid git index file".into());
         }
 
-        let version = u32::from_be_bytes(data[4..8].try_into().unwrap());
-        let n = u32::from_be_bytes(data[8..12].try_into().unwrap()) as usize;
+        let version = match read_u32_be(data, 4) {
+            Some(v) => v,
+            None => return Err("Invalid index file: truncated version field".into()),
+        };
+        let n = match read_u32_be(data, 8) {
+            Some(count) => count as usize,
+            None => return Err("Invalid index file: truncated entry count".into()),
+        };
 
         if !matches!(version, 2..=4) {
             return Err(format!("Unsupported index version: {version}"));
@@ -115,30 +135,54 @@ impl IndexParser {
 
     fn parse_entry(data: &[u8], offset: usize, version: u32) -> Option<(IndexEntry, usize)> {
         let base = offset;
+        // Bounds check: minimum entry size is 62 bytes
         if offset + 62 > data.len() {
             return None;
         }
 
-        let mode = u32::from_be_bytes(data[offset + 24..offset + 28].try_into().ok()?);
-        let size = u32::from_be_bytes(data[offset + 36..offset + 40].try_into().ok()?);
-        let sha1 = hex::encode(&data[offset + 40..offset + 60]);
-        let flags = u16::from_be_bytes(data[offset + 60..offset + 62].try_into().ok()?);
+        // Safe slice access with get()
+        let mode_bytes = data.get(offset + 24..offset + 28)?;
+        let mode = u32::from_be_bytes(mode_bytes.try_into().ok()?);
+
+        let size_bytes = data.get(offset + 36..offset + 40)?;
+        let size = u32::from_be_bytes(size_bytes.try_into().ok()?);
+
+        let sha1_bytes = data.get(offset + 40..offset + 60)?;
+        let sha1 = hex::encode(sha1_bytes);
+
+        let flags_bytes = data.get(offset + 60..offset + 62)?;
+        let flags = u16::from_be_bytes(flags_bytes.try_into().ok()?);
+
         let extended = (flags >> 14) & 1 == 1;
         let name_len = (flags & 0x0FFF) as usize;
         let extra = if version >= 3 && extended { 2 } else { 0 };
-        let name_start = offset + 62 + extra;
+
+        // Safe addition with overflow check
+        let name_start = offset.checked_add(62).and_then(|v| v.checked_add(extra))?;
 
         let (raw_name, end) = if name_len < 0xFFF {
-            if name_start + name_len > data.len() {
+            if name_start.checked_add(name_len).is_none_or(|v| v > data.len()) {
                 return None;
             }
-            (&data[name_start..name_start + name_len], name_start + name_len + 1)
+            let name_end = name_start.checked_add(name_len).and_then(|v| v.checked_add(1))?;
+            (data.get(name_start..name_start + name_len)?, name_end)
         } else {
-            let nul = data[name_start..].iter().position(|&b| b == 0)?;
-            (&data[name_start..name_start + nul], name_start + nul + 1)
+            // Safe nul search with get()
+            let nul_offset = data.get(name_start..)?.iter().position(|&b| b == 0)?;
+            let nul_absolute = name_start.checked_add(nul_offset).and_then(|v| v.checked_add(1))?;
+            let raw_name = data.get(name_start..name_start + nul_offset)?;
+            (raw_name, nul_absolute)
         };
 
-        let padded = base + (((end - base) + 7) & !7);
+        // BUG-LOGIC-007 FIX: Off-by-one in index padding calculation
+        // Padding should align to 8-byte boundary: (diff + 7) & !7 rounds up to next multiple of 8
+        // But we need to ensure minimum padding of 1 byte if not already aligned
+        let diff = end.checked_sub(base)?;
+        let padded = if diff % 8 == 0 {
+            end // Already aligned, no padding needed
+        } else {
+            base.checked_add((diff + 7) & !7)?
+        };
 
         let filename = String::from_utf8_lossy(raw_name).into_owned();
 
@@ -159,8 +203,8 @@ impl IndexParser {
 // ════════════════════════════════════════════════
 
 lazy_static! {
-    static ref ID_RE: Regex = Regex::new(r"<([^>]+)>").unwrap();
-    static ref TS_RE: Regex = Regex::new(r">\s+(\d+)").unwrap();
+    static ref ID_RE: Regex = Regex::new(r"<([^>]+)>").expect("ID_RE regex pattern is valid");
+    static ref TS_RE: Regex = Regex::new(r">\s+(\d+)").expect("TS_RE regex pattern is valid");
 }
 
 pub struct ObjectParser;
@@ -250,22 +294,66 @@ impl ObjectParser {
         let mut pos = 0;
 
         while pos < data.len() {
-            let sp = match data[pos..].iter().position(|&b| b == b' ') {
-                Some(i) => pos + i,
+            // Safe space search with get()
+            let sp_offset = match data.get(pos..) {
+                Some(slice) => slice.iter().position(|&b| b == b' '),
                 None => break,
             };
-            let nul = match data[sp + 1..].iter().position(|&b| b == 0) {
-                Some(i) => sp + 1 + i,
+            let sp = match sp_offset {
+                Some(i) => match pos.checked_add(i) {
+                    Some(v) => v,
+                    None => break,
+                },
                 None => break,
             };
-            if nul + 21 > data.len() {
+
+            // Safe nul search with bounds check
+            let sp_plus_one = match sp.checked_add(1) {
+                Some(v) => v,
+                None => break,
+            };
+            let nul_offset = match data.get(sp_plus_one..) {
+                Some(slice) => slice.iter().position(|&b| b == 0),
+                None => break,
+            };
+            let nul = match nul_offset {
+                Some(i) => match sp_plus_one.checked_add(i) {
+                    Some(v) => v,
+                    None => break,
+                },
+                None => break,
+            };
+
+            // Check if we have enough bytes for SHA1 (20 bytes after nul)
+            let nul_plus_21 = match nul.checked_add(21) {
+                Some(v) => v,
+                None => break,
+            };
+            if nul_plus_21 > data.len() {
                 break;
             }
-            let mode = String::from_utf8_lossy(&data[pos..sp]).trim().to_string();
-            let name = String::from_utf8_lossy(&data[sp + 1..nul]).into_owned();
-            let sha1 = hex::encode(&data[nul + 1..nul + 21]);
+
+            // Safe slice access with get() - use if let since return type is Vec
+            let mode_bytes = match data.get(pos..sp) {
+                Some(bytes) => bytes,
+                None => break,
+            };
+            let name_bytes = match data.get(sp_plus_one..nul) {
+                Some(bytes) => bytes,
+                None => break,
+            };
+            let sha1_bytes = match data.get(nul + 1..nul_plus_21) {
+                Some(bytes) => bytes,
+                None => break,
+            };
+
+            let mode = String::from_utf8_lossy(mode_bytes).trim().to_string();
+            let name = String::from_utf8_lossy(name_bytes).into_owned();
+            let sha1 = hex::encode(sha1_bytes);
             entries.push(TreeEntry { mode, name, sha1 });
-            pos = nul + 21;
+
+            // Safe position update with saturating add
+            pos = nul.saturating_add(21);
         }
 
         entries
@@ -306,7 +394,10 @@ impl PackIndexParser {
             return vec![];
         }
         let offset = 8 + 255 * 4;
-        let n = u32::from_be_bytes(data[offset..offset + 4].try_into().unwrap_or([0; 4])) as usize;
+        let n = match read_u32_be(data, offset) {
+            Some(count) => count as usize,
+            None => return vec![],
+        };
         if n == 0 || n > 5_000_000 {
             return vec![];
         }
@@ -321,7 +412,10 @@ impl PackIndexParser {
         if data.len() < 1024 {
             return vec![];
         }
-        let n = u32::from_be_bytes(data[255 * 4..256 * 4].try_into().unwrap_or([0; 4])) as usize;
+        let n = match read_u32_be(data, 255 * 4) {
+            Some(count) => count as usize,
+            None => return vec![],
+        };
         if n == 0 || n > 5_000_000 {
             return vec![];
         }

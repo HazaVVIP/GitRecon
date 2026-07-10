@@ -6,10 +6,11 @@
 //! - Per-target rate limiting for multi-target scans
 //! - Metrics tracking: allowed/dropped/waited requests
 //! - Support for unlimited mode (--rate 0)
+//! - BUG-CONC-005: Uses mutex to ensure atomic refill operations
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, SystemTime};
 use tokio::time::sleep;
 
@@ -60,6 +61,8 @@ pub struct TokenBucket {
     metrics: Arc<RateLimitMetrics>,
     /// Whether to allow unlimited requests (--rate 0)
     unlimited: bool,
+    /// BUG-CONC-005: Mutex to ensure atomic refill operation (prevents check-then-act race)
+    refill_mutex: Arc<StdMutex<()>>,
 }
 
 impl TokenBucket {
@@ -100,6 +103,8 @@ impl TokenBucket {
             ),
             metrics: RateLimitMetrics::new(),
             unlimited,
+            // BUG-CONC-005: Initialize mutex for atomic refill operations
+            refill_mutex: Arc::new(StdMutex::new(())),
         }
     }
 
@@ -113,6 +118,7 @@ impl TokenBucket {
     ///
     /// This method does NOT wait - it immediately returns whether the request
     /// is allowed. For waiting behavior, use acquire() instead.
+    /// BUG-CONC-007 FIX: Bounded loop instead of unbounded recursion to prevent stack overflow
     pub fn try_acquire(&self) -> bool {
         if self.unlimited {
             self.metrics.allowed.fetch_add(1, Ordering::Relaxed);
@@ -121,59 +127,71 @@ impl TokenBucket {
 
         self.refill();
 
-        let current = self.tokens.load(Ordering::Acquire);
-        if current >= 1000 {
-            // Need at least 1 token (1000 thousandths)
-            if self
-                .tokens
-                .compare_exchange(current, current - 1000, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
-                self.metrics.allowed.fetch_add(1, Ordering::Relaxed);
-                true
+        // BUG-CONC-007 FIX: Maximum retries for CAS to prevent unbounded recursion
+        const MAX_CAS_RETRIES: u32 = 3;
+
+        for _ in 0..MAX_CAS_RETRIES {
+            let current = self.tokens.load(Ordering::Acquire);
+            if current >= 1000 {
+                // Need at least 1 token (1000 thousandths)
+                if self
+                    .tokens
+                    .compare_exchange(current, current - 1000, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+                {
+                    self.metrics.allowed.fetch_add(1, Ordering::Relaxed);
+                    return true;
+                }
+                // CAS failed, loop will retry
             } else {
-                // CAS failed, retry once
-                self.try_acquire()
+                self.metrics.dropped.fetch_add(1, Ordering::Relaxed);
+                return false;
             }
-        } else {
-            self.metrics.dropped.fetch_add(1, Ordering::Relaxed);
-            false
         }
+
+        // Exhausted retries
+        self.metrics.dropped.fetch_add(1, Ordering::Relaxed);
+        false
     }
 
     /// Acquire a token, waiting if necessary. Always returns true (will eventually succeed).
     /// Thread-safe and async.
+    /// BUG-LOGIC-010 FIX: Bounded loop with max retries to prevent infinite loop
     pub async fn acquire(&self) {
         if self.unlimited {
             self.metrics.allowed.fetch_add(1, Ordering::Relaxed);
             return;
         }
 
+        // BUG-LOGIC-010 FIX: Maximum retries to prevent infinite loop
+        const MAX_ACQUIRE_RETRIES: u32 = 100;
+
         // First try without waiting
         if self.try_acquire() {
             return;
         }
 
-        // Calculate wait time needed
-        let wait_ms = self.calculate_wait_ms();
+        // BUG-LOGIC-010 FIX: Bounded retry loop with max retries
+        for _retry_count in 0..MAX_ACQUIRE_RETRIES {
+            // Calculate wait time needed
+            let wait_ms = self.calculate_wait_ms();
 
-        // Wait and then retry
-        if wait_ms > 0 {
-            sleep(Duration::from_millis(wait_ms)).await;
-            self.metrics
-                .total_wait_ms
-                .fetch_add(wait_ms, Ordering::Relaxed);
-        }
+            // Wait and then retry
+            if wait_ms > 0 {
+                sleep(Duration::from_millis(wait_ms)).await;
+                self.metrics
+                    .total_wait_ms
+                    .fetch_add(wait_ms, Ordering::Relaxed);
+            }
 
-        // After waiting, we should be able to acquire
-        // Force a refill first
-        self.refill();
+            // After waiting, we should be able to acquire
+            // Force a refill first
+            self.refill();
 
-        // Try again (should succeed now)
-        loop {
+            // Try again (should succeed now)
             let current = self.tokens.load(Ordering::Acquire);
-            if current >= 1000 {
-                if self
+            if current >= 1000
+                && self
                     .tokens
                     .compare_exchange(current, current - 1000, Ordering::AcqRel, Ordering::Acquire)
                     .is_ok()
@@ -181,16 +199,25 @@ impl TokenBucket {
                     self.metrics.allowed.fetch_add(1, Ordering::Relaxed);
                     return;
                 }
-            } else {
-                // Still no tokens, wait a bit more
-                sleep(Duration::from_millis(10)).await;
-                self.refill();
-            }
         }
+
+        // BUG-LOGIC-010 FIX: If we exhaust retries, mark as dropped and return
+        // This prevents infinite loop while still allowing the operation to complete
+        self.metrics.dropped.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Refill tokens based on elapsed time. Thread-safe.
+    /// BUG-CONC-005: Fixed - Uses mutex to ensure atomic operation and prevent check-then-act race.
     fn refill(&self) {
+        // BUG-CONC-005: Lock mutex to ensure atomic refill operation
+        let _guard = match self.refill_mutex.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                eprintln!("WARNING: Rate limiter mutex poisoned, recovering...");
+                poisoned.into_inner()
+            }
+        };
+
         let now = SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -203,15 +230,9 @@ impl TokenBucket {
             return;
         }
 
-        // Update last_refill if we're the first to see this elapsed time
-        if self
-            .last_refill
-            .compare_exchange(last, now, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            // Another thread already updated, just return
-            return;
-        }
+        // BUG-CONC-005: Since we hold the mutex, we can safely update last_refill
+        // without worrying about race conditions
+        self.last_refill.store(now, Ordering::Release);
 
         // Calculate new tokens to add
         // refill_rate is per second in thousandths
@@ -222,7 +243,8 @@ impl TokenBucket {
             return;
         }
 
-        // Add new tokens up to capacity
+        // BUG-CONC-005: Under mutex protection, token addition is guaranteed to complete
+        // before any other thread can call refill() again
         let mut current = self.tokens.load(Ordering::Acquire);
         loop {
             let updated = current.saturating_add(new_tokens).min(self.capacity);

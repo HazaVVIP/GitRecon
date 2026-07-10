@@ -1,7 +1,7 @@
 //! validation.rs
 //! Input validation and sanitization for all user-supplied data.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use anyhow::{Result, anyhow};
 
 /// Maximum URL length to prevent DoS
@@ -420,11 +420,10 @@ pub fn validate_regex_pattern(pattern: &str) -> Result<()> {
             }
 
             // After the closing paren, check for another quantifier
-            if j < chars.len() && has_quantifier {
-                if chars[j] == '*' || chars[j] == '+' || chars[j] == '?' || chars[j] == '{' {
+            if j < chars.len() && has_quantifier
+                && (chars[j] == '*' || chars[j] == '+' || chars[j] == '?' || chars[j] == '{') {
                     return Err(anyhow!("Pattern contains nested quantifiers which can cause ReDoS"));
                 }
-            }
         } else if chars[i] == '[' {
             // Find closing bracket
             let mut j = i + 1;
@@ -452,12 +451,12 @@ pub fn validate_regex_pattern(pattern: &str) -> Result<()> {
 
     // Check for catastrophic backtracking patterns
     // Multiple overlapping character classes with quantifiers
-    if pattern.matches(|c| c == '(').count() > 20 {
+    if pattern.matches('(').count() > 20 {
         return Err(anyhow!("Pattern has too many capture groups (max 20)"));
     }
 
     // Check for overly deep alternation
-    if pattern.matches(|c| c == '|').count() > 15 {
+    if pattern.matches('|').count() > 15 {
         return Err(anyhow!("Pattern has too many alternations (max 15)"));
     }
 
@@ -626,6 +625,7 @@ pub fn validate_ua_file(content: &str) -> Result<Vec<String>> {
 /// - Prevents CSV injection attacks
 /// - Escapes fields that start with formula characters (=, +, -, @)
 /// - Limits field length
+/// - BUG-LOGIC-012 FIX: Uses UTF-8 character boundary aware truncation
 ///
 /// # Arguments
 /// * `field` - The raw field value
@@ -635,9 +635,11 @@ pub fn validate_ua_file(content: &str) -> Result<Vec<String>> {
 pub fn sanitize_csv_field(field: &str) -> String {
     let trimmed = field.trim();
 
-    // Truncate if too long
+    // BUG-LOGIC-012 FIX: Use UTF-8 character boundary aware truncation
+    // str.floor_char_boundary() ensures we don't split multi-byte UTF-8 characters
     let sanitized = if trimmed.len() > MAX_CSV_FIELD_LENGTH {
-        &trimmed[..MAX_CSV_FIELD_LENGTH]
+        let boundary = trimmed.floor_char_boundary(MAX_CSV_FIELD_LENGTH);
+        &trimmed[..boundary]
     } else {
         trimmed
     };
@@ -878,4 +880,34 @@ git/2.46.0"#;
 
         assert!(validate_content_length(Some(10001), 10000).is_err());
     }
+}
+
+/// Validates that a patterns file path is safe for reading.
+///
+/// # Security Considerations
+/// - Prevents path traversal attacks (e.g., ../../../etc/passwd)
+/// - Ensures path is within current working directory
+/// - Validates the path exists and is a file
+///
+/// # Arguments
+/// * `path` - The raw path string from user input
+///
+/// # Returns
+/// * `Ok(PathBuf)` - Canonicalized absolute path within working directory
+/// * `Err(String)` - Error message if validation fails
+pub fn validate_patterns_path(path: &str) -> Result<PathBuf> {
+    let canonical = std::fs::canonicalize(path)
+        .map_err(|e| anyhow::anyhow!("Invalid path: {}", e))?;
+    let cwd = std::env::current_dir()
+        .map_err(|e| anyhow::anyhow!("Cannot get current dir: {}", e))?;
+
+    if !canonical.starts_with(&cwd) {
+        anyhow::bail!("Path traversal detected: patterns file must be within working directory");
+    }
+
+    if !canonical.is_file() {
+        anyhow::bail!("Patterns path must be a file");
+    }
+
+    Ok(canonical)
 }
