@@ -165,7 +165,7 @@ impl Mapper {
         Self { client }
     }
 
-    pub async fn run(&self, git_url: &str, branch: Option<&str>) -> MapResult {
+    pub async fn run(&self, git_url: &str, branch: Option<&str>, skip_verification: bool) -> MapResult {
         let git_url = git_url.trim_end_matches('/');
         let mut result = MapResult::default();
         let mut meta: HashMap<String, Vec<u8>> = HashMap::new();
@@ -614,13 +614,19 @@ impl Mapper {
 
         // VERIFICATION: Check if git objects are actually accessible
         // This distinguishes between full exposure and partial (metadata-only) exposure
-        result.objects_accessible = if result.blob_sha1s.is_empty() {
+        result.objects_accessible = if skip_verification {
+            // Skip verification and assume objects are accessible
+            true
+        } else if result.blob_sha1s.is_empty() {
             false
         } else {
-            // Try to fetch the first few blobs to verify accessibility
-            // Sample up to 3 blobs to avoid spending too much time on verification
-            let sample_sha1s: Vec<_> = result.blob_sha1s.iter().take(3).cloned().collect();
-            let mut any_accessible = false;
+            // Try to fetch a sample of blobs to verify accessibility
+            // Sample up to 10 blobs to get a better representation
+            // Require at least 30% of samples to succeed before declaring full exposure
+            // (This handles cases where some blobs are genuinely missing/deleted)
+            let sample_size = result.blob_sha1s.len().min(10);
+            let sample_sha1s: Vec<_> = result.blob_sha1s.iter().take(sample_size).cloned().collect();
+            let mut accessible_count = 0;
             for sha1 in sample_sha1s {
                 let url = format!("{}/{}", git_url, obj_path(&sha1));
                 let resp = self.client.get(&url).await;
@@ -628,12 +634,14 @@ impl Mapper {
                     // Verify it's a valid git object
                     let parser = ObjectParser;
                     if parser.parse(&resp.body, &sha1).is_some() {
-                        any_accessible = true;
-                        break;
+                        accessible_count += 1;
                     }
                 }
             }
-            any_accessible
+            // Require at least 30% of samples to be accessible
+            // (e.g., 3 out of 10, or 1 out of 3)
+            let threshold = (sample_size as f64 * 0.3).ceil() as usize;
+            accessible_count >= threshold.max(1)
         };
 
         result

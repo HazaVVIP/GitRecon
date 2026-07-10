@@ -318,6 +318,10 @@ struct Cli {
     /// Cache TTL in seconds (default: 604800 = 7 days, 0 = no expiration)
     #[arg(long = "cache-ttl", default_value = "604800", value_name = "SECONDS")]
     cache_ttl: u64,
+
+    /// Skip object accessibility verification (forces scan even if metadata-only exposure detected)
+    #[arg(long = "skip-verification")]
+    skip_verification: bool,
 }
 
 // ════════════════════════════════════════════════
@@ -3590,7 +3594,7 @@ async fn main() {
                 }
 
                 let mapper  = mapper::Mapper::new(client.clone());
-                let map_r   = mapper.run(&dr.git_url, dr.branch.as_deref()).await;
+                let map_r   = mapper.run(&dr.git_url, dr.branch.as_deref(), args.skip_verification).await;
 
                 // DX-4: --dry-run
                 if args.dry_run {
