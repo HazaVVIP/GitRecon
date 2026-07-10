@@ -46,23 +46,23 @@ install_build_dependencies() {
         apt)
             info "Installing build dependencies via apt..."
             sudo apt-get update -qq
-            sudo apt-get install -y build-essential gcc make pkg-config libssl-dev curl git
+            sudo apt-get install -y build-essential gcc make pkg-config libssl-dev libsqlite3-dev curl git
             ;;
         yum|dnf)
             info "Installing build dependencies via $pkg_manager..."
-            sudo $pkg_manager install -y gcc make pkg-config openssl-devel curl git
+            sudo $pkg_manager install -y gcc make pkg-config openssl-devel sqlite-devel curl git
             ;;
         pacman)
             info "Installing build dependencies via pacman..."
-            sudo pacman -S --noconfirm base-devel pkg-config openssl curl git
+            sudo pacman -S --noconfirm base-devel pkg-config openssl sqlite curl git
             ;;
         brew)
             info "Installing build dependencies via brew..."
-            brew install pkg-config openssl curl git
+            brew install pkg-config openssl sqlite3 curl git
             ;;
         apk)
             info "Installing build dependencies via apk..."
-            apk add --no-cache build-base gcc openssl-dev curl git
+            apk add --no-cache build-base gcc openssl-dev sqlite-dev curl git
             ;;
         *)
             warn "Unknown package manager. Skipping system dependency installation."
@@ -243,10 +243,11 @@ info "Building release binary (this may take 1-3 minutes)..."
 echo "    This requires significant CPU and memory. Please be patient."
 
 if ! cargo build --manifest-path "${BUILD_DIR}/Cargo.toml" --release 2>&1; then
-    error "Build failed. Please check:"
-    echo "    1. You have sufficient disk space (>2GB)"
-    echo "    2. You have adequate memory (>1GB)"
-    echo "    3. All build dependencies are installed"
+    error "Build failed. Common issues:"
+    echo "    1. Missing libsqlite3-dev (Debian/Ubuntu: sudo apt-get install libsqlite3-dev)"
+    echo "    2. Insufficient disk space (>2GB required)"
+    echo "    3. Insufficient memory (>1GB recommended)"
+    echo "    4. Incompatible system libraries"
     echo ""
     echo "    For detailed error, run:"
     echo "      cd $BUILD_DIR && cargo build --release"
