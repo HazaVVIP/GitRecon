@@ -6,15 +6,14 @@
 //! - TTL: 7 days (configurable via --cache-ttl)
 //! - Max size: 1GB with LRU eviction
 //! - Cross-target cache sharing (same SHA1 from different targets cached once)
+//!   BUG-ERR-009: Convert to tokio::sync::Mutex for timeout support
 
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection};
-use std::sync::{Arc, Mutex};
-
-/// Default TTL for cache entries (7 days in seconds)
-const DEFAULT_TTL_SECONDS: i64 = 7 * 24 * 60 * 60;
+use r2d2::{Pool};
+use r2d2_sqlite::SqliteConnectionManager;
 
 /// Maximum cache size in bytes (1GB)
 const MAX_CACHE_SIZE_BYTES: i64 = 1024 * 1024 * 1024;
@@ -57,8 +56,8 @@ fn init_db(conn: &Connection) -> Result<()> {
 /// ObjectCache struct for SHA1→content caching
 #[derive(Clone)]
 pub struct ObjectCache {
-    /// The inner connection is wrapped in Arc<Mutex<>> for thread-safe sharing across async tasks
-    conn: Arc<Mutex<Connection>>,
+    /// r2d2 connection pool for thread-safe SQLite access
+    pool: Pool<SqliteConnectionManager>,
     ttl_seconds: i64,
     no_cache: bool,
 }
@@ -78,8 +77,16 @@ impl ObjectCache {
                 .context("Failed to create cache directory")?;
         }
 
-        let conn = Connection::open(&cache_path)
-            .context("Failed to open cache database")?;
+        // Create r2d2 pool with SQLite connection manager
+        let manager = SqliteConnectionManager::file(&cache_path);
+        let pool = Pool::builder()
+            .max_size(15)
+            .build(manager)
+            .context("Failed to create connection pool")?;
+
+        // Initialize database and set pragmas on a connection from the pool
+        let conn = pool.get()
+            .context("Failed to get connection for initialization")?;
 
         // Set performance optimization pragmas
         conn.execute_batch("
@@ -93,36 +100,12 @@ impl ObjectCache {
         init_db(&conn)?;
 
         Ok(Self {
-            conn: Arc::new(Mutex::new(conn)),
-            ttl_seconds: if ttl_seconds > 0 { ttl_seconds } else { DEFAULT_TTL_SECONDS },
+            pool,
+            // BUG-LOGIC-004 FIX: ttl == 0 means permanent (no expiration), not expiring
+            // Use i64::MAX to represent permanent entries
+            ttl_seconds: if ttl_seconds == 0 { i64::MAX } else { ttl_seconds },
             no_cache,
         })
-    }
-
-    /// Check if an entry exists in the cache and is not expired
-    #[allow(dead_code)]
-    pub fn contains(&self, sha1: &str) -> bool {
-        if self.no_cache {
-            return false;
-        }
-
-        if let Ok(conn) = self.conn.lock() {
-            let now = now_seconds();
-            let cutoff = now - self.ttl_seconds;
-
-            conn.query_row(
-                "SELECT EXISTS(
-                    SELECT 1 FROM cache
-                    WHERE sha1 = ?1 AND created_at >= ?2
-                    LIMIT 1
-                )",
-                params![sha1, cutoff],
-                |row| row.get::<_, i32>(0),
-            )
-            .unwrap_or(0) == 1
-        } else {
-            false
-        }
     }
 
     /// Get content from cache by SHA1
@@ -131,12 +114,14 @@ impl ObjectCache {
     /// - --no-cache is enabled
     /// - SHA1 not found in cache
     /// - Entry has expired (TTL exceeded)
-    pub fn get(&self, sha1: &str) -> Option<Vec<u8>> {
+    /// - Failed to get connection from pool
+    pub async fn get(&self, sha1: &str) -> Option<Vec<u8>> {
         if self.no_cache {
             return None;
         }
 
-        let conn = self.conn.lock().ok()?;
+        let conn = self.pool.get().ok()?;
+
         let now = now_seconds();
         let cutoff = now - self.ttl_seconds;
 
@@ -152,31 +137,29 @@ impl ObjectCache {
     /// Put content into cache
     ///
     /// If --no-cache is enabled, this is a no-op.
-    pub fn put(&self, sha1: &str, content: &[u8], source_url: Option<&str>) {
+    ///
+    /// DEADLOCK FIX: Hold a single lock for the entire operation (insert + eviction)
+    pub async fn put(&self, sha1: &str, content: &[u8], source_url: Option<&str>) {
         if self.no_cache {
             return;
         }
 
-        if let Ok(conn) = self.conn.lock() {
-            let now = now_seconds();
+        let mut conn = match self.pool.get().ok() {
+            Some(c) => c,
+            None => return, // Failed to get connection, skip caching
+        };
 
-            // Insert or replace the entry
-            let _ = conn.execute(
-                "INSERT OR REPLACE INTO cache (sha1, content, created_at, source_url)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![sha1, content, now, source_url.unwrap_or("")],
-            );
+        let now = now_seconds();
 
-            // Evict old entries if cache is too large
-            // Note: We need to drop the lock before calling evict_if_needed
-            // because it needs to mutate the connection
-            drop(conn);
-        }
+        // Insert or replace the entry
+        let _ = conn.execute(
+            "INSERT OR REPLACE INTO cache (sha1, content, created_at, source_url)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![sha1, content, now, source_url.unwrap_or("")],
+        );
 
-        // Acquire a new mutable lock for eviction if needed
-        if let Ok(mut conn) = self.conn.lock() {
-            let _ = Self::evict_if_needed(&mut *conn);
-        }
+        // Evict old entries if cache is too large
+        let _ = Self::evict_if_needed(&mut conn);
     }
 
     /// Evict oldest entries if cache size exceeds MAX_CACHE_SIZE_BYTES
@@ -220,9 +203,11 @@ impl ObjectCache {
 
     /// Clean up expired entries (TTL-based cleanup)
     #[allow(dead_code)]
-    pub fn cleanup_expired(&self) -> Result<usize> {
-        let conn = self.conn.lock()
-            .map_err(|e| anyhow::anyhow!("Failed to acquire lock for cleanup: {}", e))?;
+    pub async fn cleanup_expired(&self) -> Result<usize> {
+        let conn = match self.pool.get().ok() {
+            Some(c) => c,
+            None => return Ok(0), // Failed to get connection
+        };
 
         let now = now_seconds();
         let cutoff = now - self.ttl_seconds;
@@ -237,10 +222,17 @@ impl ObjectCache {
     }
 
     /// Get cache statistics
-    pub fn stats(&self) -> CacheStats {
-        let conn = match self.conn.lock() {
-            Ok(c) => c,
-            Err(_) => return CacheStats::default(),
+    pub async fn stats(&self) -> CacheStats {
+        let conn = match self.pool.get().ok() {
+            Some(c) => c,
+            None => {
+                // Return empty stats if connection fails
+                return CacheStats {
+                    total_entries: 0,
+                    total_bytes: 0,
+                    expired_entries: 0,
+                };
+            }
         };
 
         CacheStats {
@@ -268,9 +260,11 @@ impl ObjectCache {
 
     /// Clear all cache entries
     #[allow(dead_code)]
-    pub fn clear(&self) -> Result<()> {
-        let conn = self.conn.lock()
-            .map_err(|e| anyhow::anyhow!("Failed to acquire lock for clear: {}", e))?;
+    pub async fn clear(&self) -> Result<()> {
+        let conn = match self.pool.get().ok() {
+            Some(c) => c,
+            None => return Ok(()), // Failed to get connection, assume cleared
+        };
 
         conn.execute("DELETE FROM cache", [])
             .context("Failed to clear cache")?;

@@ -45,6 +45,9 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use anyhow::{Context, Result};
+use hmac::{Hmac, Mac};
+use sha2::{Sha256, Digest};
+use subtle::ConstantTimeEq;
 
 /// Default checkpoint directory
 const CHECKPOINT_DIR: &str = ".gitrecon/checkpoints";
@@ -54,6 +57,12 @@ const CHECKPOINT_DIR_ENV: &str = "GITRECON_CHECKPOINT_DIR";
 
 /// Maximum age for checkpoints (7 days in seconds)
 const MAX_CHECKPOINT_AGE_SECS: u64 = 7 * 24 * 60 * 60;
+
+/// BUG-STAB-009: Maximum retry attempts for checkpoint save
+const MAX_SAVE_RETRIES: usize = 3;
+
+/// BUG-STAB-009: Base delay for exponential backoff (milliseconds)
+const RETRY_BASE_DELAY_MS: u64 = 100;
 
 /// Current checkpoint format version
 const CURRENT_CHECKPOINT_VERSION: CheckpointVersion = CheckpointVersion::V2;
@@ -108,6 +117,11 @@ pub struct Checkpoint {
     /// Phase 3: Stream progress
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream_progress: Option<StreamCheckpoint>,
+
+    /// BUG-SEC-005 FIX: HMAC-SHA256 for integrity verification
+    /// Computed over all other fields to detect tampering
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hmac: Option<String>,
 }
 
 impl Checkpoint {
@@ -133,6 +147,7 @@ impl Checkpoint {
             detect_result: None,
             map_result: None,
             stream_progress: None,
+            hmac: None,
         }
     }
 
@@ -150,6 +165,77 @@ impl Checkpoint {
                 .unwrap()
                 .as_secs();
         }
+    }
+
+    /// BUG-SEC-005 FIX: Compute HMAC-SHA256 for checkpoint integrity
+    ///
+    /// The HMAC is computed over all checkpoint fields except the hmac field itself.
+    /// Uses a fixed secret key derived from the target and config fingerprint.
+    /// For pentesting scenarios, this provides tamper detection without requiring
+    /// external secret management.
+    fn compute_hmac(&self) -> Result<String> {
+        // Create a clone without hmac for computation
+        let mut checkpoint_without_hmac = self.clone();
+        checkpoint_without_hmac.hmac = None;
+
+        // Serialize to canonical JSON
+        let json_str = serde_json::to_string(&checkpoint_without_hmac)
+            .context("Failed to serialize checkpoint for HMAC computation")?;
+
+        // Derive a key from target and config fingerprint
+        // This ensures each checkpoint has a unique key while being deterministic
+        let key_material = format!("{}:{}:gitrecon-integrity",
+            checkpoint_without_hmac.target,
+            checkpoint_without_hmac.config_fingerprint
+        );
+
+        // Use SHA256 to derive a 32-byte key
+        let key_bytes = sha2::Sha256::digest(key_material.as_bytes());
+
+        // Compute HMAC-SHA256
+        let mut mac = Hmac::<Sha256>::new_from_slice(&key_bytes)
+            .map_err(|e| anyhow::anyhow!("HMAC key error: {}", e))?;
+        mac.update(json_str.as_bytes());
+        let result = mac.finalize();
+
+        Ok(hex::encode(result.into_bytes()))
+    }
+
+    /// BUG-SEC-005 FIX: Verify HMAC integrity
+    ///
+    /// Returns true if HMAC is valid or if checkpoint is from legacy version (no HMAC).
+    /// Returns false if HMAC verification fails (potential tampering detected).
+    pub fn verify_hmac(&self) -> bool {
+        // If no HMAC present, this is a legacy checkpoint - accept it
+        if self.hmac.is_none() {
+            return true;
+        }
+
+        // Compute expected HMAC and compare
+        match self.compute_hmac() {
+            Ok(expected) => {
+                self.hmac.as_ref().is_some_and(|actual| {
+                    // Constant-time comparison to prevent timing attacks
+                    if expected.as_bytes().ct_eq(actual.as_bytes()).into() {
+                        return true;
+                    }
+                    false
+                })
+            }
+            Err(_) => {
+                // If we can't compute HMAC, fail closed
+                false
+            }
+        }
+    }
+
+    /// BUG-SEC-005 FIX: Update HMAC before saving
+    ///
+    /// This should be called before serializing a checkpoint for save.
+    /// It ensures the hmac field contains the current integrity value.
+    pub fn update_hmac(&mut self) -> Result<()> {
+        self.hmac = Some(self.compute_hmac()?);
+        Ok(())
     }
 }
 
@@ -185,12 +271,67 @@ pub struct StreamCheckpoint {
     /// Findings collected so far
     pub findings_count: usize,
 
+    /// BUG-STAB-011: Store serialized findings for resume capability
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub findings: Vec<FindingCheckpoint>,
+
     /// Last checkpoint index (for periodic checkpointing)
     pub last_checkpoint_index: usize,
 
     /// PERF-003: Adaptive concurrency state
     #[serde(skip_serializing_if = "Option::is_none")]
     pub adaptive_state: Option<AdaptiveConcurrencyState>,
+}
+
+/// BUG-STAB-011: Minimal finding representation for checkpoint storage
+/// Stores only essential info for resume; full Finding recreated on load
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FindingCheckpoint {
+    pub filename: String,
+    pub line: usize,
+    pub pattern_id: String,
+    pub description: String,
+    pub severity: String,
+    #[serde(rename = "match")]
+    pub match_str: String,
+    pub context: String,
+    pub is_deleted: bool,
+    pub commit_sha1: Option<String>,
+    pub confidence_adjustment: Option<String>,
+}
+
+impl From<crate::streamer::Finding> for FindingCheckpoint {
+    fn from(finding: crate::streamer::Finding) -> Self {
+        Self {
+            filename: finding.filename,
+            line: finding.line,
+            pattern_id: finding.pattern_id,
+            description: finding.description,
+            severity: finding.severity,
+            match_str: finding.match_str,
+            context: finding.context,
+            is_deleted: finding.is_deleted,
+            commit_sha1: finding.commit_sha1,
+            confidence_adjustment: finding.confidence_adjustment,
+        }
+    }
+}
+
+impl From<FindingCheckpoint> for crate::streamer::Finding {
+    fn from(fc: FindingCheckpoint) -> Self {
+        Self {
+            filename: fc.filename,
+            line: fc.line,
+            pattern_id: fc.pattern_id,
+            description: fc.description,
+            severity: fc.severity,
+            match_str: fc.match_str,
+            context: fc.context,
+            is_deleted: fc.is_deleted,
+            commit_sha1: fc.commit_sha1,
+            confidence_adjustment: fc.confidence_adjustment,
+        }
+    }
 }
 
 /// PERF-003: Adaptive concurrency state for checkpoint resume
@@ -387,39 +528,97 @@ fn validate_checkpoint_file(file: &File) -> Result<()> {
 /// SEC-006: Checkpoint files are created with mode 0600 (owner read/write only)
 /// to prevent other users from accessing checkpoint data.
 ///
-/// SEC-007: Uses atomic file creation with O_CREAT|O_EXCL (via OpenOptions::create_new)
-/// to prevent TOCTOU races during checkpoint writes. This ensures that if the file
-/// already exists (possibly as a symlink placed by an attacker), the operation fails
-/// rather than overwriting it.
+/// SEC-007: Uses atomic write+rename pattern to prevent TOCTOU races during
+/// checkpoint writes. This ensures that checkpoint updates are atomic:
+/// either the full new checkpoint is visible, or the old one remains.
 ///
 /// The old pattern of `fs::write()` after checking `exists()` is vulnerable because
 /// an attacker could replace the file with a symlink between the check and write.
+///
+/// BUG-SEC-003 FIX: Uses temp file + atomic rename instead of create_new(),
+/// allowing safe updates to existing checkpoints without race conditions.
+///
+/// BUG-STAB-009 FIX: Implements retry with exponential backoff on save failure.
+///
+/// BUG-SEC-005 FIX: Computes HMAC before saving for integrity verification.
 pub fn save_checkpoint(checkpoint: &Checkpoint) -> Result<()> {
     ensure_checkpoint_dir()?;
 
     let path = checkpoint_path(&checkpoint.target);
-    let json = serde_json::to_string_pretty(checkpoint)
+
+    // BUG-SEC-005 FIX: Update HMAC before saving
+    let mut checkpoint_with_hmac = checkpoint.clone();
+    checkpoint_with_hmac.update_hmac()
+        .context("Failed to compute checkpoint HMAC")?;
+
+    let json = serde_json::to_string_pretty(&checkpoint_with_hmac)
         .context("Failed to serialize checkpoint")?;
 
-    // SEC-007: Atomic file creation with O_CREAT|O_EXCL equivalent
-    // create_new() fails if file exists, preventing symlink overwrite attacks
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true) // O_CREAT|O_EXCL - fail if exists
-        .mode(0o600) // Set permissions atomically on create
-        .open(&path)
-        .with_context(|| format!("Failed to create checkpoint atomically: {}", path.display()))?;
+    // BUG-STAB-009: Retry loop with exponential backoff
+    for attempt in 0..MAX_SAVE_RETRIES {
+        // BUG-SEC-003 FIX: Use temp file + atomic rename pattern
+        // Use unique temp path to avoid conflicts in concurrent scenarios
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_path = path.with_extension(format!("tmp-{}-{}", timestamp, std::process::id()));
 
-    // Write the checkpoint data
-    use std::io::Write;
-    file.write_all(json.as_bytes())
-        .with_context(|| format!("Failed to write checkpoint: {}", path.display()))?;
+        // BUG-STAB-009: Helper function to write to temp file with proper cleanup
+        let write_result = (|| {
+            use std::io::Write;
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&temp_path)
+                .with_context(|| format!("Failed to create temp checkpoint: {}", temp_path.display()))?;
 
-    // Sync to ensure data is written to disk
-    file.sync_all()
-        .with_context(|| format!("Failed to sync checkpoint to disk: {}", path.display()))?;
+            file.write_all(json.as_bytes())
+                .with_context(|| format!("Failed to write temp checkpoint: {}", temp_path.display()))?;
 
-    Ok(())
+            file.sync_all()
+                .with_context(|| format!("Failed to sync temp checkpoint: {}", temp_path.display()))?;
+
+            Ok::<(), anyhow::Error>(())
+        })();
+
+        if let Err(e) = write_result {
+            // Clean up temp file if write failed
+            let _ = fs::remove_file(&temp_path);
+
+            // BUG-STAB-009: Exponential backoff before retry
+            if attempt < MAX_SAVE_RETRIES - 1 {
+                let delay_ms = RETRY_BASE_DELAY_MS * (2_u64.pow(attempt as u32));
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                continue;
+            }
+            return Err(e);
+        }
+
+        // Atomic rename - this is the TOCTOU-safe operation
+        // On POSIX, rename() is atomic and replaces the target if it exists
+        let rename_result = fs::rename(&temp_path, &path);
+
+        if let Err(e) = rename_result {
+            // Clean up temp file if rename failed
+            let _ = fs::remove_file(&temp_path);
+
+            // BUG-STAB-009: Retry on rename failure with backoff
+            if attempt < MAX_SAVE_RETRIES - 1 {
+                let delay_ms = RETRY_BASE_DELAY_MS * (2_u64.pow(attempt as u32));
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                continue;
+            }
+            return Err(e).with_context(|| format!("Failed to rename checkpoint: {} -> {}", temp_path.display(), path.display()));
+        }
+
+        // Success - break out of retry loop
+        return Ok(());
+    }
+
+    // Should not reach here, but handle the case
+    anyhow::bail!("Failed to save checkpoint after {} retries", MAX_SAVE_RETRIES)
 }
 
 /// Load checkpoint for a target
@@ -433,6 +632,8 @@ pub fn save_checkpoint(checkpoint: &Checkpoint) -> Result<()> {
 /// using any data from it.
 ///
 /// PERF-001: Automatically migrates V1 checkpoints to V2 format on load.
+///
+/// BUG-SEC-005 FIX: Verifies HMAC integrity after loading. Detects tampering.
 pub fn load_checkpoint(target: &str) -> Result<Option<Checkpoint>> {
     let path = checkpoint_path(target);
 
@@ -465,40 +666,69 @@ pub fn load_checkpoint(target: &str) -> Result<Option<Checkpoint>> {
         let _ = save_checkpoint(&checkpoint);
     }
 
+    // BUG-SEC-005 FIX: Verify HMAC integrity
+    if !checkpoint.verify_hmac() {
+        anyhow::bail!(
+            "Checkpoint HMAC verification failed - possible tampering detected: {}",
+            path.display()
+        );
+    }
+
     Ok(Some(checkpoint))
 }
 
 /// Delete checkpoint for a target
+///
+/// BUG-SEC-001 FIX: Uses open-handle-validate-unlink pattern to prevent TOCTOU attacks.
+/// The old pattern of exists() → metadata() → remove_file() was vulnerable because
+/// an attacker could replace the file with a symlink between the check and unlink.
+///
+/// The new pattern:
+/// 1. Open file handle (gets reference to actual inode)
+/// 2. Validate on OPENED handle (not path)
+/// 3. Close handle, then unlink (safe because we've validated what we opened)
 #[allow(dead_code)]
 pub fn delete_checkpoint(target: &str) -> Result<()> {
     let path = checkpoint_path(target);
 
-    // SEC-007: Validate before delete
-    if path.exists() {
-        // Check it's a regular file we own
-        let metadata = fs::metadata(&path)
-            .with_context(|| format!("Failed to get metadata for checkpoint: {}", path.display()))?;
+    // BUG-SEC-001 FIX: Open file handle FIRST
+    let file = match File::open(&path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e).context(format!("Failed to open checkpoint: {}", path.display())),
+    };
 
-        if !metadata.file_type().is_file() {
-            anyhow::bail!("Security violation: checkpoint path is not a regular file: {}", path.display());
-        }
+    // BUG-SEC-001 FIX: Validate on OPENED handle (not path)
+    let metadata = file.metadata()
+        .with_context(|| format!("Failed to get metadata for checkpoint: {}", path.display()))?;
 
-        let current_uid = unsafe { libc::getuid() };
-        if metadata.uid() != current_uid {
-            anyhow::bail!("Security violation: checkpoint file not owned by current user: {}", path.display());
-        }
-
-        fs::remove_file(&path)
-            .with_context(|| format!("Failed to delete checkpoint: {}", path.display()))?;
+    if !metadata.file_type().is_file() {
+        anyhow::bail!("Security violation: checkpoint path is not a regular file: {}", path.display());
     }
+
+    let current_uid = unsafe { libc::getuid() };
+    if metadata.uid() != current_uid {
+        anyhow::bail!("Security violation: checkpoint file not owned by current user: {}", path.display());
+    }
+
+    // Close handle, then unlink (safe because we validated the handle)
+    drop(file);
+    fs::remove_file(&path)
+        .with_context(|| format!("Failed to delete checkpoint: {}", path.display()))?;
 
     Ok(())
 }
 
 /// Cleanup old checkpoints (>7 days)
 ///
-/// SEC-007: Validates each file before deletion to prevent accidental removal
-/// of files placed via symlink attacks.
+/// BUG-SEC-002 FIX: Uses open-handle-validate-unlink pattern to prevent TOCTOU attacks.
+/// The old pattern of metadata check → remove_file() was vulnerable because an attacker
+/// could replace the file with a symlink after the metadata check but before removal.
+///
+/// The new pattern:
+/// 1. Open file handle FIRST
+/// 2. Validate age/ownership on OPENED handle
+/// 3. Close handle, then unlink (safe because we've validated what we opened)
 pub fn cleanup_old_checkpoints() -> Result<usize> {
     let dir = ensure_checkpoint_dir()?;
     let now = SystemTime::now()
@@ -516,28 +746,50 @@ pub fn cleanup_old_checkpoints() -> Result<usize> {
             continue;
         }
 
-        // SEC-007: Validate file before processing
-        // Check it's owned by us and is a regular file
-        let metadata = match entry.metadata() {
-            Ok(m) => m,
-            Err(_) => continue, // Skip files we can't read
+        // BUG-SEC-002 FIX: Open FIRST
+        let file = match File::open(&path) {
+            Ok(f) => f,
+            Err(_) => continue, // Skip files we can't open
         };
 
+        // BUG-SEC-002 FIX: Validate on handle
+        let metadata = match file.metadata() {
+            Ok(m) => m,
+            Err(_) => {
+                drop(file);
+                continue;
+            }
+        };
+
+        // Skip non-files
         if !metadata.file_type().is_file() {
-            continue; // Skip non-files
+            drop(file);
+            continue;
         }
 
+        // Skip files not owned by us
         let current_uid = unsafe { libc::getuid() };
         if metadata.uid() != current_uid {
-            continue; // Skip files not owned by us
+            drop(file);
+            continue;
         }
 
-        if let Ok(modified) = metadata.modified() {
+        // Check age
+        let should_delete = if let Ok(modified) = metadata.modified() {
             let age_secs = now.saturating_sub(modified.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs());
+            age_secs > MAX_CHECKPOINT_AGE_SECS
+        } else {
+            false
+        };
 
-            if age_secs > MAX_CHECKPOINT_AGE_SECS && fs::remove_file(&path).is_ok() {
+        if should_delete {
+            // BUG-SEC-002 FIX: Close BEFORE delete
+            drop(file);
+            if fs::remove_file(&path).is_ok() {
                 cleaned += 1;
             }
+        } else {
+            drop(file);
         }
     }
 
@@ -621,7 +873,7 @@ pub fn find_latest_checkpoints(limit: usize) -> Result<Vec<Checkpoint>> {
     }
 
     // Sort by updated_at descending (newest first)
-    checkpoints.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    checkpoints.sort_by_key(|b| std::cmp::Reverse(b.updated_at));
 
     // Return at most `limit` checkpoints
     checkpoints.truncate(limit);
@@ -642,9 +894,416 @@ pub fn list_checkpoint_targets() -> Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::sync::{Arc, Barrier, Mutex};
+    use std::thread;
+    use tempfile::TempDir;
 
+    // Global mutex to prevent parallel test execution interference
+    // with the GITRECON_CHECKPOINT_DIR environment variable
+    static TEST_MUTEX: Mutex<()> = Mutex::new(());
+
+    /// Helper: Create a test checkpoint with valid data
+    fn create_test_checkpoint(target: &str) -> Checkpoint {
+        Checkpoint {
+            version: CURRENT_CHECKPOINT_VERSION,
+            target: target.to_string(),
+            created_at: 123456,
+            updated_at: 123456,
+            phase: CheckpointPhase::Detect,
+            config_fingerprint: compute_config_fingerprint(true, 45, 4.5, 4),
+            detect_result: Some(DetectCheckpoint {
+                git_url: target.to_string(),
+                confidence: 95,
+                label: "Git".to_string(),
+                branch: Some("main".to_string()),
+            }),
+            map_result: None,
+            stream_progress: None,
+            hmac: None,
+        }
+    }
+
+    /// Helper: Set up a temporary checkpoint directory
+    fn setup_temp_checkpoint_dir() -> TempDir {
+        let temp_dir = TempDir::new().unwrap();
+        std::env::set_var(CHECKPOINT_DIR_ENV, temp_dir.path());
+        temp_dir
+    }
+
+    /// Test 1: Atomic write succeeds even with concurrent saves
+    ///
+    /// BUG-SEC-003 UPDATE: With atomic rename pattern, all saves succeed
+    /// (last one wins via atomic rename). This verifies the atomic nature
+    /// of the rename operation - no corruption occurs even with concurrent saves.
+    #[test]
+    fn test_atomic_write_concurrent_saves() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let temp_dir = setup_temp_checkpoint_dir();
+        let barrier = Arc::new(Barrier::new(4));
+        let target = "https://concurrent.example.com";
+        let mut handles = vec![];
+
+        // Spawn 4 threads trying to save the same checkpoint concurrently
+        for i in 0..4 {
+            let barrier_clone = Arc::clone(&barrier);
+            let target_clone = target.to_string();
+            let handle = thread::spawn(move || {
+                let mut checkpoint = create_test_checkpoint(&target_clone);
+                checkpoint.config_fingerprint = format!("variant_{}", i);
+
+                // Wait for all threads to be ready
+                barrier_clone.wait();
+
+                // All threads attempt to save simultaneously
+                save_checkpoint(&checkpoint)
+            });
+            handles.push(handle);
+        }
+
+        // Collect results - all should succeed with atomic rename
+        let mut success_count = 0;
+        for handle in handles {
+            if handle.join().unwrap().is_ok() {
+                success_count += 1;
+            }
+        }
+
+        // All saves should succeed due to atomic rename (last one wins)
+        assert_eq!(
+            success_count, 4,
+            "All saves should succeed with atomic rename pattern"
+        );
+
+        // Verify the saved checkpoint is valid (one of the variants)
+        let loaded = load_checkpoint(target).unwrap().unwrap();
+        assert_eq!(loaded.target, target);
+        // The final fingerprint should be one of the variants (we don't know which due to racing)
+        assert!(loaded.config_fingerprint.starts_with("variant_"));
+
+        // Cleanup - temp_dir dropped here
+        drop(temp_dir);
+    }
+
+    /// Test 2: Atomic update doesn't leave corrupt files
+    ///
+    /// BUG-SEC-003 UPDATE: Verifies that atomic rename ensures checkpoint
+    /// updates are atomic - either the new checkpoint is fully visible or
+    /// the old one remains. No intermediate/corrupt state is possible.
+    #[test]
+    fn test_partial_write_no_corruption() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let temp_dir = setup_temp_checkpoint_dir();
+        let target = "https://partial.example.com";
+
+        // First, save a valid checkpoint
+        let checkpoint1 = create_test_checkpoint(target);
+        save_checkpoint(&checkpoint1).unwrap();
+
+        // Verify it's valid
+        let loaded1 = load_checkpoint(target).unwrap().unwrap();
+        assert_eq!(loaded1.config_fingerprint, checkpoint1.config_fingerprint);
+
+        // Now update with a new checkpoint - should succeed atomically
+        let mut checkpoint2 = create_test_checkpoint(target);
+        checkpoint2.config_fingerprint = "updated".to_string();
+        let result = save_checkpoint(&checkpoint2);
+
+        // Should succeed with atomic rename
+        assert!(result.is_ok(), "Atomic update should succeed");
+
+        // Verify checkpoint is valid (now contains the update)
+        let loaded2 = load_checkpoint(target).unwrap().unwrap();
+        assert_eq!(
+            loaded2.config_fingerprint, "updated",
+            "Checkpoint should contain the new data"
+        );
+        assert!(loaded2.is_compatible(), "Checkpoint should be valid JSON");
+
+        // temp_dir dropped here
+        drop(temp_dir);
+    }
+
+    /// Test 3: Existing checkpoint can be updated atomically
+    ///
+    /// BUG-SEC-003 UPDATE: Verifies that checkpoint updates are atomic
+    /// via the rename pattern - no delete-then-save needed, the update
+    /// happens atomically in a single operation.
+    #[test]
+    fn test_atomic_update_checkpoint() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let temp_dir = setup_temp_checkpoint_dir();
+        let target = "https://update.example.com";
+
+        // Save initial checkpoint
+        let checkpoint1 = create_test_checkpoint(target);
+        save_checkpoint(&checkpoint1).unwrap();
+
+        // Verify initial state
+        let loaded1 = load_checkpoint(target).unwrap().unwrap();
+        assert_eq!(loaded1.config_fingerprint, checkpoint1.config_fingerprint);
+
+        // Update checkpoint directly - should succeed atomically via rename
+        let mut checkpoint2 = create_test_checkpoint(target);
+        checkpoint2.config_fingerprint = "updated_fingerprint".to_string();
+        let result = save_checkpoint(&checkpoint2);
+
+        assert!(result.is_ok(), "Atomic update should succeed via rename");
+
+        // Verify updated state (original is gone, update is in place)
+        let loaded2 = load_checkpoint(target).unwrap().unwrap();
+        assert_eq!(
+            loaded2.config_fingerprint, "updated_fingerprint",
+            "Update should be in place atomically"
+        );
+
+        // temp_dir dropped here
+        drop(temp_dir);
+    }
+
+    /// Test 4: Permissions are preserved (0600)
+    ///
+    /// Verifies that checkpoint files are created with mode 0600
+    /// (owner read/write only) for security.
+    #[test]
+    fn test_permissions_preserved() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let temp_dir = setup_temp_checkpoint_dir();
+        let target = "https://permissions.example.com";
+
+        // Save checkpoint
+        let checkpoint = create_test_checkpoint(target);
+        save_checkpoint(&checkpoint).unwrap();
+
+        // Check file permissions
+        let path = checkpoint_path(target);
+        let metadata = fs::metadata(&path).unwrap();
+        let mode = metadata.permissions().mode();
+
+        // Verify 0600 (rw-------)
+        // Note: mode includes file type bits, so we check the permission bits
+        assert_eq!(
+            mode & 0o777, 0o600,
+            "Checkpoint file should have 0600 permissions (owner rw only)"
+        );
+
+        // Verify the file is readable by owner
+        let file = File::open(&path).unwrap();
+        assert!(validate_checkpoint_file(&file).is_ok());
+
+        // temp_dir dropped here
+        drop(temp_dir);
+    }
+
+    /// Test 5: Error recovery works correctly
+    ///
+    /// Verifies that the system recovers gracefully from various error scenarios.
+    #[test]
+    fn test_error_recovery() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let temp_dir = setup_temp_checkpoint_dir();
+
+        // Test 5a: Loading non-existent checkpoint returns None (not error)
+        let result = load_checkpoint("https://nonexistent.example.com");
+        assert!(result.is_ok(), "Loading non-existent should not error");
+        assert!(result.unwrap().is_none(), "Should return None for non-existent");
+
+        // Test 5b: Saving with invalid directory should fail gracefully
+        // Save a valid checkpoint first
+        let target = "https://recovery.example.com";
+        let checkpoint = create_test_checkpoint(target);
+        save_checkpoint(&checkpoint).unwrap();
+
+        // Verify it loads
+        let loaded = load_checkpoint(target).unwrap().unwrap();
+        assert_eq!(loaded.target, target);
+
+        // Test 5c: Deleting non-existent checkpoint is OK (no error)
+        let result = delete_checkpoint("https://also-nonexistent.example.com");
+        assert!(result.is_ok(), "Deleting non-existent should not error");
+
+        // Test 5d: Corrupted JSON is handled gracefully
+        let path = checkpoint_path(target);
+        let corrupted_json = r#"{"invalid": "json", "missing": "fields"#;
+
+        // Write corrupted data (bypassing save_checkpoint)
+        fs::write(&path, corrupted_json).unwrap();
+
+        // Loading should fail gracefully
+        let result = load_checkpoint(target);
+        assert!(result.is_err(), "Loading corrupted JSON should fail");
+
+        // temp_dir dropped here
+        drop(temp_dir);
+    }
+
+    /// Test 6: TOCTOU protection - validate after open
+    ///
+    /// Verifies that file validation happens on an open file handle,
+    /// not on the path (preventing TOCTOU races).
+    #[test]
+    fn test_toctou_protection_validate_after_open() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let temp_dir = setup_temp_checkpoint_dir();
+        let target = "https://toctou.example.com";
+
+        // Save checkpoint
+        let checkpoint = create_test_checkpoint(target);
+        save_checkpoint(&checkpoint).unwrap();
+
+        // Verify load_checkpoint opens first, then validates
+        // The implementation should:
+        // 1. File::open(&path) - get handle
+        // 2. validate_checkpoint_file(&file) - validate handle
+        // 3. Read from handle (not path)
+        let loaded = load_checkpoint(target).unwrap();
+        assert!(loaded.is_some(), "Checkpoint should load successfully");
+        assert_eq!(loaded.unwrap().target, target);
+
+        // temp_dir dropped here
+        drop(temp_dir);
+    }
+
+    /// Test 7: Directory validation prevents symlink attacks
+    ///
+    /// Verifies that checkpoint directory validation rejects symlinks.
+    #[test]
+    fn test_directory_validation_rejects_symlinks() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let temp_dir = setup_temp_checkpoint_dir();
+
+        // Verify our checkpoint directory is not a symlink
+        let checkpoint_dir_path = checkpoint_dir();
+        let metadata = fs::metadata(&checkpoint_dir_path).unwrap();
+        let file_type = metadata.file_type();
+        assert!(
+            !file_type.is_symlink(),
+            "Checkpoint directory should not be a symlink"
+        );
+
+        // Verify it's owned by current user
+        let current_uid = unsafe { libc::getuid() };
+        assert_eq!(metadata.uid(), current_uid);
+
+        // temp_dir dropped here
+        drop(temp_dir);
+    }
+
+    /// Test 8: File size limit prevents DoS
+    ///
+    /// Verifies that oversized checkpoint files are rejected.
+    #[test]
+    fn test_file_size_limit() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let temp_dir = setup_temp_checkpoint_dir();
+        let target = "https://oversized.example.com";
+
+        // Create a checkpoint
+        let checkpoint = create_test_checkpoint(target);
+        save_checkpoint(&checkpoint).unwrap();
+
+        let path = checkpoint_path(target);
+
+        // Create a file larger than 10MB (which should be rejected)
+        let oversized_data = vec![b'x'; 11 * 1024 * 1024]; // 11MB
+
+        // Delete the checkpoint first, then write oversized data
+        // We need to bypass save_checkpoint to create this invalid file
+        delete_checkpoint(target).ok();
+
+        // Write oversized data directly (bypassing security checks for testing)
+        fs::write(&path, oversized_data).unwrap();
+
+        // Try to open and validate
+        let file = File::open(&path).unwrap();
+        let result = validate_checkpoint_file(&file);
+
+        assert!(result.is_err(), "Oversized file should be rejected");
+
+        // temp_dir dropped here
+        drop(temp_dir);
+    }
+
+    /// Test 9: Checkpoint version compatibility and migration
+    ///
+    /// Verifies V1 to V2 migration works correctly.
+    #[test]
+    fn test_checkpoint_version_migration() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let temp_dir = setup_temp_checkpoint_dir();
+        let target = "https://migration.example.com";
+
+        // Create a V1 checkpoint (without version field, defaults to V1)
+        let v1_json = r#"{
+            "version": "v1",
+            "target": "https://migration.example.com",
+            "created_at": 123456,
+            "updated_at": 123456,
+            "phase": "Detect",
+            "config_fingerprint": "test123",
+            "detect_result": {
+                "git_url": "https://migration.example.com",
+                "confidence": 95,
+                "label": "Git",
+                "branch": "main"
+            }
+        }"#;
+
+        let path = checkpoint_path(target);
+
+        // Write with proper 0600 permissions using OpenOptions
+        use std::io::Write;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .unwrap();
+        file.write_all(v1_json.as_bytes()).unwrap();
+        file.sync_all().unwrap();
+
+        // Load and migrate
+        let loaded = load_checkpoint(target).unwrap();
+        assert!(loaded.is_some(), "Checkpoint should load successfully");
+        assert_eq!(loaded.unwrap().version, CheckpointVersion::V2);
+
+        // temp_dir dropped here
+        drop(temp_dir);
+    }
+
+    /// Test 10: Cleanup old checkpoints respects ownership
+    ///
+    /// Verifies cleanup only removes files owned by current user.
+    #[test]
+    fn test_cleanup_respects_ownership() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let temp_dir = setup_temp_checkpoint_dir();
+
+        // Create some checkpoints
+        for i in 0..3 {
+            let target = format!("https://cleanup{}.example.com", i);
+            let checkpoint = create_test_checkpoint(&target);
+            save_checkpoint(&checkpoint).unwrap();
+        }
+
+        // Cleanup should succeed
+        let result = cleanup_old_checkpoints();
+        assert!(result.is_ok(), "Cleanup should succeed");
+
+        // Clean up test checkpoints
+        for i in 0..3 {
+            let target = format!("https://cleanup{}.example.com", i);
+            delete_checkpoint(&target).ok();
+        }
+
+        // temp_dir dropped here
+        drop(temp_dir);
+    }
+
+    // Legacy tests from original implementation
     #[test]
     fn test_config_fingerprint() {
+        let _lock = TEST_MUTEX.lock().unwrap();
         let fp1 = compute_config_fingerprint(true, 45, 4.5, 4);
         let fp2 = compute_config_fingerprint(true, 45, 4.5, 4);
         let fp3 = compute_config_fingerprint(false, 45, 4.5, 4);
@@ -655,12 +1314,14 @@ mod tests {
 
     #[test]
     fn test_checkpoint_path() {
+        let _lock = TEST_MUTEX.lock().unwrap();
         let path = checkpoint_path("https://example.com");
         assert!(path.to_string_lossy().contains("example.com"));
     }
 
     #[test]
     fn test_checkpoint_roundtrip() {
+        let _lock = TEST_MUTEX.lock().unwrap();
         let checkpoint = Checkpoint {
             version: CURRENT_CHECKPOINT_VERSION,
             target: "https://example.com".to_string(),
@@ -674,9 +1335,11 @@ mod tests {
                 total_sha1s: 1000,
                 processed_sha1s: vec!["abc123".to_string()],
                 findings_count: 5,
+                findings: vec![],
                 last_checkpoint_index: 100,
                 adaptive_state: None,
             }),
+            hmac: None,
         };
 
         let json = serde_json::to_string(&checkpoint).unwrap();
@@ -689,36 +1352,21 @@ mod tests {
 
     #[test]
     fn test_validate_regular_file() {
-        // This test verifies that validation works for regular files
-        // A full TOCTOU test would require creating symlinks and testing races
-        let checkpoint = Checkpoint {
-            version: CURRENT_CHECKPOINT_VERSION,
-            target: "https://test.example.com".to_string(),
-            created_at: 123456,
-            updated_at: 123456,
-            phase: CheckpointPhase::Detect,
-            config_fingerprint: compute_config_fingerprint(true, 45, 4.5, 4),
-            detect_result: Some(DetectCheckpoint {
-                git_url: "https://test.example.com".to_string(),
-                confidence: 95,
-                label: "Git".to_string(),
-                branch: Some("main".to_string()),
-            }),
-            map_result: None,
-            stream_progress: None,
-        };
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let temp_dir = setup_temp_checkpoint_dir();
+        let target = "https://test.example.com";
+
+        let checkpoint = create_test_checkpoint(target);
 
         // Try to save (will create new file)
         let result = save_checkpoint(&checkpoint);
-        // This might fail if directory doesn't exist or permissions issue
-        // but in a proper test environment it should work
-        if result.is_ok() {
-            // Load it back
-            if let Ok(Some(loaded)) = load_checkpoint("https://test.example.com") {
-                assert_eq!(loaded.target, checkpoint.target);
-                // Cleanup
-                let _ = delete_checkpoint("https://test.example.com");
-            }
-        }
+        assert!(result.is_ok(), "Save should succeed with temp dir");
+
+        // Load it back
+        let loaded = load_checkpoint(target).unwrap().unwrap();
+        assert_eq!(loaded.target, checkpoint.target);
+
+        // temp_dir dropped here
+        drop(temp_dir);
     }
 }

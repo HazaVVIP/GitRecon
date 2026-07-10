@@ -38,6 +38,7 @@ mod rate_limiter; // PERF-004: Token bucket rate limiter
 mod cache; // PERF-005: SQLite cache layer
 #[allow(dead_code)]
 mod reconstructor;
+mod config;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -244,6 +245,13 @@ struct Cli {
 
     #[arg(long = "http2")]
     http2: bool,
+
+    // BUG-HTTP-003: SSL verification control
+    /// Disable SSL verification (SECURITY RISK: MITM vulnerable!)
+    /// Only use this if you understand the risks and have a specific reason.
+    #[arg(long = "insecure", alias = "skip-ssl-verification",
+          help = "Disable SSL verification (SECURITY RISK: MITM vulnerable!)")]
+    insecure: bool,
 
     // P-1: adaptive concurrency
     #[arg(long = "no-adaptive")]
@@ -3173,7 +3181,7 @@ fn build_plain_http_config(args: &Cli) -> anyhow::Result<HttpConfig> {
         delay:            Duration::ZERO,
         jitter:           Duration::ZERO,
         proxy:            args.proxy.clone(),
-        verify_ssl:       false,
+        verify_ssl:       !args.insecure,  // BUG-HTTP-003: Use insecure flag to control SSL verification
         custom_ua:        None,
         extra_headers:    vec![],
         max_size:         100 * 1024 * 1024,
@@ -3207,6 +3215,7 @@ async fn main() {
         };
 
         #[allow(clippy::never_loop)]
+        #[allow(clippy::while_let_loop)]
         loop {
             match signals.next().await {
                 Some(_signal) => {
@@ -3220,6 +3229,12 @@ async fn main() {
     });
 
     let args = Cli::parse();
+
+    // BUG-HTTP-003: Warn when SSL verification is disabled
+    if args.insecure {
+        eprintln!("  ⚠️  WARNING: SSL verification disabled - MITM vulnerability!");
+        eprintln!("     Your connections are NOT secure. Traffic can be intercepted.");
+    }
 
     // SCAN-001: Parse false-positive keywords from CLI flag
     let false_positive_keywords: Vec<String> = if let Some(ref keywords_str) = args.false_positive_keywords {
@@ -3394,7 +3409,7 @@ async fn main() {
         delay:            Duration::from_secs_f64(args.delay),
         jitter:           Duration::from_secs_f64(args.jitter),
         proxy:            args.proxy.clone(),
-        verify_ssl:       false,
+        verify_ssl:       !args.insecure,  // BUG-HTTP-003: Use insecure flag to control SSL verification
         custom_ua:        if args.ua_git { Some("git/2.46.0".to_string()) } else { args.user_agent.clone() },
         extra_headers,
         max_size:         100 * 1024 * 1024,
@@ -3696,13 +3711,13 @@ async fn main() {
                     None
                 };
 
-                // PERF-005: Log cache status
+                // PERF-005: Log cache status (BUG-ERR-009: now async)
                 if verbose {
                     if let Some(ref cache) = cache {
                         if cache.is_disabled() {
                             println!("  ◈  Cache: disabled (--no-cache)");
                         } else {
-                            let stats = cache.stats();
+                            let stats = cache.stats().await;
                             println!("  ◈  Cache: enabled ({} entries, {})",
                                 stats.total_entries, stats.size_human());
                         }
@@ -3976,7 +3991,9 @@ pub fn detect_platform(url: &str) -> Option<forge::Platform> {
 }
 
 fn load_extra_patterns(file_path: &str) -> Result<Vec<streamer::DynPattern>, Box<dyn std::error::Error>> {
-    let content = std::fs::read_to_string(file_path)?;
+    // SEC-006: Validate path to prevent path traversal attacks
+    let validated_path = validation::validate_patterns_path(file_path)?;
+    let content = std::fs::read_to_string(validated_path)?;
 
     // SEC-005: Validate patterns JSON structure and regex patterns
     if let Err(e) = validation::validate_patterns_json(&content) {
