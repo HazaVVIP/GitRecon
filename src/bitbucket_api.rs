@@ -98,11 +98,6 @@ impl BitbucketForgeClient {
         Ok(login)
     }
 
-    /// Check if this is Bitbucket Cloud (vs Server/DC).
-    fn is_cloud(&self) -> bool {
-        *self.is_cloud.lock().unwrap() == Some(true)
-    }
-
     /// URL-encode a path component for Bitbucket API.
     fn encode_path(path: &str) -> String {
         // Manual percent encoding that preserves path separators

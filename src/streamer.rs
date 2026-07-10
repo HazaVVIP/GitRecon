@@ -6,7 +6,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, AtomicU64, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use regex::Regex;
 use lazy_static::lazy_static;
@@ -613,14 +613,17 @@ pub struct StreamResult {
     pub files_saved:       usize,
     #[allow(dead_code)]
     pub files_save_failed: usize,
-    /// PERF-004: Rate limit metrics
-    pub rate_limit_allowed: u64,
-    pub rate_limit_dropped: u64,
-    pub rate_limit_wait_ms: u64,
     /// PERF-005: Cache metrics
     pub cache_hits:        usize,
     pub cache_misses:      usize,
     pub cache_stats:       Option<CacheReportStats>,
+    /// PERF-004: Rate limit metrics
+    #[allow(dead_code)]
+    pub rate_limit_allowed: usize,
+    #[allow(dead_code)]
+    pub rate_limit_dropped: usize,
+    #[allow(dead_code)]
+    pub rate_limit_wait_ms: u64,
 }
 
 /// Cache statistics for reporting
@@ -891,7 +894,6 @@ pub struct Streamer {
     entropy_threshold: f64,   // DX-3
     live:             bool,   // O-1
     adaptive:         bool,   // P-1
-    initial_workers:  usize,  // P-1
     // R-1: Checkpoint support
     checkpoint_interval: usize,  // Save checkpoint every N blobs processed
     target_url:        Option<String>,  // Target URL for checkpoint filename
@@ -899,10 +901,12 @@ pub struct Streamer {
     cache:            Option<Arc<crate::cache::ObjectCache>>,
     cache_hits:       Arc<AtomicUsize>,
     cache_misses:     Arc<AtomicUsize>,
+    // PERF-004: Rate limit metrics
+    rate_limit_allowed: Arc<AtomicUsize>,
+    rate_limit_dropped: Arc<AtomicUsize>,
+    rate_limit_wait_ms: Arc<AtomicU64>,
     // SCAN-001: Custom false-positive keywords for context-aware confidence scoring
     false_positive_keywords: Arc<Vec<String>>,
-    // S-3: Binary file scanning
-    scan_binaries:    bool,
 }
 
 impl Streamer {
@@ -923,7 +927,6 @@ impl Streamer {
         target_url:        Option<String>,
         cache:            Option<Arc<crate::cache::ObjectCache>>,
         false_positive_keywords: Vec<String>,
-        scan_binaries:    bool,
     ) -> Self {
         Self {
             client,
@@ -937,14 +940,15 @@ impl Streamer {
             entropy_threshold,
             live,
             adaptive,
-            initial_workers: workers,
             checkpoint_interval,
             target_url,
             cache,
             cache_hits: Arc::new(AtomicUsize::new(0)),
             cache_misses: Arc::new(AtomicUsize::new(0)),
+            rate_limit_allowed: Arc::new(AtomicUsize::new(0)),
+            rate_limit_dropped: Arc::new(AtomicUsize::new(0)),
+            rate_limit_wait_ms: Arc::new(AtomicU64::new(0)),
             false_positive_keywords: Arc::new(false_positive_keywords),
-            scan_binaries,
         }
     }
 
@@ -1240,7 +1244,7 @@ impl Streamer {
             }
 
             // R-1: Save checkpoint periodically (every checkpoint_interval blobs)
-            if self.checkpoint_interval > 0 && done % self.checkpoint_interval == 0 && self.target_url.is_some() {
+            if self.checkpoint_interval > 0 && done.is_multiple_of(self.checkpoint_interval) && self.target_url.is_some() {
                 let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
 
                 // PERF-003: Include adaptive state in checkpoint
@@ -1292,18 +1296,6 @@ impl Streamer {
         let mut ts: Vec<_> = state.tech_stack.iter().cloned().collect();
         ts.sort();
 
-        // PERF-004: Extract rate limit metrics from the HTTP client
-        let (rate_limit_allowed, rate_limit_dropped, rate_limit_wait_ms) = if let Some(ref metrics) = self.client.rate_limit_metrics {
-            let summary = metrics.summary();
-            (
-                summary.get("allowed").copied().unwrap_or(0),
-                summary.get("dropped").copied().unwrap_or(0),
-                summary.get("total_wait_ms").copied().unwrap_or(0),
-            )
-        } else {
-            (0, 0, 0)
-        };
-
         // PERF-005: Extract cache stats
         let cache_hits_final = self.cache_hits.load(Ordering::Relaxed);
         let cache_misses_final = self.cache_misses.load(Ordering::Relaxed);
@@ -1319,6 +1311,11 @@ impl Streamer {
             None
         };
 
+        // PERF-004: Extract rate limit metrics
+        let rate_limit_allowed_final = self.rate_limit_allowed.load(Ordering::Relaxed);
+        let rate_limit_dropped_final = self.rate_limit_dropped.load(Ordering::Relaxed);
+        let rate_limit_wait_ms_final = self.rate_limit_wait_ms.load(Ordering::Relaxed);
+
         StreamResult {
             findings:          state.findings,
             contributors:      state.contributors.iter()
@@ -1332,14 +1329,14 @@ impl Streamer {
             elapsed_s:         elapsed,
             files_saved:       state.files_saved,
             files_save_failed: state.files_save_failed,
-            // PERF-004: Rate limit metrics from HTTP client
-            rate_limit_allowed,
-            rate_limit_dropped,
-            rate_limit_wait_ms,
             // PERF-005: Cache metrics
             cache_hits: cache_hits_final,
             cache_misses: cache_misses_final,
             cache_stats: cache_stats_final,
+            // PERF-004: Rate limit metrics
+            rate_limit_allowed: rate_limit_allowed_final,
+            rate_limit_dropped: rate_limit_dropped_final,
+            rate_limit_wait_ms: rate_limit_wait_ms_final,
         }
     }
 }
@@ -1357,6 +1354,7 @@ const MAX_SCAN_BYTES: usize = 4 * 1024 * 1024;
 /// This helper function processes raw blob content and returns a WorkerResult.
 /// It's called from both the cache hit path (when content is already cached)
 /// and the fetch path (when content was just downloaded).
+#[allow(clippy::too_many_arguments)]
 fn process_blob_content(
     content:         &[u8],
     sha1:            &str,
@@ -1404,7 +1402,7 @@ fn process_blob_content(
                 // S-3: Enhanced binary file scanning
                 let bin_type = binary_scanner::detect_binary_type(&obj.data);
 
-                // Handle different binary types based on scan_binaries flag
+                // Handle different binary types
                 if matches!(bin_type, binary_scanner::BinaryType::SQLite) {
                     // Enhanced SQLite scanning with table querying
                     let binary_findings = binary_scanner::scan_binary_blob(&obj.data, &filename, max_scan_bytes);
@@ -1419,7 +1417,7 @@ fn process_blob_content(
                             let (desc, sev) = PATTERNS.iter()
                                 .find(|p| p.id == pattern_id)
                                 .map(|p| (p.desc, p.sev))
-                                .unwrap_or((&"Binary Secret", &"HIGH"));
+                                .unwrap_or(("Binary Secret", "HIGH"));
 
                             findings.push(Finding {
                                 filename: filename.clone(),
@@ -1461,7 +1459,7 @@ fn process_blob_content(
                             let (desc, sev) = PATTERNS.iter()
                                 .find(|p| p.id == pattern_id)
                                 .map(|p| (p.desc, p.sev))
-                                .unwrap_or((&"ZIP Secret", &"HIGH"));
+                                .unwrap_or(("ZIP Secret", "HIGH"));
 
                             findings.push(Finding {
                                 filename: filename.clone(),
@@ -1490,7 +1488,7 @@ fn process_blob_content(
                             let (desc, sev) = PATTERNS.iter()
                                 .find(|p| p.id == pattern_id)
                                 .map(|p| (p.desc, p.sev))
-                                .unwrap_or((&"ELF Secret", &"HIGH"));
+                                .unwrap_or(("ELF Secret", "HIGH"));
 
                             findings.push(Finding {
                                 filename: filename.clone(),
@@ -2047,6 +2045,7 @@ pub fn shannon_entropy(s: &str) -> f64 {
 /// Attempt to detect secrets in a minified JS/TS line by splitting at common
 /// statement-level separators and scanning each resulting segment.
 /// Limits processing to the first 200 segments to bound worst-case latency.
+#[allow(clippy::too_many_arguments)]
 fn scan_minified_segments(
     line:       &str,
     lineno:     usize,
@@ -2160,6 +2159,7 @@ fn scan_entropy_line(
 ///
 /// Line number preservation: Reports the KEY line number for finding location.
 /// Context includes key name for accurate attribution.
+#[allow(clippy::needless_range_loop)]
 fn scan_yaml_nextline_secrets(
     content:    &str,
     filename:   &str,
@@ -2205,12 +2205,10 @@ fn scan_yaml_nextline_secrets(
 
             // Look ahead for value lines (skip empty lines and comments)
             let mut value_lines = Vec::new();
-            let mut value_start = i + 1;
 
             for j in (i + 1)..lines.len() {
                 let next_line = lines[j].trim();
                 if next_line.is_empty() || next_line.starts_with('#') {
-                    value_start = j + 1; // update start if we hit empty/comment
                     continue;
                 }
                 // Stop at next YAML key (indented less or same level with key)
@@ -2219,7 +2217,7 @@ fn scan_yaml_nextline_secrets(
                 }
                 value_lines.push(next_line);
                 // For folded style (>), we might have multiple lines
-                if scalar_type == "|" && value_lines.len() >= 1 {
+                if scalar_type == "|" && !value_lines.is_empty() {
                     break; // literal style - take first non-empty line
                 }
             }
@@ -2435,11 +2433,6 @@ fn analyze_context(
     }
 }
 
-/// Legacy function - now wraps analyze_context() for compatibility
-fn context_suggests_example(lines: &[&str], center: usize) -> Option<String> {
-    analyze_context(lines, center, &[])
-}
-
 /// Analyze context for binary findings (simplified version)
 ///
 /// Binary findings typically have single-line context from the binary scanner.
@@ -2547,7 +2540,7 @@ fn scan_multiline(content: &str, filename: &str, sha1: &str, is_deleted: bool, f
         let val = full_match.as_str().to_string();
         if !is_placeholder(&val) {
             let line_no = content[..full_match.start()].lines().count() + 1;
-            let mut finding = Finding {
+            let finding = Finding {
                 filename: filename.to_string(),
                 line: line_no,
                 pattern_id: "pem_key_multiline".to_string(),
@@ -2766,30 +2759,6 @@ pub fn scan_text(
     findings.extend(scan_yaml_nextline_secrets(text, source, "", false, &custom_keywords));
     findings.extend(scan_db_config_blocks(text, source, "", false, &custom_keywords));
     findings
-}
-
-// S-3: Binary file string extraction
-fn extract_printable_strings(data: &[u8], min_len: usize) -> Vec<String> {
-    let mut result = Vec::new();
-    let mut current = Vec::new();
-    for &b in data {
-        if (0x20..0x7f).contains(&b) {
-            current.push(b);
-        } else {
-            if current.len() >= min_len {
-                if let Ok(s) = std::str::from_utf8(&current) {
-                    result.push(s.to_string());
-                }
-            }
-            current.clear();
-        }
-    }
-    if current.len() >= min_len {
-        if let Ok(s) = std::str::from_utf8(&current) {
-            result.push(s.to_string());
-        }
-    }
-    result
 }
 
 // SCAN-004: Multi-Line DB Credential Detection

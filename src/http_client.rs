@@ -338,7 +338,7 @@ impl HttpClient {
     fn calculate_backoff(attempt: u32, strategy: RetryStrategy) -> Duration {
         let base_ms = strategy.base_delay_ms() as u128;
         let exponential_multiplier = 2u128.pow(attempt.min(30)); // Cap exponent to avoid overflow
-        let exponential_ms = base_ms.saturating_mul(exponential_multiplier).min(u128::MAX);
+        let exponential_ms = base_ms.saturating_mul(exponential_multiplier);
         let exponential = Duration::from_millis(exponential_ms as u64);
         exponential.min(strategy.max_backoff())
     }

@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 use tokio::time::sleep;
 
 /// Rate limit metrics for reporting
@@ -252,16 +252,19 @@ impl TokenBucket {
     }
 
     /// Get current token count (for debugging/monitoring)
+    #[cfg(test)]
     pub fn token_count(&self) -> u64 {
         self.tokens.load(Ordering::Relaxed)
     }
 
     /// Check if rate limiter is in unlimited mode
+    #[cfg(test)]
     pub fn is_unlimited(&self) -> bool {
         self.unlimited
     }
 
     /// Get current rate limit setting (requests per second)
+    #[cfg(test)]
     pub fn rate_limit(&self) -> f64 {
         if self.unlimited {
             0.0
@@ -274,6 +277,7 @@ impl TokenBucket {
 /// Per-target rate limiter for multi-target scans.
 /// Maintains a separate token bucket for each target.
 #[derive(Debug, Default)]
+#[cfg(test)]
 pub struct PerTargetRateLimiter {
     /// Map of target key to token bucket
     buckets: tokio::sync::RwLock<HashMap<String, Arc<TokenBucket>>>,
@@ -281,6 +285,7 @@ pub struct PerTargetRateLimiter {
     global_rps: f64,
 }
 
+#[cfg(test)]
 impl PerTargetRateLimiter {
     /// Create a new per-target rate limiter.
     ///
@@ -349,7 +354,7 @@ impl PerTargetRateLimiter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
     use tokio::time::sleep;
 
     #[test]

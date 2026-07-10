@@ -75,7 +75,7 @@ impl GiteaForgeClient {
 
 #[async_trait]
 impl Forge for GiteaForgeClient {
-    async fn authenticate(&mut self, token: &str) -> anyhow::Result<()> {
+    async fn authenticate(&mut self, _token: &str) -> anyhow::Result<()> {
         // Validate token by calling /user
         let url = format!("{}/user", self.api_base);
         let resp = self.get_with_rate_limit(&url).await?;
@@ -256,10 +256,8 @@ pub struct GtRepo {
     pub full_name:      String,
     pub owner:          String,
     pub name:           String,
-    #[allow(dead_code)]
     pub private:        bool,
     pub default_branch: String,
-    #[allow(dead_code)]
     pub clone_url:      String,
 }
 
@@ -414,25 +412,6 @@ pub async fn get_head_sha(
         "Cannot resolve HEAD SHA for {}/{} branch '{}' (HTTP {})",
         owner, repo, branch, resp.status
     )
-}
-
-/// Retrieve all file-tree entries for a commit, recursively.
-///
-/// Uses `GET /repos/{owner}/{repo}/git/trees/{sha}?recursive=true`.
-pub async fn get_tree(
-    client:  &HttpClient,
-    api_base: &str,
-    owner:  &str,
-    repo:   &str,
-    sha:    &str,
-) -> anyhow::Result<Vec<GtTreeEntry>> {
-    let url  = format!("{}/repos/{}/{}/git/trees/{}?recursive=true", api_base, owner, repo, sha);
-    let resp = client.get(&url).await;
-    if !resp.ok() {
-        anyhow::bail!("GET tree {} returned HTTP {}", url, resp.status);
-    }
-    let json: serde_json::Value = serde_json::from_slice(&resp.body)?;
-    Ok(parse_tree_entries(&json))
 }
 
 /// Fetch the raw content of a blob by its SHA.

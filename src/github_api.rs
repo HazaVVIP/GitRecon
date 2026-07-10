@@ -70,7 +70,7 @@ impl GitHubForgeClient {
 
 #[async_trait]
 impl Forge for GitHubForgeClient {
-    async fn authenticate(&mut self, token: &str) -> anyhow::Result<()> {
+    async fn authenticate(&mut self, _token: &str) -> anyhow::Result<()> {
         // Validate token by calling /user
         let url = format!("{}/user", GH_API);
         let resp = self.get_with_rate_limit(&url).await?;

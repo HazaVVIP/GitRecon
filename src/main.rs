@@ -64,14 +64,16 @@ use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
+#[allow(dead_code)]
 enum Target {
     Url { url: String, fuzz: Option<bool> },
     Token { token: String, repos: Option<Vec<String>> },
     Dir { dir: String },
 }
 
+#[allow(dead_code)]
 impl Target {
-    fn as_type_name(&self) -> &'static str {
+    fn kind(&self) -> &'static str {
         match self {
             Target::Url { .. } => "URL",
             Target::Token { .. } => "TOKEN",
@@ -915,14 +917,14 @@ async fn run_token_scan(
         elapsed_s,
         files_saved:       0,
         files_save_failed: 0,
-        // PERF-004: Rate limit metrics (not applicable for token mode scanning local files)
-        rate_limit_allowed: 0,
-        rate_limit_dropped: 0,
-        rate_limit_wait_ms: 0,
         // PERF-005: Cache metrics (not applicable for token mode scanning local files)
         cache_hits: 0,
         cache_misses: 0,
         cache_stats: None,
+        // PERF-004: Rate limit metrics (not applicable for token mode)
+        rate_limit_allowed: 0,
+        rate_limit_dropped: 0,
+        rate_limit_wait_ms: 0,
     };
 
     // ── 6. Terminal summary ──────────────────────
@@ -1167,7 +1169,7 @@ async fn run_gitlab_token_scan(
         }
 
         // Get HEAD SHA for the default branch
-        let head_sha = match gl_forge.get_head_sha(repo, &repo.default_branch).await {
+        let _head_sha = match gl_forge.get_head_sha(repo, &repo.default_branch).await {
             Ok(s)  => s,
             Err(e) => {
                 if verbose {
@@ -1360,12 +1362,12 @@ async fn run_gitlab_token_scan(
         elapsed_s,
         files_saved:       0,
         files_save_failed: 0,
-        rate_limit_allowed: 0,
-        rate_limit_dropped: 0,
-        rate_limit_wait_ms: 0,
         cache_hits: 0,
         cache_misses: 0,
         cache_stats: None,
+        rate_limit_allowed: 0,
+        rate_limit_dropped: 0,
+        rate_limit_wait_ms: 0,
     };
 
     // ── 6. Terminal summary ──────────────────────
@@ -1848,12 +1850,12 @@ async fn run_bitbucket_token_scan(
         elapsed_s,
         files_saved:       0,
         files_save_failed: 0,
-        rate_limit_allowed: 0,
-        rate_limit_dropped: 0,
-        rate_limit_wait_ms: 0,
         cache_hits: 0,
         cache_misses: 0,
         cache_stats: None,
+        rate_limit_allowed: 0,
+        rate_limit_dropped: 0,
+        rate_limit_wait_ms: 0,
     };
 
     // ── 6. Terminal summary ──────────────────────
@@ -2119,7 +2121,7 @@ async fn run_gitea_token_scan(
         }
 
         // Get HEAD SHA for the default branch
-        let head_sha = match gt_forge.get_head_sha(repo, &repo.default_branch).await {
+        let _head_sha = match gt_forge.get_head_sha(repo, &repo.default_branch).await {
             Ok(s)  => s,
             Err(e) => {
                 if verbose {
@@ -2312,12 +2314,12 @@ async fn run_gitea_token_scan(
         elapsed_s,
         files_saved:       0,
         files_save_failed: 0,
-        rate_limit_allowed: 0,
-        rate_limit_dropped: 0,
-        rate_limit_wait_ms: 0,
         cache_hits: 0,
         cache_misses: 0,
         cache_stats: None,
+        rate_limit_allowed: 0,
+        rate_limit_dropped: 0,
+        rate_limit_wait_ms: 0,
     };
 
     // ── 6. Terminal summary ──────────────────────
@@ -2567,7 +2569,7 @@ async fn run_azure_token_scan(
         }
 
         // Get HEAD SHA for the default branch
-        let head_sha = match az_forge.get_head_sha(repo, &repo.default_branch).await {
+        let _head_sha = match az_forge.get_head_sha(repo, &repo.default_branch).await {
             Ok(s)  => s,
             Err(e) => {
                 if verbose {
@@ -2761,12 +2763,12 @@ async fn run_azure_token_scan(
         elapsed_s,
         files_saved:       0,
         files_save_failed: 0,
-        rate_limit_allowed: 0,
-        rate_limit_dropped: 0,
-        rate_limit_wait_ms: 0,
         cache_hits: 0,
         cache_misses: 0,
         cache_stats: None,
+        rate_limit_allowed: 0,
+        rate_limit_dropped: 0,
+        rate_limit_wait_ms: 0,
     };
 
     // ── 6. Terminal summary ──────────────────────
@@ -3048,14 +3050,14 @@ async fn run_dir_scan(
         elapsed_s,
         files_saved: 0,
         files_save_failed: 0,
-        // PERF-004: Rate limit metrics (not applicable for dir mode scanning local files)
-        rate_limit_allowed: 0,
-        rate_limit_dropped: 0,
-        rate_limit_wait_ms: 0,
         // PERF-005: Cache metrics (not applicable for dir mode scanning local files)
         cache_hits: 0,
         cache_misses: 0,
         cache_stats: None,
+        // PERF-004: Rate limit metrics (not applicable for dir mode)
+        rate_limit_allowed: 0,
+        rate_limit_dropped: 0,
+        rate_limit_wait_ms: 0,
     };
 
     if verbose && !args.pipe {
@@ -3194,15 +3196,21 @@ async fn main() {
     tokio::spawn(async move {
         use signal_hook_tokio::Signals;
 
-        let mut signals = match Signals::new(&[signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM]) {
+        let mut signals = match Signals::new([signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM]) {
             Ok(s) => s,
             Err(_) => return,
         };
 
-        while let Some(_signal) = signals.next().await {
-            cleanup_flag_clone.store(true, Ordering::Relaxed);
-            eprintln!("\n  [!] Interrupted. Cleaning up temporary files...");
-            std::process::exit(130); // Exit code for SIGINT (128 + 2)
+        #[allow(clippy::never_loop)]
+        loop {
+            match signals.next().await {
+                Some(_signal) => {
+                    cleanup_flag_clone.store(true, Ordering::Relaxed);
+                    eprintln!("\n  [!] Interrupted. Cleaning up temporary files...");
+                    std::process::exit(130); // Exit code for SIGINT (128 + 2)
+                }
+                None => break,
+            }
         }
     });
 
@@ -3493,7 +3501,7 @@ async fn main() {
         match std::fs::read_to_string(targets_file) {
             Ok(content) => {
                 let mut parsed = Vec::new();
-                for (line_num, line) in content.lines().enumerate() {
+                for line in content.lines() {
                     let line = line.trim();
                     if line.is_empty() || line.starts_with('#') {
                         continue;
@@ -3714,7 +3722,6 @@ async fn main() {
                     Some(url.clone()),
                     cache,
                     false_positive_keywords.clone(),
-                    args.scan_binaries,
                 );
 
                 let rep_arc          = Arc::new(rep.clone());
@@ -3834,14 +3841,14 @@ async fn main() {
                     println!("  ✔  Done\n");
                 }
             }
-            Target::Token { token, repos } => {
+            Target::Token { token: _, repos: _ } => {
                 if verbose {
                     println!("  [{}] Token target: not yet implemented (use --token mode directly)", target_num);
                 }
                 // TODO: Implement token target handling in future iteration
                 continue;
             }
-            Target::Dir { dir } => {
+            Target::Dir { dir: _ } => {
                 if verbose {
                     println!("  [{}] Dir target: not yet implemented (use --dir mode directly)", target_num);
                 }
@@ -3908,7 +3915,7 @@ pub async fn create_forge_client_from_url(
 /// * `Err` - If client creation fails
 pub async fn create_forge_client(
     platform: forge::Platform,
-    base_cfg: HttpConfig,
+    _base_cfg: HttpConfig,
 ) -> anyhow::Result<Box<dyn Forge>> {
     match platform {
         forge::Platform::GitHub => {

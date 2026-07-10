@@ -6,6 +6,7 @@
 //! (GitHub, GitLab, Bitbucket, Gitea, Azure DevOps).
 
 use async_trait::async_trait;
+#[allow(unused_imports)]
 use base64::Engine;
 use std::time::Duration;
 
@@ -164,42 +165,6 @@ pub struct RateLimitInfo {
     pub limit: u32,
 }
 
-/// Authentication token type.
-#[derive(Debug, Clone)]
-pub enum AuthToken {
-    /// Personal Access Token.
-    Personal(String),
-    /// OAuth token.
-    OAuth(String),
-    /// JWT (for service accounts).
-    Jwt(String),
-}
-
-impl AuthToken {
-    /// Get the token value.
-    pub fn value(&self) -> &str {
-        match self {
-            AuthToken::Personal(t) => t,
-            AuthToken::OAuth(t) => t,
-            AuthToken::Jwt(t) => t,
-        }
-    }
-
-    /// Create from a string.
-    pub fn from_str(s: String) -> Self {
-        // Auto-detect token type based on prefix/length
-        if s.starts_with("ghp_") || s.starts_with("gho_") || s.starts_with("ghu_") {
-            AuthToken::Personal(s)
-        } else if s.starts_with("glpat-") {
-            AuthToken::Personal(s)
-        } else if s.contains('.') && s.split('.').count() == 3 {
-            // Likely JWT
-            AuthToken::Jwt(s)
-        } else {
-            AuthToken::OAuth(s)
-        }
-    }
-}
 
 // ════════════════════════════════════════════════
 // FORGE TRAIT
@@ -294,67 +259,97 @@ pub trait Forge: Send + Sync {
 }
 
 // ════════════════════════════════════════════════
-// UTILITY FUNCTIONS
-// ════════════════════════════════════════════════
-
-/// Parse a repository URL into (owner, repo) components.
-///
-/// # Examples
-/// ```
-/// assert_eq!(parse_repo_url("https://github.com/user/repo"), Some(("user".to_string(), "repo".to_string())));
-/// assert_eq!(parse_repo_url("https://gitlab.com/org/project"), Some(("org".to_string(), "project".to_string())));
-/// ```
-pub fn parse_repo_url(url: &str) -> Option<(String, String)> {
-    let url = url.trim_end_matches(".git");
-
-    // Parse URL path
-    let path = url.split("://").nth(1)?.split('/').skip(1).collect::<Vec<_>>();
-
-    if path.len() >= 2 {
-        let owner = path[0].to_string();
-        let repo = path[1].to_string();
-        Some((owner, repo))
-    } else {
-        None
-    }
-}
-
-/// Build API headers for a given platform and token.
-pub fn build_api_headers(platform: Platform, token: &str) -> Vec<(String, String)> {
-    let mut headers = Vec::new();
-
-    match platform {
-        Platform::GitHub => {
-            headers.push(("Authorization".to_string(), format!("token {}", token)));
-            headers.push(("Accept".to_string(), "application/vnd.github+json".to_string()));
-            headers.push(("X-GitHub-Api-Version".to_string(), "2022-11-28".to_string()));
-        }
-        Platform::GitLab => {
-            headers.push(("PRIVATE-TOKEN".to_string(), token.to_string()));
-        }
-        Platform::Bitbucket => {
-            headers.push(("Authorization".to_string(), format!("Bearer {}", token)));
-        }
-        Platform::Gitea => {
-            headers.push(("Authorization".to_string(), format!("token {}", token)));
-        }
-        Platform::AzureDevOps => {
-            // Azure DevOps uses basic auth with PAT as username (empty password)
-            let encoded = base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", token, ""));
-            headers.push(("Authorization".to_string(), format!("Basic {}", encoded)));
-        }
-    }
-
-    headers
-}
-
-// ════════════════════════════════════════════════
 // TESTS
 // ════════════════════════════════════════════════
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Test-only utilities moved here to suppress dead_code warnings
+
+    /// Authentication token type.
+    #[derive(Debug, Clone)]
+    enum AuthToken {
+        /// Personal Access Token.
+        Personal(String),
+        /// OAuth token.
+        OAuth(String),
+        /// JWT (for service accounts).
+        Jwt(String),
+    }
+
+    #[allow(dead_code)]
+    impl AuthToken {
+        /// Get the token value.
+        fn value(&self) -> &str {
+            match self {
+                AuthToken::Personal(t) => t,
+                AuthToken::OAuth(t) => t,
+                AuthToken::Jwt(t) => t,
+            }
+        }
+
+        /// Create from a string.
+        fn from_str(s: String) -> Self {
+            // Auto-detect token type based on prefix/length
+            if s.starts_with("ghp_") || s.starts_with("gho_") || s.starts_with("ghu_") {
+                AuthToken::Personal(s)
+            } else if s.starts_with("glpat-") {
+                AuthToken::Personal(s)
+            } else if s.contains('.') && s.split('.').count() == 3 {
+                // Likely JWT
+                AuthToken::Jwt(s)
+            } else {
+                AuthToken::OAuth(s)
+            }
+        }
+    }
+
+    /// Parse a repository URL into (owner, repo) components.
+    fn parse_repo_url(url: &str) -> Option<(String, String)> {
+        let url = url.trim_end_matches(".git");
+
+        // Parse URL path
+        let path = url.split("://").nth(1)?.split('/').skip(1).collect::<Vec<_>>();
+
+        if path.len() >= 2 {
+            let owner = path[0].to_string();
+            let repo = path[1].to_string();
+            Some((owner, repo))
+        } else {
+            None
+        }
+    }
+
+    /// Build API headers for a given platform and token.
+    fn build_api_headers(platform: Platform, token: &str) -> Vec<(String, String)> {
+        let mut headers = Vec::new();
+
+        match platform {
+            Platform::GitHub => {
+                headers.push(("Authorization".to_string(), format!("token {}", token)));
+                headers.push(("Accept".to_string(), "application/vnd.github+json".to_string()));
+                headers.push(("X-GitHub-Api-Version".to_string(), "2022-11-28".to_string()));
+            }
+            Platform::GitLab => {
+                headers.push(("PRIVATE-TOKEN".to_string(), token.to_string()));
+            }
+            Platform::Bitbucket => {
+                headers.push(("Authorization".to_string(), format!("Bearer {}", token)));
+            }
+            Platform::Gitea => {
+                headers.push(("Authorization".to_string(), format!("token {}", token)));
+            }
+            Platform::AzureDevOps => {
+                // Azure DevOps uses basic auth with PAT as username (empty password)
+                let encoded = base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", token, ""));
+                headers.push(("Authorization".to_string(), format!("Basic {}", encoded)));
+            }
+        }
+
+        headers
+    }
 
     #[test]
     fn test_platform_from_url_github() {
@@ -487,7 +482,7 @@ mod tests {
         let headers = build_api_headers(Platform::GitHub, "ghp_test");
         assert!(headers.iter().any(|(k, v)| k == "Authorization" && v == "token ghp_test"));
         assert!(headers.iter().any(|(k, v)| k == "Accept" && v == "application/vnd.github+json"));
-        assert!(headers.iter().any(|(k, v)| k == "X-GitHub-Api-Version"));
+        assert!(headers.iter().any(|(k, _v)| k == "X-GitHub-Api-Version"));
     }
 
     #[test]

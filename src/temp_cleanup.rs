@@ -42,6 +42,7 @@ pub async fn init_global_cleanup() -> Arc<AtomicBool> {
 #[derive(Debug, Clone)]
 pub struct TempDirGuard {
     path: Option<PathBuf>,
+    #[allow(dead_code)]
     registered: bool,
 }
 
@@ -57,12 +58,14 @@ impl TempDirGuard {
 
     /// Register this guard with the global cleanup system.
     /// After registration, the directory will be cleaned up on signals.
+    #[allow(dead_code)]
     pub fn register(&mut self) {
         self.registered = true;
     }
 
     /// Manually release the guard without cleanup.
     /// This is useful when you want to keep the temp directory.
+    #[allow(dead_code)]
     pub fn release(mut self) -> PathBuf {
         self.path.take().unwrap_or_default()
     }
@@ -73,6 +76,7 @@ impl TempDirGuard {
     }
 
     /// Check if this guard has a valid path.
+    #[allow(dead_code)]
     pub fn is_valid(&self) -> bool {
         self.path.as_ref().map(|p| p.exists()).unwrap_or(false)
     }
@@ -97,6 +101,7 @@ pub struct TempFileGuard {
 
 impl TempFileGuard {
     /// Create a new guard for the given file path.
+    #[allow(dead_code)]
     pub fn new(path: PathBuf) -> Self {
         Self {
             path: Some(path),
@@ -104,11 +109,13 @@ impl TempFileGuard {
     }
 
     /// Get the path being guarded.
+    #[allow(dead_code)]
     pub fn path(&self) -> Option<&Path> {
         self.path.as_deref()
     }
 
     /// Release the guard without cleanup.
+    #[allow(dead_code)]
     pub fn release(mut self) -> PathBuf {
         self.path.take().unwrap_or_default()
     }
@@ -161,6 +168,7 @@ pub mod atomic {
     ///
     /// # Errors
     /// Returns an error if the write or rename fails.
+    #[allow(dead_code)]
     pub fn write_string_atomically<P: AsRef<Path>>(
         path: P,
         data: &str,

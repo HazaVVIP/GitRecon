@@ -150,11 +150,6 @@ impl MapResult {
         result
     }
 
-    /// Check if a SHA1 corresponds to a deleted file (not in current index)
-    pub fn is_deleted_blob(&self, sha1: &str) -> bool {
-        !self.index_entries.iter().any(|e| &e.sha1 == sha1)
-            && self.graph_sha1_to_file.contains_key(sha1)
-    }
 }
 
 lazy_static! {

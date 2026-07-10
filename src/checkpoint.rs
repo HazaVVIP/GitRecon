@@ -112,6 +112,7 @@ pub struct Checkpoint {
 
 impl Checkpoint {
     /// Create a new checkpoint with the current version
+    #[allow(dead_code)]
     pub fn new(
         target: String,
         phase: CheckpointPhase,
@@ -214,6 +215,7 @@ pub struct AdaptiveConcurrencyState {
 /// Compute config fingerprint from key arguments
 ///
 /// This ensures we don't resume with mismatched configuration.
+#[allow(dead_code)]
 pub fn compute_config_fingerprint(
     fuzz: bool,
     min_confidence: u32,
@@ -467,6 +469,7 @@ pub fn load_checkpoint(target: &str) -> Result<Option<Checkpoint>> {
 }
 
 /// Delete checkpoint for a target
+#[allow(dead_code)]
 pub fn delete_checkpoint(target: &str) -> Result<()> {
     let path = checkpoint_path(target);
 
@@ -530,14 +533,10 @@ pub fn cleanup_old_checkpoints() -> Result<usize> {
         }
 
         if let Ok(modified) = metadata.modified() {
-            let age_secs = now
-                .checked_sub(modified.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs())
-                .unwrap_or(0);
+            let age_secs = now.saturating_sub(modified.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs());
 
-            if age_secs > MAX_CHECKPOINT_AGE_SECS {
-                if fs::remove_file(&path).is_ok() {
-                    cleaned += 1;
-                }
+            if age_secs > MAX_CHECKPOINT_AGE_SECS && fs::remove_file(&path).is_ok() {
+                cleaned += 1;
             }
         }
     }
@@ -546,6 +545,7 @@ pub fn cleanup_old_checkpoints() -> Result<usize> {
 }
 
 /// Verify config fingerprint matches
+#[allow(dead_code)]
 pub fn verify_config_fingerprint(
     checkpoint: &Checkpoint,
     fuzz: bool,
@@ -633,6 +633,7 @@ pub fn find_latest_checkpoints(limit: usize) -> Result<Vec<Checkpoint>> {
 ///
 /// Returns a list of target identifiers that have checkpoints,
 /// sorted by last update time (newest first).
+#[allow(dead_code)]
 pub fn list_checkpoint_targets() -> Result<Vec<String>> {
     let checkpoints = find_latest_checkpoints(100)?;
     Ok(checkpoints.into_iter().map(|cp| cp.target).collect())

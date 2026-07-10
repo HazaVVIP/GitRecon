@@ -107,7 +107,6 @@ pub fn validate_github_token(token: &str) -> Result<()> {
     // GitHub PATs typically start with specific prefixes
     // ghp_, gho_, ghu_, ghs_, ghr_ (as of 2021+)
     // We're lenient here to support various token types
-    let lower = trimmed.to_lowercase();
 
     // Check for suspicious characters (prevent injection)
     if trimmed.contains(char::is_whitespace) {
@@ -158,7 +157,6 @@ pub fn validate_gitlab_token(token: &str) -> Result<()> {
 
     // GitLab PATs typically start with 'glpat-' prefix
     // but we're lenient to support various token types (e.g., deploy tokens, feed tokens)
-    let lower = trimmed.to_lowercase();
 
     // Check for suspicious characters (prevent injection)
     if trimmed.contains(char::is_whitespace) {
@@ -351,34 +349,6 @@ pub fn validate_custom_header(header_str: &str) -> Result<(String, String)> {
     }
 
     Ok((name.to_string(), value.to_string()))
-}
-
-/// Validates a numeric argument within bounds
-///
-/// # Arguments
-/// * `value` - The string value to parse
-/// * `min` - Minimum allowed value
-/// * `max` - Maximum allowed value
-/// * `name` - Name of the argument for error messages
-///
-/// # Returns
-/// * `Ok(u64)` - Parsed and validated value
-/// * `Err(String)` - Error message if validation fails
-pub fn validate_numeric_arg(value: &str, min: u64, max: u64, name: &str) -> Result<u64> {
-    let trimmed = value.trim();
-
-    let parsed = trimmed.parse::<u64>()
-        .map_err(|_| anyhow!("{} must be a valid number, got '{}'", name, trimmed))?;
-
-    if parsed < min {
-        return Err(anyhow!("{} must be at least {}, got {}", name, min, parsed));
-    }
-
-    if parsed > max {
-        return Err(anyhow!("{} must be at most {}, got {}", name, max, parsed));
-    }
-
-    Ok(parsed)
 }
 
 // ════════════════════════════════════════════════
@@ -773,21 +743,6 @@ mod tests {
         assert!(validate_custom_header(":ValueOnly").is_err());
         assert!(validate_custom_header("Name:").is_ok()); // Empty value is allowed
         assert!(validate_custom_header("Host:evil.com").is_err());
-    }
-
-    #[test]
-    fn test_validate_numeric_arg_valid() {
-        assert_eq!(validate_numeric_arg("10", 1, 100, "test").unwrap(), 10);
-        assert_eq!(validate_numeric_arg("1", 1, 100, "test").unwrap(), 1);
-        assert_eq!(validate_numeric_arg("100", 1, 100, "test").unwrap(), 100);
-    }
-
-    #[test]
-    fn test_validate_numeric_arg_invalid() {
-        assert!(validate_numeric_arg("abc", 1, 100, "test").is_err());
-        assert!(validate_numeric_arg("0", 1, 100, "test").is_err());
-        assert!(validate_numeric_arg("101", 1, 100, "test").is_err());
-        assert!(validate_numeric_arg("-5", 1, 100, "test").is_err());
     }
 
     // ════════════════════════════════════════════════

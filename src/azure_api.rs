@@ -22,7 +22,6 @@ pub struct AzureForgeClient {
     client: HttpClient,
     api_base: String,
     rate_limit_remaining: std::sync::Arc<std::sync::Mutex<Option<(u32, Instant)>>>,
-    user_id: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     org_url: std::sync::Arc<std::sync::Mutex<Option<String>>>,
 }
 
@@ -33,7 +32,6 @@ impl AzureForgeClient {
             client,
             api_base,
             rate_limit_remaining: std::sync::Arc::new(std::sync::Mutex::new(None)),
-            user_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
             org_url: std::sync::Arc::new(std::sync::Mutex::new(None)),
         }
     }
@@ -95,31 +93,6 @@ impl AzureForgeClient {
             .join("/")
     }
 
-    /// Get the authenticated user's ID and store org URL.
-    async fn get_user_info(&self, org: Option<&str>) -> anyhow::Result<(String, String)> {
-        // For Azure DevOps, we need an organization to make API calls
-        // If no org is specified, we'll need to enumerate the user's accessible projects
-        // Azure DevOps API structure: https://dev.azure.com/{org}/_apis/git/repositories
-        // Or for self-hosted: https://{server}/{collection}/{project}/_apis/git/repositories
-
-        // Try to get user info from the API
-        // For cloud, we can use: https://dev.azure.com/_apis/profile/profiles/me
-        let url = format!("{}/_apis/profile/profiles/me", self.api_base);
-        let resp = self.get_with_rate_limit(&url).await?;
-
-        if resp.status == 200 {
-            let json: serde_json::Value = serde_json::from_slice(&resp.body)?;
-            let id = json["id"].as_str().unwrap_or("").to_string();
-            let display_name = json["displayName"].as_str().unwrap_or("").to_string();
-            *self.user_id.lock().unwrap() = Some(id.clone());
-            return Ok((id, display_name));
-        }
-
-        // Fallback: use the PAT's ID as user identifier
-        // Azure DevOps PATs contain user identity info
-        Ok(("azure-user".to_string(), "Azure DevOps User".to_string()))
-    }
-
     /// Detect if the API base URL is for Azure DevOps Server (on-premise).
     fn is_on_premise(&self) -> bool {
         !self.api_base.contains("dev.azure.com") && !self.api_base.contains("visualstudio.com")
@@ -128,7 +101,7 @@ impl AzureForgeClient {
 
 #[async_trait]
 impl Forge for AzureForgeClient {
-    async fn authenticate(&mut self, token: &str) -> anyhow::Result<()> {
+    async fn authenticate(&mut self, _token: &str) -> anyhow::Result<()> {
         // Validate token by calling the profile API
         let url = format!("{}/_apis/profile/profiles/me", self.api_base);
         let resp = self.get_with_rate_limit(&url).await?;
@@ -251,7 +224,7 @@ impl Forge for AzureForgeClient {
         Ok(repos)
     }
 
-    async fn get_tree(&self, repo: &Repository, branch: &str) -> anyhow::Result<Vec<TreeEntry>> {
+    async fn get_tree(&self, repo: &Repository, _branch: &str) -> anyhow::Result<Vec<TreeEntry>> {
         // Azure DevOps Git Items API: GET /repositories/{repoId}/items
         // This returns the root directory items, we need to traverse recursively
         let repo_id = &repo.full_name; // In our implementation, full_name holds the repo ID
@@ -370,7 +343,7 @@ impl AzureForgeClient {
     /// List all repositories in a specific project (for on-premise/default API base).
     async fn list_project_repos(&self, project: &str) -> anyhow::Result<Vec<Repository>> {
         let mut repos = Vec::new();
-        let encoded_project = Self::encode_path(project);
+        let _encoded_project = Self::encode_path(project);
         let url = format!(
             "{}/_apis/git/repositories?api-version=7.0",
             self.api_base
@@ -496,7 +469,7 @@ pub fn build_azure_client(mut base_cfg: HttpConfig, token: &str, azure_url: Opti
 // API HELPERS
 // ════════════════════════════════════════════════
 
-fn parse_repo(v: &serde_json::Value, project: &str) -> Option<AzRepo> {
+fn parse_repo(v: &serde_json::Value, _project: &str) -> Option<AzRepo> {
     let id = v["id"].as_str()?.to_string();
     let name = v["name"].as_str()?.to_string();
     let private = match v.get("project") {
@@ -525,7 +498,7 @@ fn parse_repo(v: &serde_json::Value, project: &str) -> Option<AzRepo> {
     })
 }
 
-fn parse_tree_entry(v: &serde_json::Value, base_path: &str) -> Option<AzTreeEntry> {
+fn parse_tree_entry(v: &serde_json::Value, _base_path: &str) -> Option<AzTreeEntry> {
     let path = v["path"].as_str()?.to_string();
     let obj_type = match v.get("gitObjectType") {
         Some(t) => t.as_str().unwrap_or("blob").to_string(),

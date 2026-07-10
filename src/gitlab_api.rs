@@ -72,26 +72,6 @@ impl GitLabForgeClient {
         Ok(resp)
     }
 
-    /// Get the authenticated user's ID.
-    async fn get_user_id(&self) -> anyhow::Result<u64> {
-        if let Some(id) = *self.user_id.lock().unwrap() {
-            return Ok(id);
-        }
-
-        let url = format!("{}/user", self.api_base);
-        let resp = self.get_with_rate_limit(&url).await?;
-
-        if !resp.ok() {
-            anyhow::bail!("GET /user returned HTTP {}", resp.status);
-        }
-
-        let json: serde_json::Value = serde_json::from_slice(&resp.body)?;
-        let id = json["id"].as_u64().ok_or_else(|| anyhow::anyhow!("Missing user id"))?;
-
-        *self.user_id.lock().unwrap() = Some(id);
-        Ok(id)
-    }
-
     /// URL-encode a file path for GitLab API.
     fn encode_path(path: &str) -> String {
         url::form_urlencoded::byte_serialize(path.as_bytes())
@@ -101,7 +81,7 @@ impl GitLabForgeClient {
 
 #[async_trait]
 impl Forge for GitLabForgeClient {
-    async fn authenticate(&mut self, token: &str) -> anyhow::Result<()> {
+    async fn authenticate(&mut self, _token: &str) -> anyhow::Result<()> {
         // Validate token by calling /user
         let url = format!("{}/user", self.api_base);
         let resp = self.get_with_rate_limit(&url).await?;

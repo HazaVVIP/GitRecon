@@ -100,6 +100,7 @@ impl ObjectCache {
     }
 
     /// Check if an entry exists in the cache and is not expired
+    #[allow(dead_code)]
     pub fn contains(&self, sha1: &str) -> bool {
         if self.no_cache {
             return false;
@@ -218,6 +219,7 @@ impl ObjectCache {
     }
 
     /// Clean up expired entries (TTL-based cleanup)
+    #[allow(dead_code)]
     pub fn cleanup_expired(&self) -> Result<usize> {
         let conn = self.conn.lock()
             .map_err(|e| anyhow::anyhow!("Failed to acquire lock for cleanup: {}", e))?;
@@ -265,6 +267,7 @@ impl ObjectCache {
     }
 
     /// Clear all cache entries
+    #[allow(dead_code)]
     pub fn clear(&self) -> Result<()> {
         let conn = self.conn.lock()
             .map_err(|e| anyhow::anyhow!("Failed to acquire lock for clear: {}", e))?;
@@ -313,6 +316,7 @@ impl CacheStats {
     }
 
     /// Calculate hit rate from hits and total requests
+    #[allow(dead_code)]
     pub fn hit_rate(hits: u64, total: u64) -> f64 {
         if total == 0 {
             0.0

@@ -78,20 +78,17 @@ pub fn extract_sqlite_strings_enhanced(data: &[u8]) -> Vec<String> {
 
     // Query all tables and their string columns
     let mut table_names = Vec::new();
-    let mut query_tables = match conn.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'") {
-        Ok(mut stmt) => {
-            let mut rows = stmt.query([]).unwrap();
-            while let Ok(Some(row)) = rows.next() {
-                if let Ok(name) = row.get::<_, String>(0) {
-                    table_names.push(name);
-                }
+    if let Ok(mut stmt) = conn.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'") {
+        let mut rows = stmt.query([]).unwrap();
+        while let Ok(Some(row)) = rows.next() {
+            if let Ok(name) = row.get::<_, String>(0) {
+                table_names.push(name);
             }
         }
-        Err(_) => {
-            // Fallback to basic extraction
-            return extract_printable_strings(data, 4);
-        }
-    };
+    } else {
+        // Fallback to basic extraction
+        return extract_printable_strings(data, 4);
+    }
 
     // For each table, extract string values
     for table in &table_names {
@@ -177,68 +174,6 @@ fn restore_sqlite_from_bytes(_conn: &rusqlite::Connection, _data: &[u8]) -> Resu
     Err(rusqlite::Error::InvalidQuery)
 }
 
-/// Extract strings from SQLite database (fallback method)
-///
-/// This is a simplified implementation that extracts readable strings
-/// from SQLite database files without parsing the full structure.
-pub fn extract_sqlite_strings(data: &[u8]) -> Vec<String> {
-    let mut strings = Vec::new();
-    let mut current_string = String::new();
-    let min_string_length = 4; // Only extract strings >= 4 characters
-
-    for &byte in data {
-        if byte.is_ascii_graphic() || byte == b' ' {
-            current_string.push(byte as char);
-        } else {
-            if current_string.len() >= min_string_length {
-                // Filter out common SQLite metadata
-                let s = current_string.trim().to_string();
-                if !is_sqlite_metadata(&s) {
-                    strings.push(s);
-                }
-            }
-            current_string.clear();
-        }
-    }
-
-    // Handle last string
-    if current_string.len() >= min_string_length {
-        let s = current_string.trim().to_string();
-        if !is_sqlite_metadata(&s) {
-            strings.push(s);
-        }
-    }
-
-    strings
-}
-
-/// Check if string is SQLite metadata (to filter noise)
-fn is_sqlite_metadata(s: &str) -> bool {
-    let meta_patterns = [
-        "SQLiteFormat",
-        "CREATE TABLE",
-        "CREATE INDEX",
-        "INSERT INTO",
-        "sqlite_",
-        "table:",
-        "index:",
-        "rowid:",
-        "PRIMARYKEY",
-        "INTEGER",
-        "TEXT",
-        "REAL",
-        "BLOB",
-    ];
-
-    for pattern in &meta_patterns {
-        if s.contains(pattern) {
-            return true;
-        }
-    }
-
-    false
-}
-
 /// Maximum total extraction size for ZIP/JAR archives (100MB)
 const MAX_EXTRACTION_SIZE: usize = 100 * 1024 * 1024;
 
@@ -301,40 +236,6 @@ pub fn extract_zip_files_enhanced(data: &[u8]) -> Vec<(String, Vec<u8>)> {
     files
 }
 
-/// Extract files from ZIP/JAR archive (legacy compatibility)
-pub fn extract_zip_files(data: &[u8], max_size: usize) -> Vec<(String, Vec<u8>)> {
-    let mut files = Vec::new();
-
-    let cursor = Cursor::new(data);
-    if let Ok(mut archive) = zip::read::ZipArchive::new(cursor) {
-        for i in 0..archive.len().min(MAX_ZIP_FILES) {
-            if let Ok(mut file) = archive.by_index(i) {
-                let path = file.name().to_string();
-
-                // Skip directories and very large files
-                if file.is_dir() {
-                    continue;
-                }
-                if file.size() > max_size as u64 {
-                    continue;
-                }
-
-                let mut buffer = Vec::new();
-                if file.read_to_end(&mut buffer).is_ok() {
-                    files.push((path, buffer));
-
-                    // Limit total files to avoid memory exhaustion
-                    if files.len() >= 100 {
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    files
-}
-
 /// Scan binary blob for secrets with enhanced detection
 ///
 /// Returns findings (pattern_id, match_string, context, source)
@@ -381,7 +282,7 @@ pub fn scan_binary_blob(
                     }
                     _ => {
                         // Scan other files as text or extract strings
-                        if let Ok(text) = std::str::from_utf8(&inner_data) {
+                        if std::str::from_utf8(&inner_data).is_ok() {
                             // It's text - scan it directly
                             for s in extract_printable_strings(&inner_data, 4) {
                                 if let Some((pattern_id, match_str)) = check_string_for_secrets(&s) {
@@ -427,59 +328,6 @@ pub fn scan_binary_blob(
                     findings.push((pattern_id, match_str, format!("Binary: {}", filename), "binary".to_string()));
                 }
             }
-        }
-    }
-
-    findings
-}
-
-/// Scan binary blob for secrets (legacy compatibility)
-///
-/// Returns findings (pattern_id, match_string, context)
-pub fn scan_binary_blob_legacy(
-    data: &[u8],
-    filename: &str,
-    max_blob_size: usize,
-) -> Vec<(String, String, String)> {
-    let mut findings = Vec::new();
-
-    // Skip if too large
-    if data.len() > max_blob_size {
-        return findings;
-    }
-
-    let bin_type = detect_binary_type(data);
-
-    match bin_type {
-        BinaryType::SQLite => {
-            // Extract strings and scan for secret patterns
-            let strings = extract_sqlite_strings(data);
-            for s in strings {
-                if let Some((pattern_id, match_str)) = check_string_for_secrets(&s) {
-                    findings.push((pattern_id, match_str, format!("SQLite: {}", filename)));
-                }
-            }
-        }
-        BinaryType::ZipJar => {
-            // Extract and scan inner files
-            let files = extract_zip_files(data, max_blob_size);
-            for (inner_path, inner_data) in files {
-                // Recursively scan extracted files
-                let inner_findings = scan_binary_blob_legacy(&inner_data, &format!("{}/{}", filename, inner_path), max_blob_size);
-                findings.extend(inner_findings);
-            }
-        }
-        BinaryType::Unknown => {
-            // Try to extract printable strings anyway
-            let strings = extract_printable_strings(data, 4);
-            for s in strings {
-                if let Some((pattern_id, match_str)) = check_string_for_secrets(&s) {
-                    findings.push((pattern_id, match_str, format!("Binary: {}", filename)));
-                }
-            }
-        }
-        _ => {
-            // Other binary types not handled yet
         }
     }
 
@@ -575,25 +423,6 @@ fn extract_elf_strings(data: &[u8]) -> Vec<String> {
     extract_printable_strings(data, 4)
 }
 
-/// Extract printable strings from binary data (legacy compatibility)
-fn extract_printable_strings_legacy(data: &[u8], min_length: usize) -> Vec<String> {
-    let mut strings = Vec::new();
-    let mut current_string = String::new();
-
-    for &byte in data {
-        if byte.is_ascii_graphic() || byte == b' ' {
-            current_string.push(byte as char);
-        } else {
-            if current_string.len() >= min_length {
-                strings.push(current_string.clone());
-            }
-            current_string.clear();
-        }
-    }
-
-    strings
-}
-
 /// Check a string for common secret patterns (simplified)
 fn check_string_for_secrets(s: &str) -> Option<(String, String)> {
     use regex::Regex;
@@ -650,25 +479,11 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_sqlite_strings() {
-        let data = b"SQLite format 3\x00CREATE TABLE users (id INTEGER)\x00password123\x00";
-        let strings = extract_sqlite_strings(data);
-        assert!(strings.contains(&"password123".to_string()));
-    }
-
-    #[test]
     fn test_extract_printable_strings() {
         let data = b"test\x00password123\x00\x00AKIATEST123456789\x00";
         let strings = extract_printable_strings(data, 4);
         assert!(strings.iter().any(|s| s.contains("password123")));
         assert!(strings.iter().any(|s| s.contains("AKIA")));
-    }
-
-    #[test]
-    fn test_filter_sqlite_metadata() {
-        assert!(is_sqlite_metadata("CREATE TABLE users"));
-        assert!(is_sqlite_metadata("sqlite_master"));
-        assert!(!is_sqlite_metadata("my_secret_token"));
     }
 
     #[test]
