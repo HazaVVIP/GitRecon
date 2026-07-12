@@ -999,6 +999,7 @@ pub struct Streamer {
     live:             bool,   // O-1
     adaptive:         bool,   // P-1
     // R-1: Checkpoint support
+    resume_from_checkpoint: bool, // Apply checkpoint resume only when --resume is enabled
     checkpoint_interval: usize,  // Save checkpoint every N blobs processed
     target_url:        Option<String>,  // Target URL for checkpoint filename
     // PERF-005: Cache layer
@@ -1027,6 +1028,7 @@ impl Streamer {
         entropy_threshold: f64,
         live:             bool,
         adaptive:         bool,
+        resume_from_checkpoint: bool,
         checkpoint_interval: usize,
         target_url:        Option<String>,
         cache:            Option<Arc<crate::cache::ObjectCache>>,
@@ -1044,6 +1046,7 @@ impl Streamer {
             entropy_threshold,
             live,
             adaptive,
+            resume_from_checkpoint,
             checkpoint_interval,
             target_url,
             cache,
@@ -1125,23 +1128,25 @@ impl Streamer {
         let mut processed_sha1s_set: HashSet<String> = HashSet::new();
         let target_for_checkpoint = self.target_url.as_ref().unwrap_or(&git_url);
 
-        // Load checkpoint if exists (resume mode)
-        if let Ok(Some(loaded)) = checkpoint::load_checkpoint(target_for_checkpoint) {
-            if self.verbose {
-                let ts = chrono::DateTime::<chrono::Utc>::from_timestamp(loaded.updated_at as i64, 0)
-                    .map(|dt| dt.to_rfc3339())
-                    .unwrap_or_else(|| "unknown".to_string());
-                println!("  [R] Found checkpoint from {}", ts);
-            }
+        // Load checkpoint only when resume mode is explicitly enabled
+        if self.resume_from_checkpoint {
+            if let Ok(Some(loaded)) = checkpoint::load_checkpoint(target_for_checkpoint) {
+                if self.verbose {
+                    let ts = chrono::DateTime::<chrono::Utc>::from_timestamp(loaded.updated_at as i64, 0)
+                        .map(|dt| dt.to_rfc3339())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    println!("  [R] Found checkpoint from {}", ts);
+                }
 
-            // Verify we're in STREAM phase
-            if matches!(loaded.phase, CheckpointPhase::Stream) {
-                if let Some(ref stream_prog) = loaded.stream_progress {
-                    processed_sha1s_set = stream_prog.processed_sha1s.clone().into_iter().collect();
-                    checkpoint = Some(loaded.clone());
+                // Verify we're in STREAM phase
+                if matches!(loaded.phase, CheckpointPhase::Stream) {
+                    if let Some(ref stream_prog) = loaded.stream_progress {
+                        processed_sha1s_set = stream_prog.processed_sha1s.clone().into_iter().collect();
+                        checkpoint = Some(loaded.clone());
 
-                    if self.verbose {
-                        println!("  [R] Resuming from checkpoint: {} SHA1s already processed", processed_sha1s_set.len());
+                        if self.verbose {
+                            println!("  [R] Resuming from checkpoint: {} SHA1s already processed", processed_sha1s_set.len());
+                        }
                     }
                 }
             }
