@@ -158,11 +158,11 @@ struct Cli {
     proxy: Option<String>,
 
     /// Timeout request dalam detik (default: 10)
-    #[arg(long, default_value = "10", value_name = "SEC")]
+    #[arg(long, default_value = "10", value_name = "SEC", value_parser = clap::value_parser!(u64).range(1..=3600))]
     timeout: u64,
 
     /// Jumlah retry (default: 3)
-    #[arg(long, default_value = "3", value_name = "N")]
+    #[arg(long, default_value = "3", value_name = "N", value_parser = clap::value_parser!(u32).range(0..=100))]
     retries: u32,
 
     /// Delay antar request dalam detik (default: 0)
@@ -186,7 +186,9 @@ struct Cli {
     fuzz: bool,
 
     /// Worker tasks untuk streaming (default: 50)
-    #[arg(short = 'w', long = "workers", default_value = "50", value_name = "N")]
+    // Sprint 4 (S4.1): `--workers 0` used to silent-hang because
+    // futures::stream::buffer_unordered(0) never polls. Enforce 1..=1000.
+    #[arg(short = 'w', long = "workers", default_value = "50", value_name = "N", value_parser = clap::value_parser!(usize).range(1..=1000))]
     workers: usize,
 
     /// Batas memori untuk streaming (default: 256MB)
@@ -232,12 +234,14 @@ struct Cli {
     patterns_help: bool,
 
     // DX-2: --max-blob-size
-    #[arg(long = "max-blob-size", default_value = "4", value_name = "MB")]
+    // Sprint 4 (S4.1): reject 0 (would make every blob "too big").
+    #[arg(long = "max-blob-size", default_value = "4", value_name = "MB", value_parser = clap::value_parser!(usize).range(1..=10_240))]
     max_blob_size: usize,
 
     // Sprint 1: bound the commit-graph traversal depth (previously hardcoded to 100 in mapper.rs).
     // Deeper history means more historical blobs discovered — at the cost of extra HTTP fetches.
-    #[arg(long = "max-history", default_value = "500", value_name = "COMMITS")]
+    // Sprint 4 (S4.1): 0 means unlimited (documented behaviour in Mapper::with_max_history).
+    #[arg(long = "max-history", default_value = "500", value_name = "COMMITS", value_parser = clap::value_parser!(usize).range(0..=1_000_000))]
     max_history: usize,
 
     // DX-3: --entropy-threshold
@@ -252,7 +256,7 @@ struct Cli {
     #[arg(long = "no-adaptive-timeout")]
     no_adaptive_timeout: bool,
 
-    #[arg(long = "max-timeout", default_value = "60", value_name = "SEC")]
+    #[arg(long = "max-timeout", default_value = "60", value_name = "SEC", value_parser = clap::value_parser!(u64).range(1..=3600))]
     max_timeout: u64,
 
     #[arg(long = "http2")]
@@ -314,7 +318,7 @@ struct Cli {
     #[arg(long = "targets", value_name = "FILE")]
     targets: Option<String>,
 
-    #[arg(long = "parallel-targets", default_value = "1", value_name = "N")]
+    #[arg(long = "parallel-targets", default_value = "1", value_name = "N", value_parser = clap::value_parser!(usize).range(1..=64))]
     parallel_targets: usize,
 
     // A-6: pipe mode
@@ -328,7 +332,7 @@ struct Cli {
     #[arg(long = "checkpoint-dir", value_name = "DIR")]
     checkpoint_dir: Option<String>,
 
-    #[arg(long = "checkpoint-interval", default_value = "1000", value_name = "N")]
+    #[arg(long = "checkpoint-interval", default_value = "1000", value_name = "N", value_parser = clap::value_parser!(usize).range(1..=1_000_000))]
     checkpoint_interval: usize,
 
     // S-3: binary file scanning
@@ -3348,14 +3352,23 @@ async fn main() {
     let verbose = !quiet;
     let rep     = Reporter::new(args.no_color, &theme);
 
-    // SEC-001: Validate output path
-    let _validated_output = match validation::validate_output_path(&args.output) {
-        Ok(p) => p,
+    // SEC-001: Validate output path — reject empty, non-directory, and system paths
+    // (Sprint 4 S4.2: rejects /etc, /usr, /var, /root, /boot, /sys, /proc, /dev on
+    // Linux; C:\Windows, C:\Program Files, C:\ProgramData on Windows).
+    // We overwrite args.output with the canonical form so every downstream
+    // `PathBuf::from(&args.output)` and `format!(".../{}...", args.output)` uses the
+    // resolved absolute path — previously the ".../" concat could silently escape a
+    // symlinked output_dir back into a system location.
+    let mut args = args;
+    match validation::validate_output_path(&args.output) {
+        Ok(canonical) => {
+            args.output = canonical;
+        }
         Err(e) => {
             eprintln!("  ✘  Invalid output path: {}", e);
             std::process::exit(1);
         }
-    };
+    }
 
     // R-1: Checkpoint & Resume - cleanup old checkpoints on startup
     if verbose {

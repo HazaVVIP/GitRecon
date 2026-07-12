@@ -461,9 +461,13 @@ pub async fn get_head_sha(
 
 /// Retrieve all file-tree entries for a commit, recursively.
 ///
-/// Uses `GET /repos/{owner}/{repo}/git/trees/{sha}?recursive=1`.
-/// When the response is `truncated: true` the partial tree is returned as-is;
-/// large monorepos will still be partially scanned.
+/// Uses `GET /repos/{owner}/{repo}/git/trees/{sha}?recursive=1` first. When GitHub
+/// flags the response `truncated: true` (over 100k entries OR over 7 MB response),
+/// Sprint 4 (S4.5) falls back to per-subtree traversal (`git/trees/<sha>` without
+/// `?recursive=1`) so a monorepo like linux.git is scanned completely instead of
+/// silently missing everything past the truncation point.
+///
+/// Returns entries prefixed with their full path relative to the repo root.
 pub async fn get_tree(
     client: &HttpClient,
     owner:  &str,
@@ -476,7 +480,90 @@ pub async fn get_tree(
         anyhow::bail!("GET tree {} returned HTTP {}", crate::validation::redact_url(&url), resp.status);
     }
     let json: serde_json::Value = serde_json::from_slice(&resp.body)?;
-    Ok(parse_tree_entries(&json))
+
+    // Fast path — GitHub returned the whole tree in one shot.
+    if !json["truncated"].as_bool().unwrap_or(false) {
+        return Ok(parse_tree_entries(&json));
+    }
+
+    log::warn!(
+        "GitHub tree for {}/{}@{} truncated at ~100k entries or 7 MB — falling back \
+         to per-subtree traversal (may take several API calls)",
+        owner, repo, &sha[..sha.len().min(8)],
+    );
+    eprintln!(
+        "  [!] Tree truncated at API layer; recursing subtree-by-subtree for {}/{}",
+        owner, repo,
+    );
+
+    let seed = parse_tree_entries(&json);
+    walk_tree_recursive(client, owner, repo, seed).await
+}
+
+/// Sprint 4 (S4.5) fallback: walk `truncated=true` trees by fetching each subtree
+/// individually (`git/trees/<sha>` without `recursive=1`) and stitching results.
+///
+/// We start from whatever the initial `recursive=1` call returned (which may itself
+/// be partial) and expand every `tree`-type entry we haven't already visited. That
+/// converges to the full tree because a truncated response still returns entries
+/// with valid subtree SHAs — we just fetch each of them on the side.
+///
+/// This is `O(number of subtrees)` API calls. Rate limiting is handled by the
+/// caller's `HttpClient`.
+async fn walk_tree_recursive(
+    client: &HttpClient,
+    owner:  &str,
+    repo:   &str,
+    seed:   Vec<GhTreeEntry>,
+) -> anyhow::Result<Vec<GhTreeEntry>> {
+    use std::collections::HashSet;
+
+    let mut all: Vec<GhTreeEntry> = Vec::new();
+    let mut seen_subtree_sha: HashSet<String> = HashSet::new();
+    // (subtree_sha, path_prefix)
+    let mut queue: Vec<(String, String)> = Vec::new();
+
+    for entry in seed {
+        if entry.obj_type == "tree" {
+            if seen_subtree_sha.insert(entry.sha.clone()) {
+                queue.push((entry.sha.clone(), entry.path.clone()));
+            }
+            all.push(entry);
+        } else {
+            all.push(entry);
+        }
+    }
+
+    while let Some((subtree_sha, path_prefix)) = queue.pop() {
+        let url = format!("{}/repos/{}/{}/git/trees/{}", GH_API, owner, repo, subtree_sha);
+        let resp = client.get(&url).await;
+        if !resp.ok() {
+            log::debug!(
+                "walk_tree_recursive: skipping subtree {} at path '{}' (HTTP {})",
+                &subtree_sha[..8.min(subtree_sha.len())], path_prefix, resp.status
+            );
+            continue;
+        }
+        let json: serde_json::Value = match serde_json::from_slice(&resp.body) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let entries = parse_tree_entries(&json);
+        for mut entry in entries {
+            // Prefix path with the parent's path so downstream sees repo-relative paths.
+            entry.path = if path_prefix.is_empty() {
+                entry.path
+            } else {
+                format!("{}/{}", path_prefix, entry.path)
+            };
+            if entry.obj_type == "tree" && seen_subtree_sha.insert(entry.sha.clone()) {
+                queue.push((entry.sha.clone(), entry.path.clone()));
+            }
+            all.push(entry);
+        }
+    }
+
+    Ok(all)
 }
 
 /// Fetch the raw (decoded) content of a blob by its SHA.

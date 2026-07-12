@@ -464,9 +464,71 @@ pub fn validate_output_path(path_str: &str) -> Result<String> {
         return Err(anyhow!("Output path '{}' is not a directory", path_str));
     }
 
+    // Sprint 4 (S4.2): reject well-known system paths that we should never scribble
+    // in even if the process has perms. Report files contain matched secret plaintext
+    // — dropping them into /etc or C:\Windows is the kind of foot-gun that costs
+    // hours in a red-team engagement debrief.
+    reject_system_path(&canonical)?;
+
     canonical.into_os_string()
         .into_string()
         .map_err(|_| anyhow!("Output path contains invalid UTF-8 characters"))
+}
+
+/// Sprint 4 (S4.2): reject output paths anchored inside OS-owned directories.
+///
+/// The list is intentionally short and platform-specific. It's not meant as a
+/// bullet-proof sandbox — an operator with root/Administrator can still point
+/// `--output` elsewhere they shouldn't. What it stops is the accidental
+/// `--output /etc/gitrecon` that writes secret-bearing reports into a globally
+/// readable directory.
+fn reject_system_path(canonical: &Path) -> Result<()> {
+    // Convert to string for prefix comparison. Canonicalized paths are absolute,
+    // so a prefix check is well-defined.
+    let s = canonical.to_string_lossy();
+
+    #[cfg(unix)]
+    {
+        // Standard FHS-owned locations. Include /proc and /sys because writing there
+        // can trigger kernel side-effects. /tmp is intentionally NOT blocked — many
+        // legitimate ephemeral scans land there.
+        const BANNED: &[&str] = &[
+            "/etc", "/usr", "/var", "/root", "/boot", "/sys", "/proc", "/dev",
+        ];
+        for prefix in BANNED {
+            // Match exact banned dir OR any descendant under it.
+            if s == *prefix || s.starts_with(&format!("{}/", prefix)) {
+                return Err(anyhow!(
+                    "Output path '{}' resolves to a system directory ({}). \
+                     Reports contain matched secret plaintext — refuse.",
+                    canonical.display(), prefix
+                ));
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        // Case-insensitive comparison for Windows paths.
+        let lower = s.to_ascii_lowercase();
+        const BANNED: &[&str] = &[
+            r"c:\windows",
+            r"c:\program files",
+            r"c:\program files (x86)",
+            r"c:\programdata",
+        ];
+        for prefix in BANNED {
+            if lower == *prefix || lower.starts_with(&format!(r"{}\", prefix)) {
+                return Err(anyhow!(
+                    "Output path '{}' resolves to a system directory ({}). \
+                     Reports contain matched secret plaintext — refuse.",
+                    canonical.display(), prefix
+                ));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Validates custom header format
@@ -1157,6 +1219,48 @@ git/2.46.0"#;
         // Not a URL — helper must not panic.
         let redacted = redact_url("not a url at all");
         assert!(!redacted.is_empty());
+    }
+
+    // ── Sprint 4 (S4.2) — reject_system_path ─────────────────────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn reject_system_path_rejects_etc_and_descendants() {
+        // Explicit banned dir.
+        assert!(reject_system_path(std::path::Path::new("/etc")).is_err());
+        // Descendant.
+        assert!(reject_system_path(std::path::Path::new("/etc/gitrecon")).is_err());
+        // Non-banned neighbour that shares a prefix should still be allowed.
+        assert!(reject_system_path(std::path::Path::new("/etcetera")).is_ok(),
+            "prefix must match `/etc/` boundary, not the raw substring `/etc`");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reject_system_path_rejects_proc_sys_dev() {
+        for banned in ["/proc", "/sys", "/dev", "/root", "/boot", "/var", "/usr"] {
+            assert!(reject_system_path(std::path::Path::new(banned)).is_err(),
+                "{banned} must be rejected as an output path");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reject_system_path_allows_tmp_and_home() {
+        // Not banned: /tmp is a legitimate ephemeral scan destination, and any
+        // /home/... path is the operator's own.
+        assert!(reject_system_path(std::path::Path::new("/tmp")).is_ok());
+        assert!(reject_system_path(std::path::Path::new("/tmp/gitrecon-run-42")).is_ok());
+        assert!(reject_system_path(std::path::Path::new("/home/user/reports")).is_ok());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn reject_system_path_rejects_windows_system_dirs_case_insensitive() {
+        for banned in [r"C:\Windows", r"c:\windows\system32", r"C:\Program Files\x"] {
+            assert!(reject_system_path(std::path::Path::new(banned)).is_err(),
+                "{banned} must be rejected");
+        }
     }
 }
 

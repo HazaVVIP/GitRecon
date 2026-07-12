@@ -4,9 +4,10 @@
 
 use std::path::Path;
 use std::collections::HashMap;
+use std::io::IsTerminal;
 use colored::*;
 use hmac::{Hmac, Mac};
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use sha2::Sha256;
 use crate::detect::DetectResult;
 use crate::layout;
@@ -108,6 +109,25 @@ pub(crate) fn write_report_secure<P: AsRef<Path>>(path: P, contents: &[u8]) -> s
 pub struct Reporter {
     pub no_color: bool,
     pub theme: ui::theme::Theme,
+}
+
+/// Sprint 4 (S4.3): should we render live progress?
+///
+/// A progress bar written to a pipe corrupts the captured output with `\r` cursor
+/// resets and spinner frames — reviewers see garbled logs. We hide the bar whenever
+/// stdout is not an interactive terminal (piped, redirected, running under CI or
+/// `--pipe` mode which redirects stdout to a JSON stream).
+fn interactive_progress_enabled() -> bool {
+    std::io::stdout().is_terminal()
+}
+
+/// Wrap a `ProgressBar` so it renders only when stdout is an interactive terminal.
+/// When hidden, all `ProgressBar::set_position` / `inc` calls become cheap no-ops.
+fn maybe_hidden(pb: ProgressBar) -> ProgressBar {
+    if !interactive_progress_enabled() {
+        pb.set_draw_target(ProgressDrawTarget::hidden());
+    }
+    pb
 }
 
 #[allow(dead_code)]
@@ -225,7 +245,13 @@ impl Reporter {
     /// let pb2 = multi.add(ProgressBar::new(50));
     /// ```
     pub fn create_multi_stage_progress() -> MultiProgress {
-        MultiProgress::new()
+        // Sprint 4 (S4.3): hidden target when stdout is not a terminal so the
+        // multi-progress internal writer does not spam \r sequences into a pipe.
+        if interactive_progress_enabled() {
+            MultiProgress::new()
+        } else {
+            MultiProgress::with_draw_target(ProgressDrawTarget::hidden())
+        }
     }
 
     /// Enhanced progress bar with ETA and throughput using indicatif.
@@ -276,7 +302,9 @@ impl Reporter {
             pb.set_prefix(format!("FINDINGS: {}", findings.to_string().red().bold()));
         }
 
-        pb
+        // Sprint 4 (S4.3): hide when stdout is piped/redirected so captured output
+        // stays clean.
+        maybe_hidden(pb)
     }
 
     /// Simplified legacy progress bar (for backward compatibility).
@@ -322,7 +350,8 @@ impl Reporter {
             pb.set_prefix(p.to_string());
         }
 
-        pb
+        // Sprint 4 (S4.3): hide on non-TTY stdout.
+        maybe_hidden(pb)
     }
 
     /// Create a progress bar with custom styling options.
@@ -360,7 +389,8 @@ impl Reporter {
             pb.set_message(m.to_string());
         }
 
-        pb
+        // Sprint 4 (S4.3): hide on non-TTY stdout.
+        maybe_hidden(pb)
     }
 
     pub fn print_stream_done(&self, r: &StreamResult) {
@@ -677,22 +707,49 @@ impl Reporter {
     }
 
     // O-2: SARIF 2.1.0 output format
+    //
+    // Sprint 4 (S4.6) hardening:
+    //   - Rules deduplicated by pattern_id (a scan with 1000 duplicates used to
+    //     produce 1000 identical `rules` entries — file bloat plus some SARIF
+    //     consumers rejected the run).
+    //   - Driver populated with `informationUri` per SARIF spec §3.19.3.
+    //   - Every rule carries `defaultConfiguration.level` matching the highest
+    //     severity we observed for that pattern; consumers that surface rule
+    //     configuration (GitHub code-scanning, Azure DevOps) render this correctly.
     pub fn save_sarif(&self, path: &str, _target: &str, stream_r: Option<&StreamResult>) -> std::io::Result<()> {
-        let mut rules = Vec::new();
+        // pattern_id -> (level, description) so we emit each rule once.
+        let mut rules_by_id: HashMap<String, (&'static str, String)> = HashMap::new();
         let mut results = Vec::new();
+
+        // Rank severities so we can keep the strictest level per rule.
+        let rank = |lvl: &str| -> u8 {
+            match lvl {
+                "error" => 3,
+                "warning" => 2,
+                "note" => 1,
+                _ => 0,
+            }
+        };
 
         if let Some(s) = stream_r {
             for f in &s.findings {
-                let level = match f.severity.as_str() {
+                let level: &'static str = match f.severity.as_str() {
                     "CRITICAL" | "HIGH" => "error",
                     "MEDIUM" => "warning",
                     _ => "note",
                 };
-                rules.push(serde_json::json!({
-                    "id": f.pattern_id,
-                    "name": f.pattern_id,
-                    "shortDescription": {"text": f.description}
-                }));
+
+                // Upsert the rule, keeping the highest-severity level and the first
+                // non-empty description we see for this pattern_id.
+                rules_by_id
+                    .entry(f.pattern_id.clone())
+                    .and_modify(|(existing_level, _)| {
+                        if rank(level) > rank(existing_level) {
+                            *existing_level = level;
+                        }
+                    })
+                    .or_insert_with(|| (level, f.description.clone()));
+
                 results.push(serde_json::json!({
                     "ruleId": f.pattern_id,
                     "level": level,
@@ -710,11 +767,33 @@ impl Reporter {
             }
         }
 
+        // Emit rules in deterministic order so diffs across runs stay stable.
+        let mut rule_ids: Vec<&String> = rules_by_id.keys().collect();
+        rule_ids.sort();
+        let rules: Vec<serde_json::Value> = rule_ids.into_iter()
+            .map(|id| {
+                let (level, desc) = &rules_by_id[id];
+                serde_json::json!({
+                    "id": id,
+                    "name": id,
+                    "shortDescription": {"text": desc},
+                    "defaultConfiguration": {"level": level},
+                })
+            })
+            .collect();
+
         let sarif = serde_json::json!({
             "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
             "version": "2.1.0",
             "runs": [{
-                "tool": {"driver": {"name": "GitRecon", "version": "3.2.0", "rules": rules}},
+                "tool": {
+                    "driver": {
+                        "name": "GitRecon",
+                        "version": env!("CARGO_PKG_VERSION"),
+                        "informationUri": "https://github.com/HazaVVIP/GitRecon",
+                        "rules": rules,
+                    }
+                },
                 "results": results
             }]
         });
@@ -1146,5 +1225,74 @@ mod tests {
         // Only expected <script> tags are ours (there are none in the template).
         assert!(!body.contains("<script"), "attacker <script tag leaked into HTML report");
         assert!(!body.contains("onerror="), "attacker onerror attribute leaked into HTML report");
+    }
+
+    // ── Sprint 4 (S4.6) — SARIF rule dedup & spec compliance ─────────────────
+
+    fn make_finding(pattern_id: &str, severity: &str) -> Finding {
+        Finding {
+            filename: "a.txt".into(),
+            line: 1,
+            pattern_id: pattern_id.into(),
+            description: format!("desc for {}", pattern_id),
+            severity: severity.into(),
+            match_str: "REDACTED".into(),
+            context: String::new(),
+            is_deleted: false,
+            commit_sha1: None,
+            confidence_adjustment: None,
+        }
+    }
+
+    fn write_sarif(findings: Vec<Finding>) -> serde_json::Value {
+        let rep = Reporter::new(true, &ui::theme::Theme::default());
+        let mut sr = StreamResult::default();
+        sr.findings = findings;
+        let tmp = std::env::temp_dir().join(format!("gitrecon_sarif_test_{}", std::process::id()));
+        let _guard = TempDirGuard::new(tmp.clone());
+        let sarif_path = tmp.join("out.sarif");
+        rep.save_sarif(&sarif_path.to_string_lossy(), "target", Some(&sr)).expect("write");
+        let body = std::fs::read_to_string(&sarif_path).expect("read");
+        serde_json::from_str(&body).expect("parse")
+    }
+
+    #[test]
+    fn sarif_dedupes_rules_by_pattern_id() {
+        // 3 findings of the same pattern must produce 1 rule but 3 results.
+        let findings = vec![
+            make_finding("aws_key", "HIGH"),
+            make_finding("aws_key", "HIGH"),
+            make_finding("aws_key", "HIGH"),
+        ];
+        let sarif = write_sarif(findings);
+        let rules = sarif["runs"][0]["tool"]["driver"]["rules"].as_array().unwrap();
+        let results = sarif["runs"][0]["results"].as_array().unwrap();
+        assert_eq!(rules.len(), 1, "duplicate rules must be deduped");
+        assert_eq!(results.len(), 3, "results must NOT be deduped");
+    }
+
+    #[test]
+    fn sarif_rule_keeps_strictest_severity_across_finds() {
+        // Same pattern seen at LOW then CRITICAL → rule's defaultConfiguration.level
+        // must be "error" (the stricter one).
+        let findings = vec![
+            make_finding("mixed", "LOW"),
+            make_finding("mixed", "CRITICAL"),
+        ];
+        let sarif = write_sarif(findings);
+        let rule = &sarif["runs"][0]["tool"]["driver"]["rules"][0];
+        assert_eq!(rule["defaultConfiguration"]["level"].as_str().unwrap(), "error");
+    }
+
+    #[test]
+    fn sarif_driver_includes_information_uri_and_version() {
+        let sarif = write_sarif(vec![]);
+        let driver = &sarif["runs"][0]["tool"]["driver"];
+        assert!(driver["informationUri"].as_str().is_some(),
+            "SARIF spec §3.19.3 informationUri missing");
+        // Version should be the CARGO_PKG_VERSION, not the hardcoded literal.
+        let version = driver["version"].as_str().unwrap();
+        assert!(!version.is_empty() && version != "3.2.0" || version == env!("CARGO_PKG_VERSION"),
+            "driver.version must match Cargo.toml, got: {}", version);
     }
 }

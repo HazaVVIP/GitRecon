@@ -236,7 +236,12 @@ impl Forge for BitbucketForgeClient {
         let mut stack = vec!["".to_string()];
 
         while let Some(current_path) = stack.pop() {
-            let url = if current_path.is_empty() {
+            // Sprint 4 (S4.4): Bitbucket paginates the `src` listing at 100 entries
+            // per page by default; a directory with >100 files previously silent-
+            // truncated (the old code read `json["next"]` but never followed it,
+            // just left a comment "for simplicity, we proceed"). We now follow
+            // `next` until it disappears so the tree is complete.
+            let mut next_url: Option<String> = Some(if current_path.is_empty() {
                 format!(
                     "{}/repositories/{}/{}/src/{}?pagelen=100",
                     self.api_base, workspace, repo_slug, commit_sha
@@ -250,43 +255,45 @@ impl Forge for BitbucketForgeClient {
                     commit_sha,
                     Self::encode_path(&current_path)
                 )
-            };
+            });
 
-            let resp = self.get_with_rate_limit(&url).await?;
+            while let Some(url) = next_url.take() {
+                let resp = self.get_with_rate_limit(&url).await?;
 
-            if !resp.ok() {
-                // Path might not exist (empty directory or deleted)
-                continue;
-            }
+                if !resp.ok() {
+                    // Path might not exist (empty directory or deleted). Break out of
+                    // pagination for this directory — stack still contains any siblings.
+                    break;
+                }
 
-            let json: serde_json::Value = serde_json::from_slice(&resp.body)?;
+                let json: serde_json::Value = serde_json::from_slice(&resp.body)?;
 
-            // Bitbucket API v2 response structure for src endpoint
-            // Returns "values" array with file/directory entries
-            if let Some(values) = json["values"].as_array() {
-                for entry in values {
-                    if let Some(bb_entry) = parse_tree_entry(entry, &current_path) {
-                        if bb_entry.obj_type == "tree" {
-                            // It's a directory, add to stack
-                            stack.push(bb_entry.path.clone());
-                        } else {
-                            // It's a file/blob
-                            all_entries.push(TreeEntry {
-                                path: bb_entry.path,
-                                obj_type: bb_entry.obj_type,
-                                sha: bb_entry.sha,
-                                size: bb_entry.size,
-                                mode: None,
-                            });
+                // Bitbucket API v2 response structure for src endpoint
+                // Returns "values" array with file/directory entries
+                if let Some(values) = json["values"].as_array() {
+                    for entry in values {
+                        if let Some(bb_entry) = parse_tree_entry(entry, &current_path) {
+                            if bb_entry.obj_type == "tree" {
+                                // It's a directory, add to stack
+                                stack.push(bb_entry.path.clone());
+                            } else {
+                                // It's a file/blob
+                                all_entries.push(TreeEntry {
+                                    path: bb_entry.path,
+                                    obj_type: bb_entry.obj_type,
+                                    sha: bb_entry.sha,
+                                    size: bb_entry.size,
+                                    mode: None,
+                                });
+                            }
                         }
                     }
                 }
-            }
 
-            // Check for next page (Bitbucket API v2 uses "next" field)
-            if let Some(_next_page) = json["next"].as_str() {
-                // In production, you would continue fetching next pages
-                // For simplicity, we proceed with current page data
+                // Follow `next` (absolute URL provided by Bitbucket) until null.
+                next_url = json["next"].as_str()
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string());
             }
         }
 
