@@ -3796,6 +3796,7 @@ async fn main() {
                     args.entropy_threshold,
                     args.live || args.pipe,
                     !args.no_adaptive,
+                    args.resume,
                     args.checkpoint_interval,
                     Some(url.clone()),
                     cache,
