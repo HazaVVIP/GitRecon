@@ -247,11 +247,58 @@ pub struct ObjectParser;
 
 const VALID_TYPES: &[&str] = &["blob", "tree", "commit", "tag"];
 
+/// Hard cap on inflated loose-object size when the caller does not specify a limit.
+/// 128 MB matches the largest object git-core supports without special config, and
+/// stops a `1 KB deflate -> 5 GB` decompression bomb from OOM-ing the scanner.
+const DEFAULT_MAX_INFLATED: usize = 128 * 1024 * 1024;
+
 impl ObjectParser {
+    /// Legacy entry point — inflate with the default max output size (128 MB) and no
+    /// hash verification. Kept for existing call-sites that don't have a `max_output`
+    /// value handy. New code should prefer `parse_with_limit`.
     pub fn parse(&self, data: &[u8], sha1: &str) -> Option<GitObject> {
+        self.parse_with_limit(data, sha1, DEFAULT_MAX_INFLATED, /*verify_sha1=*/ true)
+    }
+
+    /// Sprint 3 (S3.2 + S3.3 + S3.4): inflate a loose object with:
+    ///
+    /// - **Output size cap** (S3.2). `ZlibDecoder::read_to_end` used to be unbounded.
+    ///   A hostile server serving a 1 KB deflate stream that inflates to gigabytes
+    ///   would exhaust process memory. We wrap the decoder in `Read::take(max_output)`
+    ///   and refuse to proceed if the inflated stream reaches that boundary.
+    ///
+    /// - **Header size validation** (S3.4). Git's object header is
+    ///   `"<type> <size>\0<content>"`. If `content.len() != size` the object is
+    ///   truncated or padded — a benign fetch bug, or a hostile probe. Either way
+    ///   we refuse to hand malformed bytes downstream.
+    ///
+    /// - **SHA1 verification** (S3.3). Every git object has a self-identifying hash.
+    ///   Verifying `sha1_of(type, content) == expected_sha1` defeats a middlebox or
+    ///   hostile server that swaps blob content while preserving the URL. This is
+    ///   opt-in via `verify_sha1` because pack-derived objects reach this path
+    ///   without a canonical SHA1 (their identity is computed inside the pack).
+    pub fn parse_with_limit(
+        &self,
+        data: &[u8],
+        sha1: &str,
+        max_output: usize,
+        verify_sha1: bool,
+    ) -> Option<GitObject> {
+        // Wrap in `.take()` so the inflated stream is bounded. We ask for one byte
+        // more than the limit so we can DETECT overflow (vs. silently truncating).
         let mut decoder = ZlibDecoder::new(data);
         let mut raw = Vec::new();
-        decoder.read_to_end(&mut raw).ok()?;
+        std::io::Read::take(&mut decoder, max_output as u64 + 1)
+            .read_to_end(&mut raw)
+            .ok()?;
+        if raw.len() > max_output {
+            log::warn!(
+                "ObjectParser::parse: refusing object {} — inflated size exceeds {} bytes (zlib bomb defence)",
+                &sha1[..sha1.len().min(8)],
+                max_output
+            );
+            return None;
+        }
 
         let nul = raw.iter().position(|&b| b == 0)?;
         let header = std::str::from_utf8(&raw[..nul]).ok()?;
@@ -262,7 +309,37 @@ impl ObjectParser {
         }
 
         let size: usize = size_str.parse().ok()?;
-        let obj_data = raw[nul + 1..].to_vec();
+        let content = &raw[nul + 1..];
+
+        // S3.4: header size MUST match the actual content length. Truncated or padded
+        // objects are rejected here — the parser used to silently accept them.
+        if content.len() != size {
+            log::warn!(
+                "ObjectParser::parse: refusing object {} — header size {} != content length {}",
+                &sha1[..sha1.len().min(8)],
+                size,
+                content.len()
+            );
+            return None;
+        }
+
+        let obj_data = content.to_vec();
+
+        // S3.3: SHA1 self-check. Skipped for pack-derived call-sites (verify_sha1=false)
+        // whose SHA1 doesn't come from the loose-object hash. All loose-object fetches
+        // (streamer.rs, mapper.rs commit-graph walk) go through `parse` which verifies.
+        if verify_sha1 && is_valid_sha1(sha1) {
+            let computed = Self.sha1_of(obj_type, &obj_data);
+            if computed != sha1 {
+                log::warn!(
+                    "ObjectParser::parse: refusing object {} — SHA1 mismatch (got {}, expected {})",
+                    &sha1[..sha1.len().min(8)],
+                    &computed[..8],
+                    &sha1[..sha1.len().min(8)]
+                );
+                return None;
+            }
+        }
 
         Some(GitObject {
             sha1: sha1.to_string(),
@@ -395,7 +472,9 @@ impl ObjectParser {
         entries
     }
 
-    #[allow(dead_code)]
+    /// Compute git-canonical SHA1 for `(type, content)`. Format matches on-disk loose
+    /// object hashing: `"<type> <length>\0<content>"` fed to SHA1. Used by
+    /// `parse_with_limit` to verify inflated object identity against expected SHA1.
     pub fn sha1_of(&self, obj_type: &str, content: &[u8]) -> String {
         let header = format!("{} {}\x00", obj_type, content.len());
         let mut hasher = Sha1::new();
@@ -827,5 +906,93 @@ mod tests {
         data.extend_from_slice(&1u32.to_be_bytes());
         data.extend_from_slice(&0u32.to_be_bytes());
         assert!(IndexParser.parse(&data).is_err());
+    }
+
+    // ── Sprint 3 (S3.2/S3.3/S3.4) — ObjectParser hardening ───────────────────
+
+    fn deflate(bytes: &[u8]) -> Vec<u8> {
+        use flate2::write::ZlibEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+        let mut enc = ZlibEncoder::new(Vec::new(), Compression::default());
+        enc.write_all(bytes).unwrap();
+        enc.finish().unwrap()
+    }
+
+    /// Encode a valid loose-object payload: `<type> <size>\0<content>`.
+    fn encode_object(obj_type: &str, content: &[u8]) -> (Vec<u8>, String) {
+        let mut raw = format!("{} {}\x00", obj_type, content.len()).into_bytes();
+        raw.extend_from_slice(content);
+        let sha1 = ObjectParser.sha1_of(obj_type, content);
+        (deflate(&raw), sha1)
+    }
+
+    #[test]
+    fn object_parser_accepts_valid_blob() {
+        let (compressed, sha1) = encode_object("blob", b"hello world");
+        let obj = ObjectParser.parse(&compressed, &sha1).expect("valid blob must parse");
+        assert_eq!(obj.obj_type, "blob");
+        assert_eq!(obj.data, b"hello world");
+    }
+
+    #[test]
+    fn object_parser_rejects_sha1_mismatch() {
+        // S3.3: content whose canonical SHA1 differs from `expected` must be refused.
+        let (compressed, _real_sha1) = encode_object("blob", b"attacker payload");
+        let fake_sha = "0".repeat(40);
+        assert!(ObjectParser.parse(&compressed, &fake_sha).is_none(),
+            "MITM-swapped content must fail hash verification");
+    }
+
+    #[test]
+    fn object_parser_rejects_size_mismatch() {
+        // S3.4: header claims size N but content has M != N bytes → refuse.
+        // Craft raw `blob 100\0AAAA...` where content is only 4 bytes.
+        let mut raw = b"blob 100\x00AAAA".to_vec();
+        // Ensure the SHA1 CHECK isn't the reason we fail — pass `verify_sha1=false`.
+        let compressed = deflate(&raw);
+        let sha = "a".repeat(40);
+        assert!(ObjectParser.parse_with_limit(&compressed, &sha, 4096, false).is_none(),
+            "header size mismatch must be refused even with SHA1 check off");
+
+        // Also verify that WITH a correctly declared size (12), we accept.
+        raw = b"blob 4\x00AAAA".to_vec();
+        let compressed = deflate(&raw);
+        let obj = ObjectParser.parse_with_limit(&compressed, &sha, 4096, false)
+            .expect("size-correct payload must parse");
+        assert_eq!(obj.data, b"AAAA");
+    }
+
+    #[test]
+    fn object_parser_caps_zlib_bomb() {
+        // S3.2: a 1 KB deflate stream that inflates to megabytes must be refused
+        // when max_output is set below the inflated size.
+        let big = vec![0u8; 4 * 1024 * 1024]; // 4 MB of zeros — compresses to ~4 KB
+        let mut raw = format!("blob {}\x00", big.len()).into_bytes();
+        raw.extend_from_slice(&big);
+        let compressed = deflate(&raw);
+
+        // With small cap: refuse.
+        let sha = "a".repeat(40);
+        assert!(ObjectParser.parse_with_limit(&compressed, &sha, 1024, false).is_none(),
+            "inflated size > max_output must be refused");
+
+        // With generous cap: accepts (size validation still passes since we
+        // declared the correct size in the header).
+        assert!(ObjectParser.parse_with_limit(&compressed, &sha, 8 * 1024 * 1024, false).is_some());
+    }
+
+    #[test]
+    fn object_parser_rejects_invalid_type() {
+        let (compressed, sha1) = encode_object("random", b"content");
+        assert!(ObjectParser.parse(&compressed, &sha1).is_none());
+    }
+
+    #[test]
+    fn sha1_of_matches_git_canonical_form() {
+        // git canonical: SHA1("<type> <length>\0<content>"). Verify sha1_of matches
+        // what a real git command would produce for the empty tree.
+        let empty_tree_sha1 = ObjectParser.sha1_of("tree", b"");
+        assert_eq!(empty_tree_sha1, "4b825dc642cb6eb9a060e54bf8d69288fbee4904");
     }
 }

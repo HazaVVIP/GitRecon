@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use futures::StreamExt;
 use rand::seq::IndexedRandom;
 use rand::Rng;
 use reqwest::{Client, ClientBuilder, Proxy};
@@ -431,7 +432,10 @@ impl HttpClient {
         self.rate_limit().await;
 
         let strategy = self.cfg.retry_strategy;
-        let max_retries = strategy.max_retries().max(self.cfg.retries);
+        // Sprint 3 (S3.8): user override wins — cfg.retries is a CEILING, not a floor.
+        // Previously `.max()` meant --retries=1 with RetryStrategy::Aggressive still
+        // did 10 retries, silently overriding user intent.
+        let max_retries = strategy.max_retries().min(self.cfg.retries.max(1));
         let mut attempt = 0u32;
 
         loop {
@@ -719,10 +723,49 @@ impl HttpClient {
             headers.insert(k.to_string(), value);
         }
 
-        let mut body_bytes = Vec::new();
-        let raw = resp.bytes().await?;
-        let limit = self.cfg.max_size.min(raw.len());
-        body_bytes.extend_from_slice(&raw[..limit]);
+        // Sprint 3 (S3.1): streaming download with size cap.
+        //
+        // The old code did `resp.bytes().await?` which loaded the FULL body into memory
+        // BEFORE any `max_size` truncation. A hostile server (or a mis-targeted probe)
+        // returning a 10 GB body would exhaust process memory even though `max_size`
+        // defaults to 100 MB.
+        //
+        // Two-layer defence:
+        //   1. Content-Length preflight — abort BEFORE reading if server advertises
+        //      more than `max_size` bytes. Cheap when the header is honest.
+        //   2. Stream chunk-by-chunk and stop as soon as accumulated bytes exceed
+        //      `max_size`. Catches liars that omit Content-Length or lie about it.
+        let max_size = self.cfg.max_size;
+        if let Some(cl) = resp.content_length() {
+            if cl as usize > max_size {
+                return Err(anyhow::anyhow!(
+                    "response body exceeds max_size ({} > {})", cl, max_size
+                ));
+            }
+        }
+
+        let mut body_bytes: Vec<u8> = Vec::with_capacity(
+            resp.content_length()
+                .map(|c| (c as usize).min(max_size))
+                .unwrap_or(8192)
+        );
+        let mut stream = resp.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            let would_be = body_bytes.len().saturating_add(chunk.len());
+            if would_be > max_size {
+                // Take only what fits, then abort — we DON'T grow past max_size even
+                // if the trailing chunk is oversized. This is not a size-truncation of
+                // a valid response; it's a defence, so we return an error rather than
+                // silently returning a partial body that callers might trust as complete.
+                let remaining = max_size.saturating_sub(body_bytes.len());
+                body_bytes.extend_from_slice(&chunk[..remaining]);
+                return Err(anyhow::anyhow!(
+                    "response body streamed past max_size ({} > {})", would_be, max_size
+                ));
+            }
+            body_bytes.extend_from_slice(&chunk);
+        }
 
         Ok(Response {
             url: url.to_string(),
@@ -744,7 +787,10 @@ impl HttpClient {
         self.rate_limit().await;
 
         let strategy = self.cfg.retry_strategy;
-        let max_retries = strategy.max_retries().max(self.cfg.retries);
+        // Sprint 3 (S3.8): user override wins — cfg.retries is a CEILING, not a floor.
+        // Previously `.max()` meant --retries=1 with RetryStrategy::Aggressive still
+        // did 10 retries, silently overriding user intent.
+        let max_retries = strategy.max_retries().min(self.cfg.retries.max(1));
         let mut attempt = 0u32;
 
         loop {
@@ -1007,5 +1053,50 @@ impl HttpClient {
             wait += Duration::from_millis(jitter_ms);
         }
         sleep(wait).await;
+    }
+}
+
+// ════════════════════════════════════════════════
+// Sprint 3 (S3.8) — retry precedence tests
+// ════════════════════════════════════════════════
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Reproduces the `max_retries` clamp: user `cfg.retries` is the ceiling, capped
+    /// down by the strategy's ceiling as well. Previously the code used `.max()`
+    /// which meant a user setting `--retries 1` with `RetryStrategy::Aggressive`
+    /// still executed 10 retries — silently overriding the operator.
+    fn clamp(strategy: RetryStrategy, user_retries: u32) -> u32 {
+        strategy.max_retries().min(user_retries.max(1))
+    }
+
+    #[test]
+    fn user_retries_can_lower_below_strategy_ceiling() {
+        // Aggressive strategy defaults to 10; user wants 1 — must honour 1.
+        assert_eq!(clamp(RetryStrategy::Aggressive, 1), 1);
+        assert_eq!(clamp(RetryStrategy::Standard, 1), 1);
+    }
+
+    #[test]
+    fn user_retries_capped_at_strategy_ceiling() {
+        // User asks for 100 with Conservative (max=1) — still cap at 1.
+        assert_eq!(clamp(RetryStrategy::Conservative, 100), 1);
+        // User asks for 100 with Standard (max=3) — cap at 3.
+        assert_eq!(clamp(RetryStrategy::Standard, 100), 3);
+    }
+
+    #[test]
+    fn user_retries_zero_becomes_one() {
+        // Zero would mean "never even try" — floor at 1 so the first attempt runs.
+        assert_eq!(clamp(RetryStrategy::Aggressive, 0), 1);
+    }
+
+    #[test]
+    fn retry_strategy_ceilings_are_documented_values() {
+        // Locks in the current tier semantics for downstream calc.
+        assert_eq!(RetryStrategy::Aggressive.max_retries(), 10);
+        assert_eq!(RetryStrategy::Standard.max_retries(), 3);
+        assert_eq!(RetryStrategy::Conservative.max_retries(), 1);
     }
 }

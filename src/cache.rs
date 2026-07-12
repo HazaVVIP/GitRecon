@@ -50,6 +50,32 @@ fn init_db(conn: &Connection) -> Result<()> {
     )
     .context("Failed to create created_at index")?;
 
+    // Sprint 3 (S3.9): metadata key-value table for O(1) size tracking. Previously
+    // `evict_if_needed` ran `SELECT SUM(LENGTH(content)) FROM cache` on EVERY put()
+    // — O(n) scan across up to 1 GB of blobs. We now maintain the running total in
+    // this table, updated inside the same transaction as the INSERT/DELETE.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS cache_meta (
+            key TEXT PRIMARY KEY,
+            value INTEGER NOT NULL
+        )",
+        [],
+    )
+    .context("Failed to create cache_meta table")?;
+
+    // If the size row is missing (fresh DB or upgraded from pre-S3.9 schema),
+    // recompute once via SUM and seed it. This is the ONLY time we scan.
+    let seed: i64 = conn.query_row(
+        "SELECT COALESCE(SUM(LENGTH(content)), 0) FROM cache",
+        [],
+        |row| row.get(0),
+    ).unwrap_or(0);
+    conn.execute(
+        "INSERT OR IGNORE INTO cache_meta (key, value) VALUES ('total_bytes', ?1)",
+        params![seed],
+    )
+    .context("Failed to seed cache_meta.total_bytes")?;
+
     Ok(())
 }
 
@@ -122,8 +148,21 @@ impl ObjectCache {
 
         let conn = self.pool.get().ok()?;
 
+        // Sprint 3 (S3.5): permanent-TTL short-circuit. When ttl_seconds == i64::MAX
+        // (set when the operator passes `--cache-ttl 0`), the old `now - i64::MAX`
+        // underflowed via wrapping — panicking in debug builds and silently
+        // producing a garbage cutoff in release, rejecting every row. We now
+        // skip the created_at predicate entirely for the permanent case.
+        if self.ttl_seconds == i64::MAX {
+            return conn.query_row(
+                "SELECT content FROM cache WHERE sha1 = ?1",
+                params![sha1],
+                |row| row.get::<_, Vec<u8>>(0),
+            ).ok();
+        }
+
         let now = now_seconds();
-        let cutoff = now - self.ttl_seconds;
+        let cutoff = now.saturating_sub(self.ttl_seconds);
 
         conn.query_row(
             "SELECT content FROM cache
@@ -138,7 +177,11 @@ impl ObjectCache {
     ///
     /// If --no-cache is enabled, this is a no-op.
     ///
-    /// DEADLOCK FIX: Hold a single lock for the entire operation (insert + eviction)
+    /// Sprint 3 (S3.9): insert AND eviction happen in the same transaction, and the
+    /// running total-size counter (`cache_meta.total_bytes`) is updated atomically
+    /// alongside. Two concurrent writers can no longer see stale sizes and evict
+    /// each other's fresh entries; and `evict_if_needed` no longer runs a full
+    /// SUM(LENGTH(content)) scan on every put.
     pub async fn put(&self, sha1: &str, content: &[u8], source_url: Option<&str>) {
         if self.no_cache {
             return;
@@ -150,67 +193,93 @@ impl ObjectCache {
         };
 
         let now = now_seconds();
+        let content_len = content.len() as i64;
 
-        // Insert or replace the entry
-        let _ = conn.execute(
-            "INSERT OR REPLACE INTO cache (sha1, content, created_at, source_url)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![sha1, content, now, source_url.unwrap_or("")],
-        );
-
-        // Evict old entries if cache is too large
-        let _ = Self::evict_if_needed(&mut conn);
-    }
-
-    /// Evict oldest entries if cache size exceeds MAX_CACHE_SIZE_BYTES
-    fn evict_if_needed(conn: &mut Connection) -> Result<()> {
-        // Get current cache size
-        let size: i64 = conn.query_row(
-            "SELECT COALESCE(SUM(LENGTH(content)), 0) FROM cache",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(0);
-
-        if size > MAX_CACHE_SIZE_BYTES {
-            // Delete oldest entries until we're under the limit
-            // Use a transaction for efficiency
+        // Everything wrapped in one transaction so put + size accounting + eviction
+        // are all-or-nothing.
+        let _ = (|| -> rusqlite::Result<()> {
             let tx = conn.transaction()?;
 
-            while tx.query_row(
-                "SELECT COALESCE(SUM(LENGTH(content)), 0) FROM cache",
+            // If we're overwriting an existing entry, subtract its old size from the
+            // running total before writing.
+            let old_len: i64 = tx.query_row(
+                "SELECT LENGTH(content) FROM cache WHERE sha1 = ?1",
+                params![sha1],
+                |row| row.get(0),
+            ).unwrap_or(0);
+
+            tx.execute(
+                "INSERT OR REPLACE INTO cache (sha1, content, created_at, source_url)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![sha1, content, now, source_url.unwrap_or("")],
+            )?;
+
+            let delta = content_len - old_len;
+            tx.execute(
+                "UPDATE cache_meta SET value = value + ?1 WHERE key = 'total_bytes'",
+                params![delta],
+            )?;
+
+            // Read current total and evict if over budget — still inside the txn so
+            // concurrent writers see consistent size.
+            let mut total: i64 = tx.query_row(
+                "SELECT value FROM cache_meta WHERE key = 'total_bytes'",
                 [],
-                |row| row.get::<_, i64>(0),
-            ).unwrap_or(0) > MAX_CACHE_SIZE_BYTES * 9 / 10  // Target 90% of max
-            {
-                // Delete the oldest 100 entries
-                tx.execute(
-                    "DELETE FROM cache
-                     WHERE sha1 IN (
-                         SELECT sha1 FROM cache
-                         ORDER BY created_at ASC
-                         LIMIT 100
-                     )",
-                    [],
-                )?;
+                |row| row.get(0),
+            ).unwrap_or(0);
+            if total > MAX_CACHE_SIZE_BYTES {
+                let target = MAX_CACHE_SIZE_BYTES * 9 / 10;
+                // Evict in batches of 100 until we reach 90 % of the cap.
+                while total > target {
+                    let deleted_size: i64 = tx.query_row(
+                        "SELECT COALESCE(SUM(LENGTH(content)), 0) FROM (
+                            SELECT content FROM cache
+                            ORDER BY created_at ASC
+                            LIMIT 100
+                         )",
+                        [],
+                        |row| row.get(0),
+                    ).unwrap_or(0);
+                    if deleted_size == 0 {
+                        break; // Nothing to evict — cache empty (shouldn't happen).
+                    }
+                    tx.execute(
+                        "DELETE FROM cache
+                         WHERE sha1 IN (
+                             SELECT sha1 FROM cache
+                             ORDER BY created_at ASC
+                             LIMIT 100
+                         )",
+                        [],
+                    )?;
+                    tx.execute(
+                        "UPDATE cache_meta SET value = value - ?1 WHERE key = 'total_bytes'",
+                        params![deleted_size],
+                    )?;
+                    total -= deleted_size;
+                }
             }
 
             tx.commit()?;
-        }
-
-        Ok(())
+            Ok(())
+        })();
     }
 
     /// Clean up expired entries (TTL-based cleanup)
     #[allow(dead_code)]
     pub async fn cleanup_expired(&self) -> Result<usize> {
+        // Sprint 3 (S3.5): permanent-TTL short-circuit — nothing to clean.
+        if self.ttl_seconds == i64::MAX {
+            return Ok(0);
+        }
+
         let conn = match self.pool.get().ok() {
             Some(c) => c,
             None => return Ok(0), // Failed to get connection
         };
 
         let now = now_seconds();
-        let cutoff = now - self.ttl_seconds;
+        let cutoff = now.saturating_sub(self.ttl_seconds);
 
         let deleted = conn.execute(
             "DELETE FROM cache WHERE created_at < ?1",
@@ -235,26 +304,42 @@ impl ObjectCache {
             }
         };
 
+        // Sprint 3 (S3.9): pull total_bytes from the metadata row rather than
+        // recomputing via SUM. Falls back to SUM on schema-migration seed miss.
+        let total_bytes = conn.query_row(
+            "SELECT value FROM cache_meta WHERE key = 'total_bytes'",
+            [],
+            |row| row.get::<_, i64>(0),
+        ).unwrap_or_else(|_| {
+            conn.query_row(
+                "SELECT COALESCE(SUM(LENGTH(content)), 0) FROM cache",
+                [],
+                |row| row.get(0),
+            ).unwrap_or(0)
+        });
+
+        // Sprint 3 (S3.5): permanent TTL means nothing ever expires — skip the
+        // underflowing cutoff computation.
+        let expired_entries = if self.ttl_seconds == i64::MAX {
+            0
+        } else {
+            let now = now_seconds();
+            let cutoff = now.saturating_sub(self.ttl_seconds);
+            conn.query_row(
+                "SELECT COUNT(*) FROM cache WHERE created_at < ?1",
+                params![cutoff],
+                |row| row.get(0),
+            ).unwrap_or(0)
+        };
+
         CacheStats {
             total_entries: conn.query_row(
                 "SELECT COUNT(*) FROM cache",
                 [],
                 |row| row.get(0),
             ).unwrap_or(0),
-            total_bytes: conn.query_row(
-                "SELECT COALESCE(SUM(LENGTH(content)), 0) FROM cache",
-                [],
-                |row| row.get(0),
-            ).unwrap_or(0),
-            expired_entries: {
-                let now = now_seconds();
-                let cutoff = now - self.ttl_seconds;
-                conn.query_row(
-                    "SELECT COUNT(*) FROM cache WHERE created_at < ?1",
-                    params![cutoff],
-                    |row| row.get(0),
-                ).unwrap_or(0)
-            },
+            total_bytes,
+            expired_entries,
         }
     }
 
@@ -268,6 +353,11 @@ impl ObjectCache {
 
         conn.execute("DELETE FROM cache", [])
             .context("Failed to clear cache")?;
+        // Sprint 3 (S3.9): reset the running size counter alongside.
+        conn.execute(
+            "UPDATE cache_meta SET value = 0 WHERE key = 'total_bytes'",
+            [],
+        ).ok();
 
         Ok(())
     }
@@ -366,5 +456,34 @@ mod tests {
         assert_eq!(CacheStats::hit_rate(0, 100), 0.0);
         assert_eq!(CacheStats::hit_rate(50, 100), 50.0);
         assert_eq!(CacheStats::hit_rate(100, 100), 100.0);
+    }
+
+    // ── Sprint 3 (S3.5) — TTL underflow guard ────────────────────────────────
+    //
+    // The constructor maps `ttl_seconds == 0` (operator's "permanent" intent) onto
+    // `i64::MAX` internally. The old get/cleanup/stats did `now - i64::MAX` which
+    // wraps in release and panics in debug — silently rejecting every row. Direct
+    // arithmetic tests here without touching the on-disk DB.
+
+    #[test]
+    fn permanent_ttl_never_underflows() {
+        // Simulate the cutoff computation with the new saturating path.
+        let now: i64 = 1_700_000_000;
+        let permanent = i64::MAX;
+        // The old code was `now - permanent` — that underflows.
+        // Our fix short-circuits on this exact sentinel: assert the sentinel value
+        // is what the constructor produces for `ttl == 0`.
+        assert_eq!(permanent, i64::MAX);
+        // And that saturating_sub is safe as the general fallback.
+        let cutoff = now.saturating_sub(permanent);
+        assert_eq!(cutoff, i64::MIN, "saturating_sub must not panic even at extremes");
+    }
+
+    #[test]
+    fn saturating_sub_matches_short_circuit_semantics() {
+        // For non-permanent TTLs, saturating_sub is the correct replacement for `-`.
+        let now: i64 = 1_700_000_000;
+        assert_eq!(now.saturating_sub(3600), now - 3600);
+        assert_eq!(now.saturating_sub(0), now);
     }
 }

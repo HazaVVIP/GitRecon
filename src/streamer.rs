@@ -1925,9 +1925,20 @@ async fn fetch_and_process(
         }
     }
 
-    // PERF-005: Store fetched content in cache (BUG-ERR-009: now async)
-    if let Some(ref cache_obj) = cache {
-        cache_obj.put(sha1, &resp.body, Some(&url)).await;
+    // Sprint 3 (S3.7): only cache the response body if it actually parses as a git
+    // object. Previously we cached the raw bytes before validation, so a 200-status
+    // error page (HTML from a WAF, a captive-portal login, etc.) got persisted and
+    // was replayed on every subsequent run — poisoning the cache indefinitely.
+    let parses_ok = ObjectParser.parse(&resp.body, sha1).is_some();
+    if parses_ok {
+        if let Some(ref cache_obj) = cache {
+            cache_obj.put(sha1, &resp.body, Some(&url)).await;
+        }
+    } else if verbose {
+        eprintln!(
+            "  [!] Fetched blob {} did not parse as a valid git object — skipping cache write",
+            &sha1[..sha1.len().min(8)]
+        );
     }
 
     // Process the fetched content using the helper function

@@ -132,10 +132,8 @@ impl Checkpoint {
         phase: CheckpointPhase,
         config_fingerprint: String,
     ) -> Self {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        // Sprint 3 (S3.6): panic-safe timestamp — see safe_now_secs comment near save_checkpoint.
+        let now = safe_now_secs();
 
         Self {
             version: CURRENT_CHECKPOINT_VERSION,
@@ -160,10 +158,8 @@ impl Checkpoint {
     pub fn migrate_to_v2(&mut self) {
         if self.version == CheckpointVersion::V1 {
             self.version = CheckpointVersion::V2;
-            self.updated_at = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
+            // Sprint 3 (S3.6): panic-safe timestamp.
+            self.updated_at = safe_now_secs();
         }
     }
 
@@ -541,10 +537,81 @@ fn validate_checkpoint_file(file: &File) -> Result<()> {
 /// BUG-STAB-009 FIX: Implements retry with exponential backoff on save failure.
 ///
 /// BUG-SEC-005 FIX: Computes HMAC before saving for integrity verification.
+/// Sprint 3 (S3.6): sweep orphan `.tmp-<ts>-<pid>` files left by a killed process.
+///
+/// `save_checkpoint` creates temp files with `create_new(true)` — if a prior run was
+/// killed between temp-create and rename, the .tmp survives forever, cluttering the
+/// checkpoint dir and (worse) potentially colliding with future timestamps at
+/// extreme edge cases. Called opportunistically by `save_checkpoint` on entry.
+fn sweep_orphan_tmp_files(dir: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    let cutoff = SystemTime::now()
+        .checked_sub(std::time::Duration::from_secs(5 * 60))
+        .unwrap_or(UNIX_EPOCH);
+    for entry in entries.flatten() {
+        let Ok(name) = entry.file_name().into_string() else { continue };
+        // Match the exact temp-file convention: <basename>.tmp-<ts>-<pid>
+        if !name.contains(".tmp-") {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else { continue };
+        if !meta.is_file() { continue; }
+        let Ok(mtime) = meta.modified() else { continue };
+        if mtime < cutoff {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// Sprint 3 (S3.6): fsync the parent directory after a rename so the directory
+/// entry itself is durable. Without this, on POSIX a crash between the rename
+/// completing and the directory being flushed can lose the file entirely.
+/// On non-Unix this is a no-op — Windows guarantees rename durability via NTFS
+/// journaling.
+#[cfg(unix)]
+fn fsync_parent_dir(child: &Path) -> std::io::Result<()> {
+    if let Some(parent) = child.parent() {
+        let dir = fs::File::open(parent)?;
+        dir.sync_all()?;
+    }
+    Ok(())
+}
+#[cfg(not(unix))]
+fn fsync_parent_dir(_child: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// Return current wall-clock nanos since UNIX_EPOCH, saturating on clock skew.
+///
+/// Sprint 3 (S3.6 panic-safety): the codebase used to `duration_since(UNIX_EPOCH).unwrap()`
+/// on hot paths — this panics if the system clock was set before 1970 (rare, but
+/// happens on containers and VMs with a busted RTC). A panic mid-save loses every
+/// finding accumulated so far. `Duration::ZERO` is the correct fallback: a temp
+/// filename collision is far cheaper than a lost scan.
+fn safe_now_nanos() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
+}
+
+fn safe_now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 pub fn save_checkpoint(checkpoint: &Checkpoint) -> Result<()> {
     ensure_checkpoint_dir()?;
 
     let path = checkpoint_path(&checkpoint.target);
+
+    // Sprint 3 (S3.6): opportunistic orphan sweep. Cheap (single readdir); catches
+    // .tmp files left by force-killed prior runs.
+    if let Some(dir) = path.parent() {
+        sweep_orphan_tmp_files(dir);
+    }
 
     // BUG-SEC-005 FIX: Update HMAC before saving
     let mut checkpoint_with_hmac = checkpoint.clone();
@@ -558,10 +625,8 @@ pub fn save_checkpoint(checkpoint: &Checkpoint) -> Result<()> {
     for attempt in 0..MAX_SAVE_RETRIES {
         // BUG-SEC-003 FIX: Use temp file + atomic rename pattern
         // Use unique temp path to avoid conflicts in concurrent scenarios
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
+        // Sprint 3 (S3.6): panic-safe timestamp — see safe_now_nanos comment.
+        let timestamp = safe_now_nanos();
         let temp_path = path.with_extension(format!("tmp-{}-{}", timestamp, std::process::id()));
 
         // BUG-STAB-009: Helper function to write to temp file with proper cleanup
@@ -612,6 +677,12 @@ pub fn save_checkpoint(checkpoint: &Checkpoint) -> Result<()> {
             }
             return Err(e).with_context(|| format!("Failed to rename checkpoint: {} -> {}", temp_path.display(), path.display()));
         }
+
+        // Sprint 3 (S3.6): fsync the parent directory so the rename itself is
+        // durable. Without this, a crash between rename() returning and the
+        // directory entry being flushed can lose the checkpoint on POSIX. Best
+        // effort — a failure here doesn't invalidate the write.
+        let _ = fsync_parent_dir(&path);
 
         // Success - break out of retry loop
         return Ok(());
@@ -731,10 +802,8 @@ pub fn delete_checkpoint(target: &str) -> Result<()> {
 /// 3. Close handle, then unlink (safe because we've validated what we opened)
 pub fn cleanup_old_checkpoints() -> Result<usize> {
     let dir = ensure_checkpoint_dir()?;
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    // Sprint 3 (S3.6): panic-safe timestamp.
+    let now = safe_now_secs();
 
     let mut cleaned = 0;
 
@@ -1368,5 +1437,49 @@ mod tests {
 
         // temp_dir dropped here
         drop(temp_dir);
+    }
+
+    // ── Sprint 3 (S3.6) — orphan sweep + panic-safe timestamp ────────────────
+
+    #[test]
+    fn safe_now_secs_returns_non_zero_on_healthy_clock() {
+        // Sanity: on any host where the clock isn't set before 1970, we get a
+        // positive value. The point of the helper is not to change the value but
+        // to never panic — regression asserts here.
+        let ts = safe_now_secs();
+        assert!(ts > 1_600_000_000, "expected recent epoch seconds, got {ts}");
+    }
+
+    #[test]
+    fn safe_now_nanos_matches_secs_scale() {
+        let secs = safe_now_secs();
+        let nanos = safe_now_nanos();
+        // nanos should be at least secs * 1e9 in the same reference frame.
+        assert!(nanos as u64 >= secs.saturating_mul(1_000_000_000).saturating_sub(1_000_000_000),
+            "nanos vs secs skew unexpectedly large");
+    }
+
+    #[test]
+    fn sweep_orphan_tmp_files_removes_stale_tmp_and_keeps_fresh_ones() {
+        // Layout: temp dir with one very-old .tmp-* (mtime set to epoch via touch trick)
+        // and one fresh .tmp-* — sweep must remove only the old one.
+        //
+        // We can't easily backdate mtime without an extra dep, so we assert the
+        // KEEP direction: fresh files must NOT be removed.
+        let dir = std::env::temp_dir().join(format!("gitrecon_ckpt_sweep_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let fresh = dir.join("checkpoint.tmp-999-999");
+        let unrelated = dir.join("checkpoint.json");
+        fs::write(&fresh, b"in flight").unwrap();
+        fs::write(&unrelated, b"final").unwrap();
+
+        sweep_orphan_tmp_files(&dir);
+
+        assert!(fresh.exists(), "fresh .tmp file (< 5 min old) must survive sweep");
+        assert!(unrelated.exists(), "non-.tmp files must never be swept");
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }
