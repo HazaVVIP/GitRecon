@@ -137,7 +137,7 @@ impl Forge for GiteaForgeClient {
         let resp = self.get_with_rate_limit(&url).await?;
 
         if !resp.ok() {
-            anyhow::bail!("GET tree {} returned HTTP {}", url, resp.status);
+            anyhow::bail!("GET tree {} returned HTTP {}", crate::validation::redact_url(&url), resp.status);
         }
 
         let json: serde_json::Value = serde_json::from_slice(&resp.body)?;
@@ -204,7 +204,7 @@ impl GiteaForgeClient {
 
             let resp = self.get_with_rate_limit(&url).await?;
             if !resp.ok() {
-                anyhow::bail!("GET {} returned HTTP {}", url, resp.status);
+                anyhow::bail!("GET {} returned HTTP {}", crate::validation::redact_url(&url), resp.status);
             }
 
             let json: serde_json::Value = serde_json::from_slice(&resp.body)?;
@@ -431,7 +431,7 @@ pub async fn get_blob_content(
     let url  = format!("{}/repos/{}/{}/git/blobs/{}", api_base, owner, repo, sha);
     let resp = client.get(&url).await;
     if !resp.ok() {
-        anyhow::bail!("GET blob {} returned HTTP {}", url, resp.status);
+        anyhow::bail!("GET blob {} returned HTTP {}", crate::validation::redact_url(&url), resp.status);
     }
     let json: serde_json::Value = serde_json::from_slice(&resp.body)?;
     let encoding    = json["encoding"].as_str().unwrap_or("base64");

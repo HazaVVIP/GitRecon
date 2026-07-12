@@ -178,7 +178,7 @@ impl Forge for AzureForgeClient {
                     let resp = self.get_with_rate_limit(&projects_url).await?;
 
                     if !resp.ok() {
-                        anyhow::bail!("GET {} returned HTTP {}", projects_url, resp.status);
+                        anyhow::bail!("GET {} returned HTTP {}", crate::validation::redact_url(&projects_url), resp.status);
                     }
 
                     let json: serde_json::Value = serde_json::from_slice(&resp.body)?;
@@ -359,7 +359,7 @@ impl AzureForgeClient {
         let resp = self.get_with_rate_limit(&url).await?;
 
         if resp.status != 200 {
-            anyhow::bail!("GET {} returned HTTP {}", url, resp.status);
+            anyhow::bail!("GET {} returned HTTP {}", crate::validation::redact_url(&url), resp.status);
         }
 
         let json: serde_json::Value = serde_json::from_slice(&resp.body)?;
@@ -397,7 +397,7 @@ impl AzureForgeClient {
         let resp = self.get_with_rate_limit(&url).await?;
 
         if resp.status != 200 {
-            anyhow::bail!("GET {} returned HTTP {}", url, resp.status);
+            anyhow::bail!("GET {} returned HTTP {}", crate::validation::redact_url(&url), resp.status);
         }
 
         let json: serde_json::Value = serde_json::from_slice(&resp.body)?;
@@ -602,7 +602,7 @@ pub async fn get_blob_content(
     let resp = client.get(&url).await;
 
     if !resp.ok() {
-        anyhow::bail!("GET blob {} returned HTTP {}", url, resp.status);
+        anyhow::bail!("GET blob {} returned HTTP {}", crate::validation::redact_url(&url), resp.status);
     }
 
     Ok(resp.body.to_vec())

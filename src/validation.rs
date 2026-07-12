@@ -261,6 +261,174 @@ pub fn validate_proxy_url(proxy_url: &str) -> Result<()> {
     Ok(())
 }
 
+/// Validates a webhook delivery URL (Sprint 2, S2.4).
+///
+/// Webhook bodies contain the full report — including matched secret plaintext. If the
+/// URL is unvalidated the operator can be tricked into POSTing every finding to an
+/// attacker-controlled or infrastructure-internal endpoint (SSRF + secret exfiltration).
+///
+/// Rules:
+/// - Scheme must be `https` unless `allow_http` is set (behind `--webhook-allow-http`).
+///   Cloud metadata endpoints and Docker sockets are almost always plain HTTP; requiring
+///   HTTPS by default is the strongest single defence.
+/// - Reject `file://`, `data://`, `ftp://`, and other non-web schemes outright.
+/// - Reject hosts that resolve to loopback, private (RFC1918), link-local, or unique-local
+///   ranges unless `allow_internal` is set (behind `--webhook-allow-internal`). We do a
+///   literal-IP check on the host string plus a hostname-blocklist — this stops the
+///   obvious attack (`http://169.254.169.254/latest/meta-data/`, `http://127.0.0.1:5000/`)
+///   without requiring live DNS lookup. Full DNS-rebinding defence would need a socket
+///   wrapper, out of scope here.
+pub fn validate_webhook_url(
+    url_str: &str,
+    allow_http: bool,
+    allow_internal: bool,
+) -> Result<url::Url> {
+    let trimmed = url_str.trim();
+    if trimmed.is_empty() {
+        return Err(anyhow!("Webhook URL cannot be empty"));
+    }
+    if trimmed.len() > MAX_URL_LENGTH {
+        return Err(anyhow!("Webhook URL exceeds {} chars", MAX_URL_LENGTH));
+    }
+
+    let parsed = url::Url::parse(trimmed)
+        .map_err(|e| anyhow!("Invalid webhook URL: {}", e))?;
+
+    match parsed.scheme() {
+        "https" => {}
+        "http" if allow_http => {}
+        "http" => return Err(anyhow!(
+            "Webhook URL must be https:// (bodies contain matched secret plaintext). \
+             Pass --webhook-allow-http to override."
+        )),
+        s => return Err(anyhow!(
+            "Unsupported webhook scheme '{}': only http/https accepted (got scheme via {:?})",
+            s, parsed
+        )),
+    }
+
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| anyhow!("Webhook URL must include a host"))?
+        .to_ascii_lowercase();
+
+    if !allow_internal && host_is_internal(&host) {
+        return Err(anyhow!(
+            "Webhook host '{}' resolves to a loopback/private/link-local range \
+             (SSRF risk — cloud metadata endpoints and internal services). \
+             Pass --webhook-allow-internal to override.",
+            host
+        ));
+    }
+
+    Ok(parsed)
+}
+
+/// Best-effort literal-IP + hostname blocklist for webhook SSRF defence.
+///
+/// This does NOT resolve DNS — an attacker who controls DNS could still point a public
+/// name at 127.0.0.1. Mitigating that requires wrapping the socket layer, which is out
+/// of scope for a validator. We reject the direct attacks (literal 127.x, 169.254.169.254,
+/// `localhost`, RFC1918 literals) so the common misconfigurations don't ship secrets.
+fn host_is_internal(host: &str) -> bool {
+    // Hostname allowlist of clearly-local names.
+    if matches!(host, "localhost" | "localhost.localdomain" | "ip6-localhost" | "ip6-loopback") {
+        return true;
+    }
+    // IPv6 literal (URL parser strips the brackets before returning host_str).
+    if let Ok(v6) = host.parse::<std::net::Ipv6Addr>() {
+        return v6.is_loopback()
+            || v6.is_unspecified()
+            || v6.is_multicast()
+            // unique-local fc00::/7
+            || (v6.segments()[0] & 0xfe00) == 0xfc00
+            // link-local fe80::/10
+            || (v6.segments()[0] & 0xffc0) == 0xfe80
+            // IPv4-mapped — resolve to underlying v4 and re-check
+            || v6.to_ipv4_mapped()
+                .map(|v4| ipv4_is_internal(v4))
+                .unwrap_or(false);
+    }
+    // IPv4 literal.
+    if let Ok(v4) = host.parse::<std::net::Ipv4Addr>() {
+        return ipv4_is_internal(v4);
+    }
+    false
+}
+
+fn ipv4_is_internal(v4: std::net::Ipv4Addr) -> bool {
+    v4.is_loopback()          // 127.0.0.0/8
+        || v4.is_private()    // 10/8, 172.16/12, 192.168/16
+        || v4.is_link_local() // 169.254/16 — includes cloud metadata endpoints
+        || v4.is_unspecified()// 0.0.0.0
+        || v4.is_broadcast()  // 255.255.255.255
+        || v4.is_multicast()  // 224/4
+        // 100.64/10 CGNAT — mesh/overlay networks
+        || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 64)
+        // 198.18/15 benchmark range
+        || (v4.octets()[0] == 198 && (v4.octets()[1] & 0xfe) == 18)
+}
+
+/// Redact secret-carrying query params from a URL for safe inclusion in error
+/// messages / log lines (Sprint 2, S2.7).
+///
+/// Historically the codebase does `bail!("GET {} returned {}", url, status)` and every
+/// forge module has 8-10 such call-sites. If the URL carries `?private_token=<PAT>`,
+/// `?access_token=<PAT>`, `?token=<PAT>`, `?api-key=<PAT>` etc. the operator's
+/// credential lands in stderr — where it flows to log aggregators, terminal
+/// scrollback, CI artifacts, and the webhook receiver if the error propagates.
+///
+/// We keep the URL structure (scheme, host, path, other params) intact so error
+/// messages remain diagnostic, but replace the value of any sensitive param with
+/// `[REDACTED]`. Parse failures fall back to a coarse `<host>/<path>` stub.
+pub fn redact_url(url: &str) -> String {
+    let sensitive = |k: &str| {
+        let k = k.to_ascii_lowercase();
+        // Anything matching these fragments in the param name gets redacted.
+        // Match on `contains` rather than exact so `private_token`, `x-token`,
+        // `api-token`, `job_token` all catch.
+        k.contains("token")
+            || k.contains("secret")
+            || k.contains("key")
+            || k.contains("password")
+            || k.contains("auth")
+            || k == "code" // OAuth authorization code
+    };
+
+    match url::Url::parse(url) {
+        Ok(mut parsed) => {
+            let pairs: Vec<(String, String)> = parsed
+                .query_pairs()
+                .map(|(k, v)| {
+                    let redacted = if sensitive(&k) {
+                        "[REDACTED]".to_string()
+                    } else {
+                        v.into_owned()
+                    };
+                    (k.into_owned(), redacted)
+                })
+                .collect();
+            if !pairs.is_empty() {
+                let mut q = parsed.query_pairs_mut();
+                q.clear();
+                for (k, v) in &pairs {
+                    q.append_pair(k, v);
+                }
+                drop(q);
+            }
+            // Also strip userinfo (`https://user:pass@host/...`) if any snuck in.
+            let _ = parsed.set_username("");
+            let _ = parsed.set_password(None);
+            parsed.to_string()
+        }
+        Err(_) => {
+            // Not a parseable URL — best effort: keep the first non-secret substring.
+            // Falls back to host portion for very malformed inputs.
+            url.split('?').next().unwrap_or("<opaque>").to_string()
+        }
+    }
+}
+
 /// Validates an output directory path
 ///
 /// # Security Considerations
@@ -879,6 +1047,116 @@ git/2.46.0"#;
         assert!(validate_content_length(None, 10000).is_ok());
 
         assert!(validate_content_length(Some(10001), 10000).is_err());
+    }
+
+    // ── Sprint 2 (S2.4) — webhook URL validation ─────────────────────────────
+
+    #[test]
+    fn webhook_https_public_host_ok() {
+        assert!(validate_webhook_url("https://hooks.example.com/x", false, false).is_ok());
+    }
+
+    #[test]
+    fn webhook_http_rejected_by_default() {
+        let err = validate_webhook_url("http://hooks.example.com/x", false, false).unwrap_err();
+        assert!(err.to_string().contains("https"), "err: {err}");
+    }
+
+    #[test]
+    fn webhook_http_allowed_with_flag() {
+        assert!(validate_webhook_url("http://hooks.example.com/x", true, false).is_ok());
+    }
+
+    #[test]
+    fn webhook_rejects_file_scheme() {
+        let err = validate_webhook_url("file:///etc/passwd", true, true).unwrap_err();
+        assert!(err.to_string().to_lowercase().contains("scheme") || err.to_string().contains("http"),
+                "err: {err}");
+    }
+
+    #[test]
+    fn webhook_rejects_localhost_by_default() {
+        let err = validate_webhook_url("https://localhost/x", false, false).unwrap_err();
+        assert!(err.to_string().contains("loopback") || err.to_string().contains("internal"),
+                "err: {err}");
+    }
+
+    #[test]
+    fn webhook_rejects_127_by_default() {
+        let err = validate_webhook_url("https://127.0.0.1:8443/x", false, false).unwrap_err();
+        assert!(err.to_string().contains("loopback") || err.to_string().contains("internal"),
+                "err: {err}");
+    }
+
+    #[test]
+    fn webhook_rejects_cloud_metadata_endpoint() {
+        // The classic SSRF payload — AWS/GCP/Azure metadata service on 169.254.169.254.
+        let err = validate_webhook_url("http://169.254.169.254/latest/meta-data/", true, false)
+            .unwrap_err();
+        assert!(err.to_string().contains("link-local")
+             || err.to_string().contains("internal")
+             || err.to_string().contains("SSRF"),
+             "err: {err}");
+    }
+
+    #[test]
+    fn webhook_rejects_rfc1918_ranges() {
+        for host in ["10.0.0.1", "172.16.0.1", "192.168.1.1"] {
+            let url = format!("https://{host}/x");
+            assert!(validate_webhook_url(&url, false, false).is_err(),
+                "RFC1918 host must be rejected: {url}");
+        }
+    }
+
+    #[test]
+    fn webhook_allow_internal_flag_permits_localhost() {
+        assert!(validate_webhook_url("https://127.0.0.1/x", false, true).is_ok());
+    }
+
+    #[test]
+    fn webhook_rejects_ipv6_loopback() {
+        // url::Url strips brackets before returning host_str, so we get bare "::1".
+        assert!(validate_webhook_url("https://[::1]/x", false, false).is_err());
+    }
+
+    // ── Sprint 2 (S2.7) — URL redaction for error messages ───────────────────
+
+    #[test]
+    fn redact_url_scrubs_private_token_query_param() {
+        let redacted = redact_url("https://gitlab.example.com/api/v4/projects?private_token=glpat-SECRET&per_page=1");
+        assert!(!redacted.contains("SECRET"), "raw token survived: {redacted}");
+        assert!(redacted.contains("REDACTED"));
+        assert!(redacted.contains("per_page=1"), "non-secret params must survive: {redacted}");
+    }
+
+    #[test]
+    fn redact_url_scrubs_access_token_and_secret_variants() {
+        for param in ["access_token", "token", "api_key", "job_token", "webhook_secret", "auth", "code"] {
+            let url = format!("https://x.example/y?{param}=REVEAL");
+            let redacted = redact_url(&url);
+            assert!(!redacted.contains("REVEAL"),
+                "'{param}' must be redacted, got: {redacted}");
+        }
+    }
+
+    #[test]
+    fn redact_url_preserves_scheme_host_path() {
+        let redacted = redact_url("https://api.github.com/repos/x/y?token=t&per_page=100");
+        assert!(redacted.starts_with("https://api.github.com/repos/x/y"),
+            "host/path not preserved: {redacted}");
+    }
+
+    #[test]
+    fn redact_url_strips_userinfo() {
+        let redacted = redact_url("https://user:pa$$w0rd@example.com/x");
+        assert!(!redacted.contains("pa$$w0rd"), "password in userinfo leaked: {redacted}");
+    }
+
+    #[test]
+    fn redact_url_falls_back_gracefully_on_garbage_input() {
+        // Not a URL — helper must not panic.
+        let redacted = redact_url("not a url at all");
+        assert!(!redacted.is_empty());
     }
 }
 

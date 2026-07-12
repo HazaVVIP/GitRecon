@@ -105,7 +105,7 @@ impl Forge for GitHubForgeClient {
         loop {
             let resp = self.get_with_rate_limit(&current_url).await?;
             if !resp.ok() {
-                anyhow::bail!("GET {} returned HTTP {}", current_url, resp.status);
+                anyhow::bail!("GET {} returned HTTP {}", crate::validation::redact_url(&current_url), resp.status);
             }
 
             let json: serde_json::Value = serde_json::from_slice(&resp.body)?;
@@ -161,7 +161,7 @@ impl Forge for GitHubForgeClient {
         let resp = self.get_with_rate_limit(&url).await?;
 
         if !resp.ok() {
-            anyhow::bail!("GET tree {} returned HTTP {}", url, resp.status);
+            anyhow::bail!("GET tree {} returned HTTP {}", crate::validation::redact_url(&url), resp.status);
         }
 
         let json: serde_json::Value = serde_json::from_slice(&resp.body)?;
@@ -341,7 +341,7 @@ pub async fn list_repos(client: &HttpClient) -> anyhow::Result<Vec<GhRepo>> {
     loop {
         let resp = client.get(&url).await;
         if !resp.ok() {
-            anyhow::bail!("GET {} returned HTTP {}", url, resp.status);
+            anyhow::bail!("GET {} returned HTTP {}", crate::validation::redact_url(&url), resp.status);
         }
         let json: serde_json::Value = serde_json::from_slice(&resp.body)?;
         let arr  = json.as_array()
@@ -473,7 +473,7 @@ pub async fn get_tree(
     let url  = format!("{}/repos/{}/{}/git/trees/{}?recursive=1", GH_API, owner, repo, sha);
     let resp = client.get(&url).await;
     if !resp.ok() {
-        anyhow::bail!("GET tree {} returned HTTP {}", url, resp.status);
+        anyhow::bail!("GET tree {} returned HTTP {}", crate::validation::redact_url(&url), resp.status);
     }
     let json: serde_json::Value = serde_json::from_slice(&resp.body)?;
     Ok(parse_tree_entries(&json))
@@ -492,7 +492,7 @@ pub async fn get_blob_content(
     let url  = format!("{}/repos/{}/{}/git/blobs/{}", GH_API, owner, repo, sha);
     let resp = client.get(&url).await;
     if !resp.ok() {
-        anyhow::bail!("GET blob {} returned HTTP {}", url, resp.status);
+        anyhow::bail!("GET blob {} returned HTTP {}", crate::validation::redact_url(&url), resp.status);
     }
     let json: serde_json::Value = serde_json::from_slice(&resp.body)?;
     let encoding    = json["encoding"].as_str().unwrap_or("base64");

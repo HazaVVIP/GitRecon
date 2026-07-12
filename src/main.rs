@@ -300,6 +300,16 @@ struct Cli {
     #[arg(long = "webhook-secret", value_name = "KEY")]
     webhook_secret: Option<String>,
 
+    /// Sprint 2 (S2.4): allow plain HTTP webhooks. By default only https:// is accepted
+    /// because webhook bodies contain the full report including matched secret plaintext.
+    #[arg(long = "webhook-allow-http")]
+    webhook_allow_http: bool,
+
+    /// Sprint 2 (S2.4): allow webhook host to resolve to loopback / RFC1918 / link-local.
+    /// Off by default — blocks the common cloud-metadata / internal-service SSRF payload.
+    #[arg(long = "webhook-allow-internal")]
+    webhook_allow_internal: bool,
+
     // A-1: multi-target scanning
     #[arg(long = "targets", value_name = "FILE")]
     targets: Option<String>,
@@ -1003,20 +1013,10 @@ async fn run_token_scan(
     // ── 8. Webhook delivery ──────────────────────
     if let Some(ref webhook_url) = args.webhook {
         if let Ok(json_body) = std::fs::read_to_string(&report_path) {
-            // We need a plain (no-auth) client for the webhook POST
-            if let Ok(plain_cfg) = build_plain_http_config(args) {
-                if let Ok(plain_client) = HttpClient::new(plain_cfg) {
-                    let sent = rep.send_webhook(
-                        webhook_url,
-                        args.webhook_secret.as_deref(),
-                        &json_body,
-                        &plain_client,
-                    ).await;
-                    if verbose {
-                        if sent { println!("  ✔   Webhook delivered to {}", webhook_url); }
-                        else    { eprintln!("  ⚠   Webhook delivery failed"); }
-                    }
-                }
+            match try_deliver_webhook(&rep, args, webhook_url, &json_body).await {
+                Ok(true) => if verbose { println!("  ✔   Webhook delivered to {}", webhook_url); },
+                Ok(false) => if verbose { eprintln!("  ⚠   Webhook delivery failed (non-2xx response)"); },
+                Err(e) => eprintln!("  ✗   Webhook refused: {}", e),
             }
         }
     }
@@ -1446,19 +1446,10 @@ async fn run_gitlab_token_scan(
     // ── 8. Webhook delivery ──────────────────────
     if let Some(ref webhook_url) = args.webhook {
         if let Ok(json_body) = std::fs::read_to_string(&report_path) {
-            if let Ok(plain_cfg) = build_plain_http_config(args) {
-                if let Ok(plain_client) = HttpClient::new(plain_cfg) {
-                    let sent = rep.send_webhook(
-                        webhook_url,
-                        args.webhook_secret.as_deref(),
-                        &json_body,
-                        &plain_client,
-                    ).await;
-                    if verbose {
-                        if sent { println!("  ✔   Webhook delivered to {}", webhook_url); }
-                        else    { eprintln!("  ⚠   Webhook delivery failed"); }
-                    }
-                }
+            match try_deliver_webhook(&rep, args, webhook_url, &json_body).await {
+                Ok(true) => if verbose { println!("  ✔   Webhook delivered to {}", webhook_url); },
+                Ok(false) => if verbose { eprintln!("  ⚠   Webhook delivery failed (non-2xx response)"); },
+                Err(e) => eprintln!("  ✗   Webhook refused: {}", e),
             }
         }
     }
@@ -1934,19 +1925,10 @@ async fn run_bitbucket_token_scan(
     // ── 8. Webhook delivery ──────────────────────
     if let Some(ref webhook_url) = args.webhook {
         if let Ok(json_body) = std::fs::read_to_string(&report_path) {
-            if let Ok(plain_cfg) = build_plain_http_config(args) {
-                if let Ok(plain_client) = HttpClient::new(plain_cfg) {
-                    let sent = rep.send_webhook(
-                        webhook_url,
-                        args.webhook_secret.as_deref(),
-                        &json_body,
-                        &plain_client,
-                    ).await;
-                    if verbose {
-                        if sent { println!("  ✔   Webhook delivered to {}", webhook_url); }
-                        else    { eprintln!("  ⚠   Webhook delivery failed"); }
-                    }
-                }
+            match try_deliver_webhook(&rep, args, webhook_url, &json_body).await {
+                Ok(true) => if verbose { println!("  ✔   Webhook delivered to {}", webhook_url); },
+                Ok(false) => if verbose { eprintln!("  ⚠   Webhook delivery failed (non-2xx response)"); },
+                Err(e) => eprintln!("  ✗   Webhook refused: {}", e),
             }
         }
     }
@@ -2398,19 +2380,10 @@ async fn run_gitea_token_scan(
     // ── 8. Webhook delivery ──────────────────────
     if let Some(ref webhook_url) = args.webhook {
         if let Ok(json_body) = std::fs::read_to_string(&report_path) {
-            if let Ok(plain_cfg) = build_plain_http_config(args) {
-                if let Ok(plain_client) = HttpClient::new(plain_cfg) {
-                    let sent = rep.send_webhook(
-                        webhook_url,
-                        args.webhook_secret.as_deref(),
-                        &json_body,
-                        &plain_client,
-                    ).await;
-                    if verbose {
-                        if sent { println!("  ✔   Webhook delivered to {}", webhook_url); }
-                        else    { eprintln!("  ⚠   Webhook delivery failed"); }
-                    }
-                }
+            match try_deliver_webhook(&rep, args, webhook_url, &json_body).await {
+                Ok(true) => if verbose { println!("  ✔   Webhook delivered to {}", webhook_url); },
+                Ok(false) => if verbose { eprintln!("  ⚠   Webhook delivery failed (non-2xx response)"); },
+                Err(e) => eprintln!("  ✗   Webhook refused: {}", e),
             }
         }
     }
@@ -2841,17 +2814,18 @@ async fn run_azure_token_scan(
     }
 
     // ── 8. Webhook ───────────────────────────────
+    // Sprint 2 (S2.5): Azure previously POSTed via `az_client` (which carries the
+    // operator's Azure PAT in Authorization headers) AND used its own webhook body
+    // format that diverged from the other 4 forges. Both fixed by routing through
+    // try_deliver_webhook — same validation, same plain HTTP client, same schema
+    // (the persisted report body) as GitHub/GitLab/Bitbucket/Gitea.
     if let Some(ref webhook_url) = args.webhook {
-        let webhook_body = serde_json::json!({
-            "target":      azure_url.unwrap_or("https://dev.azure.com"),
-            "scan_type":   "azure_token",
-            "findings":    &stream_r.findings,
-            "tech_stack":  &stream_r.tech_stack,
-            "risk_score":  stream_r.risk_score(),
-        });
-        let _ = az_client.post(webhook_url, &webhook_body.to_string(), &[]).await;
-        if !args.quiet {
-            println!("  📡  Webhook sent\n");
+        if let Ok(json_body) = std::fs::read_to_string(&report_path) {
+            match try_deliver_webhook(&rep, args, webhook_url, &json_body).await {
+                Ok(true) => if !args.quiet { println!("  📡  Webhook sent\n"); },
+                Ok(false) => eprintln!("  ⚠   Webhook delivery failed (non-2xx response)"),
+                Err(e) => eprintln!("  ✗   Webhook refused: {}", e),
+            }
         }
     }
 
@@ -3134,18 +3108,10 @@ async fn run_dir_scan(
 
     if let Some(ref webhook_url) = args.webhook {
         if let Ok(json_body) = std::fs::read_to_string(&report_path) {
-            let sent = rep.send_webhook(
-                webhook_url,
-                args.webhook_secret.as_deref(),
-                &json_body,
-                client,
-            ).await;
-            if verbose {
-                if sent {
-                    println!("  ✔   Webhook delivered to {}", webhook_url);
-                } else {
-                    eprintln!("  ⚠   Webhook delivery failed");
-                }
+            match try_deliver_webhook(&rep, args, webhook_url, &json_body).await {
+                Ok(true) => if verbose { println!("  ✔   Webhook delivered to {}", webhook_url); },
+                Ok(false) => if verbose { eprintln!("  ⚠   Webhook delivery failed (non-2xx response)"); },
+                Err(e) => eprintln!("  ✗   Webhook refused: {}", e),
             }
         }
     }
@@ -3221,6 +3187,35 @@ fn build_plain_http_config(args: &Cli) -> anyhow::Result<HttpConfig> {
     })
 }
 
+/// Sprint 2 (S2.4): validate webhook URL against SSRF/exfil rules and deliver via a
+/// plain unauthenticated HTTP client. Every webhook call-site (7 in main.rs) funnels
+/// through here so the policy is applied uniformly — previously the Azure branch
+/// bypassed validation AND leaked the operator's Azure PAT by reusing `az_client`.
+///
+/// Returns `Ok(true)` on 2xx delivery, `Ok(false)` on non-2xx, `Err` on validation
+/// failure. Validation errors are surfaced to the caller so operators know the report
+/// was NOT delivered (and why) rather than a silent skip.
+async fn try_deliver_webhook(
+    reporter: &reporter::Reporter,
+    args: &Cli,
+    webhook_url: &str,
+    body: &str,
+) -> anyhow::Result<bool> {
+    let _validated = validation::validate_webhook_url(
+        webhook_url,
+        args.webhook_allow_http,
+        args.webhook_allow_internal,
+    )?;
+    let cfg = build_plain_http_config(args)?;
+    let plain_client = http_client::HttpClient::new(cfg)?;
+    Ok(reporter.send_webhook(
+        webhook_url,
+        args.webhook_secret.as_deref(),
+        body,
+        &plain_client,
+    ).await)
+}
+
 // ════════════════════════════════════════════════
 // MAIN PIPELINE
 // ════════════════════════════════════════════════
@@ -3229,6 +3224,12 @@ fn build_plain_http_config(args: &Cli) -> anyhow::Result<HttpConfig> {
 async fn main() {
     // SEC-004: Initialize signal handlers for cleanup on interruption
     let cleanup_flag = temp_cleanup::init_global_cleanup().await;
+
+    // Sprint 2 (S2.6): sweep orphan gitrecon_*_scan_* dirs left by a prior force-kill
+    // BEFORE this run starts creating new ones. Anything > 1h old belongs to a dead
+    // process — we cannot leak someone else's live workspace because their PID no
+    // longer holds those files. Runs synchronously; typically a few ms.
+    temp_cleanup::sweep_orphan_temp_dirs(std::time::Duration::from_secs(60 * 60));
 
     // Register signal handlers for graceful shutdown
     let cleanup_flag_clone = cleanup_flag.clone();
@@ -3247,6 +3248,12 @@ async fn main() {
                 Some(_signal) => {
                     cleanup_flag_clone.store(true, Ordering::Relaxed);
                     eprintln!("\n  [!] Interrupted. Cleaning up temporary files...");
+                    // Sprint 2 (S2.6): Drop handlers don't run under process::exit,
+                    // so we walk the registered TempDirGuard paths ourselves before
+                    // exiting. Previously reconstructed source of every scanned repo
+                    // survived in $TMPDIR after Ctrl+C — a nasty exposure on shared
+                    // red-team boxes.
+                    temp_cleanup::cleanup_registered_paths();
                     std::process::exit(130); // Exit code for SIGINT (128 + 2)
                 }
                 None => break,
@@ -3902,10 +3909,10 @@ async fn main() {
                 // O-4: Webhook delivery
                 if let Some(ref webhook_url) = args.webhook {
                     if let Ok(json_body) = std::fs::read_to_string(&report_path) {
-                        let sent = rep.send_webhook(webhook_url, args.webhook_secret.as_deref(), &json_body, &client).await;
-                        if verbose {
-                            if sent { println!("  ✔   Webhook delivered to {}", webhook_url); }
-                            else { eprintln!("  ⚠   Webhook delivery failed"); }
+                        match try_deliver_webhook(&rep, args, webhook_url, &json_body).await {
+                            Ok(true) => if verbose { println!("  ✔   Webhook delivered to {}", webhook_url); },
+                            Ok(false) => if verbose { eprintln!("  ⚠   Webhook delivery failed (non-2xx response)"); },
+                            Err(e) => eprintln!("  ✗   Webhook refused: {}", e),
                         }
                     }
                 }

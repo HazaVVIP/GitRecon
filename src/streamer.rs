@@ -2043,7 +2043,19 @@ fn scan_content(
 // ════════════════════════════════════════════════
 
 /// Write blob data to disk under `output_dir`, reconstructing directory structure.
-/// Sanitises the path to prevent path-traversal (rejects `..` and absolute components).
+///
+/// Path sanitisation (Sprint 2, S2.8 — Linux primary, Windows guarded):
+/// - Split on both `/` and `\` (Windows-style paths in tree entries).
+/// - Reject empty, `.`, `..` components (path traversal).
+/// - Reject NUL byte in any component (Linux allows it in bytes but the fs conventions
+///   fail — better to refuse than corrupt).
+/// - `#[cfg(windows)]`: reject reserved device names (CON, PRN, AUX, NUL, COM1-9,
+///   LPT1-9) case-insensitive, drive letters (`C:foo`), trailing dot/space
+///   (Windows silently strips those, letting attacker collide filenames).
+/// - After joining, canonicalise both `output_dir` and the resolved path — this
+///   defeats a symlink-under-output-dir escape (workspace contains `link` →
+///   `../../etc`; naive `starts_with` on the un-canonicalised join would allow it).
+///
 /// Returns true if the file was written successfully.
 fn write_blob_to_disk(filename: &str, data: &[u8], output_dir: &Path) -> bool {
     let normalized = filename.replace('\\', "/");
@@ -2054,15 +2066,75 @@ fn write_blob_to_disk(filename: &str, data: &[u8], output_dir: &Path) -> bool {
     if parts.is_empty() {
         return false;
     }
+
+    // Sprint 2 (S2.8): additional per-component rejects.
+    for p in &parts {
+        if p.contains('\0') {
+            return false;
+        }
+        #[cfg(windows)]
+        {
+            if is_windows_reserved_name(p) {
+                return false;
+            }
+            // Drive-letter component (`C:foo`) or trailing dot/space that Windows
+            // silently strips when opening.
+            if p.len() >= 2 && p.as_bytes()[1] == b':' {
+                return false;
+            }
+            if p.ends_with('.') || p.ends_with(' ') {
+                return false;
+            }
+        }
+    }
+
     let local_path: PathBuf = parts.iter().fold(output_dir.to_path_buf(), |acc, p| acc.join(p));
-    // Defense in depth: verify the joined path is still rooted inside output_dir
+
+    // Defense in depth #1: string-level prefix check (fast, catches obvious cases).
     if !local_path.starts_with(output_dir) {
         return false;
     }
-    if let Some(parent) = local_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+
+    // Defense in depth #2 (Sprint 2, S2.8): canonicalise parent + verify prefix.
+    // This closes the symlink-escape hole where `output_dir/link` points outside.
+    // We canonicalise the PARENT because `local_path` itself doesn't exist yet;
+    // canonicalising a non-existent path errors on Linux.
+    let parent = match local_path.parent() {
+        Some(p) => p,
+        None => return false,
+    };
+    if let Err(e) = std::fs::create_dir_all(parent) {
+        log::debug!("write_blob_to_disk: create_dir_all({:?}) failed: {}", parent, e);
+        return false;
     }
+    if let (Ok(canonical_parent), Ok(canonical_root)) =
+        (std::fs::canonicalize(parent), std::fs::canonicalize(output_dir))
+    {
+        if !canonical_parent.starts_with(&canonical_root) {
+            // A symlink under output_dir points outside — refuse the write.
+            log::warn!(
+                "write_blob_to_disk: refusing to write outside output_dir (parent {:?} escapes {:?})",
+                canonical_parent, canonical_root
+            );
+            return false;
+        }
+    }
+
     std::fs::write(&local_path, data).is_ok()
+}
+
+/// Sprint 2 (S2.8) helper: is `name` a Windows-reserved device name?
+/// Matches base name case-insensitively, ignoring extension: `CON`, `con.txt`,
+/// `COM1.log` all reserved. See MS docs on "Naming Files, Paths, and Namespaces".
+#[cfg(windows)]
+fn is_windows_reserved_name(name: &str) -> bool {
+    let base = name.split('.').next().unwrap_or(name);
+    let upper = base.to_ascii_uppercase();
+    matches!(upper.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL"
+        | "COM1" | "COM2" | "COM3" | "COM4" | "COM5" | "COM6" | "COM7" | "COM8" | "COM9"
+        | "LPT1" | "LPT2" | "LPT3" | "LPT4" | "LPT5" | "LPT6" | "LPT7" | "LPT8" | "LPT9"
+    )
 }
 
 /// Collect matching tech stack entries into a Vec (lock-free variant for worker tasks).
@@ -3578,6 +3650,68 @@ mod tests {
         let expected = dir.join("_unreferenced").join("ab").join("cdef1234567890abcdef1234567890abcdef12");
         assert!(expected.exists(), "fallback path shape must be _unreferenced/<xx>/<rest>");
         assert_eq!(std::fs::read(&expected).unwrap(), b"unmapped blob content");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── Sprint 2 (S2.8) — path validation hardening ──────────────────────────
+
+    #[test]
+    fn write_blob_rejects_nul_byte_in_component() {
+        let dir = std::env::temp_dir().join(format!("gitrecon_nul_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // \0 in filename — Linux allows it in raw bytes but every filesystem-facing tool
+        // and grep-style consumer breaks on it. We refuse rather than corrupt output.
+        let ok = write_blob_to_disk("evil\0file.txt", b"x", &dir);
+        assert!(!ok, "NUL byte in path component must be rejected");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_blob_rejects_symlink_escape() {
+        // Sprint 2 (S2.8) core regression: attacker plants `link` inside output_dir
+        // that points OUTSIDE output_dir. The raw prefix check (starts_with) misses
+        // this — we need canonical-path comparison.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            let root = std::env::temp_dir().join(format!("gitrecon_symlink_test_{}", std::process::id()));
+            let outside = std::env::temp_dir().join(format!("gitrecon_outside_{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            let _ = std::fs::remove_dir_all(&outside);
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::create_dir_all(&outside).unwrap();
+            // Plant symlink: <root>/escape -> <outside>
+            symlink(&outside, root.join("escape")).unwrap();
+
+            // Try to write escape/pwned — must be refused because escape resolves outside root.
+            let ok = write_blob_to_disk("escape/pwned", b"payload", &root);
+            assert!(!ok, "symlink-under-output_dir escape must be refused");
+            // And the file must NOT exist in the outside dir.
+            assert!(!outside.join("pwned").exists(),
+                "canonical-path check failed — file leaked to {:?}", outside);
+
+            let _ = std::fs::remove_dir_all(&root);
+            let _ = std::fs::remove_dir_all(&outside);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn write_blob_rejects_windows_reserved_names() {
+        let dir = std::env::temp_dir().join("gitrecon_win_reserved");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // CON, PRN etc. — Windows opens the device, not a file.
+        assert!(!write_blob_to_disk("CON", b"x", &dir));
+        assert!(!write_blob_to_disk("con.txt", b"x", &dir));
+        assert!(!write_blob_to_disk("COM1.log", b"x", &dir));
+        assert!(!write_blob_to_disk("lpt9", b"x", &dir));
+        // Trailing dot/space are silently stripped by Windows.
+        assert!(!write_blob_to_disk("evil.", b"x", &dir));
+        assert!(!write_blob_to_disk("evil ", b"x", &dir));
+        // Drive-letter component sneaked in.
+        assert!(!write_blob_to_disk("C:evil.txt", b"x", &dir));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

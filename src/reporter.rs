@@ -17,6 +17,92 @@ use crate::ui::{self, BannerStyle};
 use crate::ui::colors::ColorScheme;
 use crate::validation;
 
+// ════════════════════════════════════════════════
+// OUTPUT ESCAPING HELPERS (Sprint 2)
+// ════════════════════════════════════════════════
+//
+// Filenames, match strings, and pattern IDs land in reports from **attacker-controlled**
+// repo content — the repo owner can plant `<script>` in a filename, backticks in a secret
+// value, pipe chars to break a Markdown table, etc. Every writer that emits these fields
+// into a document format MUST route them through the appropriate escape function first.
+
+/// HTML escape covering the five characters required to be safe in element text AND
+/// attribute values (single quote handled too even though our template only uses
+/// double-quoted attributes — belt & suspenders for future edits).
+pub(crate) fn html_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// Markdown table cell escape. Table cells break on `|` and `\n`; backticks would close
+/// our inline-code wrapper; `[..](..)` becomes a link. We defang everything.
+pub(crate) fn md_cell_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '|' => out.push_str("\\|"),
+            '`' => out.push_str("\\`"),
+            '[' => out.push_str("\\["),
+            ']' => out.push_str("\\]"),
+            '\\' => out.push_str("\\\\"),
+            '\n' | '\r' => out.push(' '),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// RFC 4180 CSV field: always wrap in double quotes, escape internal `"` as `""`.
+/// Also strips leading `= + - @ \t \r` which trigger formula execution in
+/// Excel/LibreOffice/Numbers (CVE-2014-3524-style). `validation::sanitize_csv_field`
+/// handles the formula prefix — we ensure the quoting on top of it.
+pub(crate) fn csv_field(s: &str) -> String {
+    let sanitized = validation::sanitize_csv_field(s);
+    format!("\"{}\"", sanitized.replace('"', "\"\""))
+}
+
+/// Write a report file with restrictive permissions on Unix (Sprint 2, S2.9).
+///
+/// Report bodies contain matched secret plaintext (API keys, cloud tokens, DB
+/// passwords, PEM material). The default umask on shared Linux hosts (e.g. VPS,
+/// jump boxes, red-team boxes) creates files with mode 0644 → readable by every
+/// other UID on the box. This helper creates the file with mode 0600 (owner
+/// read/write only) BEFORE any content is written, closing that window.
+///
+/// On non-Unix platforms this falls back to `std::fs::write` — the OS ACLs are
+/// governed by NTFS inheritance which we can't tighten portably here.
+pub(crate) fn write_report_secure<P: AsRef<Path>>(path: P, contents: &[u8]) -> std::io::Result<()> {
+    let path = path.as_ref();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        file.write_all(contents)?;
+        file.sync_data()?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, contents)
+    }
+}
+
 #[derive(Clone)]
 #[allow(dead_code)]
 pub struct Reporter {
@@ -510,7 +596,7 @@ impl Reporter {
         std::fs::create_dir_all(parent)?;
         let json_str = serde_json::to_string_pretty(&report)
             .map_err(std::io::Error::other)?;
-        std::fs::write(path, json_str)
+        write_report_secure(path, json_str.as_bytes())
     }
 
     /// Save a JSON report for a `--token` scan.
@@ -551,7 +637,7 @@ impl Reporter {
         std::fs::create_dir_all(parent)?;
         let json_str = serde_json::to_string_pretty(&report)
             .map_err(std::io::Error::other)?;
-        std::fs::write(path, json_str)
+        write_report_secure(path, json_str.as_bytes())
     }
 
     /// Print the final intelligence report for a `--token` scan to the terminal.
@@ -636,7 +722,7 @@ impl Reporter {
         let parent = Path::new(path).parent().unwrap_or(Path::new("."));
         std::fs::create_dir_all(parent)?;
         let json_str = serde_json::to_string_pretty(&sarif).map_err(std::io::Error::other)?;
-        std::fs::write(path, json_str)
+        write_report_secure(path, json_str.as_bytes())
     }
 
     // O-3: CSV output format
@@ -648,27 +734,27 @@ impl Reporter {
         let mut out = String::from("file,line,severity,type,description,match,deleted,ai_related,ai_category,ai_tags\n");
         if let Some(s) = stream_r {
             for f in &s.findings {
-                // Get AI metadata first
                 let (ai_related, ai_category, ai_tags) = crate::streamer::ai_metadata_for_finding(f);
-
-                // SEC-005: CSV injection protection - sanitize all fields
-                let sanitized_filename = validation::sanitize_csv_field(&f.filename);
-                let sanitized_pattern = validation::sanitize_csv_field(&f.pattern_id);
-                let sanitized_desc = validation::sanitize_csv_field(&f.description);
-                let sanitized_match = validation::sanitize_csv_field(&f.match_str);
-                let sanitized_ai_category = validation::sanitize_csv_field(&ai_category.unwrap_or_default());
-                let sanitized_ai_tags = validation::sanitize_csv_field(&ai_tags.join("|"));
-
-                let desc = sanitized_desc.replace('"', "\"\"");
-                let m = sanitized_match.replace('"', "\"\"");
-
+                // Sprint 2 (S2.3): every field wrapped in double quotes uniformly, internal
+                // `"` escaped as `""` per RFC 4180. Previously `filename` and `pattern_id`
+                // were unquoted, so a legal comma or double-quote in a filename shifted
+                // every downstream column.
                 out.push_str(&format!(
-                    "{},{},{},{},\"{}\",\"{}\",{},{},\"{}\",\"{}\"\n",
-                    sanitized_filename, f.line, f.severity, sanitized_pattern, desc, m, f.is_deleted, ai_related, sanitized_ai_category, sanitized_ai_tags
+                    "{},{},{},{},{},{},{},{},{},{}\n",
+                    csv_field(&f.filename),
+                    f.line,
+                    csv_field(&f.severity),
+                    csv_field(&f.pattern_id),
+                    csv_field(&f.description),
+                    csv_field(&f.match_str),
+                    f.is_deleted,
+                    ai_related,
+                    csv_field(&ai_category.unwrap_or_default()),
+                    csv_field(&ai_tags.join("|")),
                 ));
             }
         }
-        std::fs::write(path, out)
+        write_report_secure(path, out.as_bytes())
     }
 
     // O-3: NDJSON output format
@@ -684,14 +770,17 @@ impl Reporter {
                 }
             }
         }
-        std::fs::write(path, out)
+        write_report_secure(path, out.as_bytes())
     }
 
     // O-3: Markdown output format
     pub fn save_markdown(&self, path: &str, target: &str, stream_r: Option<&StreamResult>) -> std::io::Result<()> {
         let parent = Path::new(path).parent().unwrap_or(Path::new("."));
         std::fs::create_dir_all(parent)?;
-        let mut out = format!("# GitRecon Report\n\n**Target:** {}\n\n", target);
+        // Sprint 2 (S2.2): target is attacker-controlled (repo URL). Escape it before
+        // interpolating into the H1 line so a `[label](evil://x)` in the URL doesn't
+        // turn into a live link.
+        let mut out = format!("# GitRecon Report\n\n**Target:** {}\n\n", md_cell_escape(target));
         out.push_str("| Severity | Type | File | Line | AI | Match |\n");
         out.push_str("|----------|------|------|------|----|-------|\n");
         if let Some(s) = stream_r {
@@ -710,13 +799,22 @@ impl Reporter {
                 } else {
                     "—".to_string()
                 };
+                // Every cell escaped: `|` breaks the table, backticks close our inline-code
+                // wrapper, `[..](..)` becomes a clickable link that could exfiltrate the
+                // reviewer's credentials via a crafted repo filename or secret payload.
                 out.push_str(&format!(
                     "| {} {} | {} | {} | {} | {} | `{}` |\n",
-                    emoji, f.severity, f.pattern_id, f.filename, f.line, ai_col, m
+                    emoji,
+                    md_cell_escape(&f.severity),
+                    md_cell_escape(&f.pattern_id),
+                    md_cell_escape(&f.filename),
+                    f.line,
+                    md_cell_escape(&ai_col),
+                    md_cell_escape(&m),
                 ));
             }
         }
-        std::fs::write(path, out)
+        write_report_secure(path, out.as_bytes())
     }
 
     // O-3: HTML output format
@@ -726,6 +824,8 @@ impl Reporter {
         let mut rows = String::new();
         if let Some(s) = stream_r {
             for f in &s.findings {
+                // Severity → CSS color chosen from a fixed allowlist. `f.severity` is checked
+                // against known values only — the color itself never contains user input.
                 let color = match f.severity.as_str() {
                     "CRITICAL" => "#ff4444",
                     "HIGH"     => "#ff8800",
@@ -740,9 +840,19 @@ impl Reporter {
                 } else {
                     "no".to_string()
                 };
+                // Sprint 2 (S2.1): every attacker-controlled field routed through html_escape
+                // before landing between tags. Previously `filename` and `match_str` reached
+                // the DOM raw — a filename like `<img src=x onerror=fetch(...)>` inside a
+                // scanned repo would fire when the reviewer opened the report.
                 rows.push_str(&format!(
                     "<tr><td style='color:{}'>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td><code>{}</code></td></tr>\n",
-                    color, f.severity, f.pattern_id, f.filename, f.line, ai_col, m
+                    color,
+                    html_escape(&f.severity),
+                    html_escape(&f.pattern_id),
+                    html_escape(&f.filename),
+                    f.line,
+                    html_escape(&ai_col),
+                    html_escape(&m),
                 ));
             }
         }
@@ -754,8 +864,8 @@ impl Reporter {
 <p><strong>Target:</strong> {}</p>
 <table><thead><tr><th>Severity</th><th>Type</th><th>File</th><th>Line</th><th>AI</th><th>Match</th></tr></thead>
 <tbody>{}</tbody></table>
-</body></html>"#, target, rows);
-        std::fs::write(path, html)
+</body></html>"#, html_escape(target), rows);
+        write_report_secure(path, html.as_bytes())
     }
 
     // O-4: Webhook integration
@@ -953,5 +1063,88 @@ mod tests {
 
         rep.save_markdown(&md_str, "target", Some(&stream)).expect("save markdown");
         rep.save_html(&html_str, "target", Some(&stream)).expect("save html");
+    }
+
+    // ── Sprint 2 — output escaping ───────────────────────────────────────────
+
+    #[test]
+    fn html_escape_covers_five_dangerous_chars() {
+        assert_eq!(html_escape("<img>"), "&lt;img&gt;");
+        assert_eq!(html_escape("a\"b"), "a&quot;b");
+        assert_eq!(html_escape("a'b"), "a&#39;b");
+        assert_eq!(html_escape("a&b"), "a&amp;b");
+    }
+
+    #[test]
+    fn html_escape_neutralises_script_injection_from_filename() {
+        let attacker = "<script>alert(1)</script>.txt";
+        let escaped = html_escape(attacker);
+        assert!(!escaped.contains("<script"), "raw <script must not survive: {escaped}");
+        assert!(escaped.starts_with("&lt;script"));
+    }
+
+    #[test]
+    fn md_cell_escape_defangs_pipe_and_link_syntax() {
+        let out = md_cell_escape("a|b [x](y) `code` \\path");
+        assert!(out.contains("\\|"));
+        assert!(out.contains("\\["));
+        assert!(out.contains("\\]"));
+        assert!(out.contains("\\`"));
+        assert!(out.contains("\\\\"));
+    }
+
+    #[test]
+    fn md_cell_escape_collapses_newlines() {
+        let out = md_cell_escape("first\nsecond\r\nthird");
+        assert!(!out.contains('\n'));
+        assert!(!out.contains('\r'));
+    }
+
+    #[test]
+    fn csv_field_always_wraps_in_double_quotes() {
+        assert!(csv_field("plain").starts_with('"'));
+        assert!(csv_field("plain").ends_with('"'));
+    }
+
+    #[test]
+    fn csv_field_doubles_internal_quotes() {
+        let out = csv_field("a\"b");
+        assert_eq!(out, "\"a\"\"b\"");
+    }
+
+    #[test]
+    fn csv_field_neutralises_formula_injection() {
+        // sanitize_csv_field prepends `'` to `=`/`+`/`-`/`@` — csv_field then wraps.
+        let out = csv_field("=CMD");
+        assert!(out.starts_with("\"'") || out.starts_with("\"\\'"),
+            "expected leading quote-prefix on formula, got {out}");
+    }
+
+    #[test]
+    fn html_report_body_has_no_raw_script_tag() {
+        let rep = Reporter::new(true, &ui::theme::Theme::default());
+        let attack = Finding {
+            filename: "<script>alert(1)</script>.txt".into(),
+            line: 1,
+            pattern_id: "<img src=x onerror=alert(1)>".into(),
+            description: "test".into(),
+            severity: "HIGH".into(),
+            match_str: "</code><script>alert(2)</script>".into(),
+            context: String::new(),
+            is_deleted: false,
+            commit_sha1: None,
+            confidence_adjustment: None,
+        };
+        let mut sr = StreamResult::default();
+        sr.findings.push(attack);
+        let tmp = std::env::temp_dir().join(format!("gitrecon_xss_test_{}", std::process::id()));
+        let _guard = TempDirGuard::new(tmp.clone());
+        let html_path = tmp.join("report.html");
+        rep.save_html(&html_path.to_string_lossy(), "https://evil.example/<img onerror=x>",
+            Some(&sr)).expect("write");
+        let body = std::fs::read_to_string(&html_path).expect("read");
+        // Only expected <script> tags are ours (there are none in the template).
+        assert!(!body.contains("<script"), "attacker <script tag leaked into HTML report");
+        assert!(!body.contains("onerror="), "attacker onerror attribute leaked into HTML report");
     }
 }
