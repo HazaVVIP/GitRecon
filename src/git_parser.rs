@@ -70,13 +70,40 @@ pub struct TreeEntry {
 }
 
 impl TreeEntry {
+    /// Regular files (100644) and executables (100755).
+    ///
+    /// Symlinks (120000) are treated as blobs because their "content" is the target path —
+    /// often useful for secret discovery (e.g. .env → /etc/passwd style pointers).
     pub fn is_blob(&self) -> bool {
-        self.mode == "100644" || self.mode == "100755"
+        let m = self.normalized_mode();
+        m == "100644" || m == "100755" || m == "120000"
     }
 
-    #[allow(dead_code)]
+    /// Subdirectory tree entry. Git stores tree mode as "40000" (5 chars, no leading zero) —
+    /// comparing against "040000" (6 chars) never matches, which used to silently drop
+    /// every subdirectory during commit-graph traversal.
     pub fn is_tree(&self) -> bool {
-        self.mode == "040000"
+        self.normalized_mode() == "40000"
+    }
+
+    /// Submodule reference (gitlink). Points to a commit in a foreign repo — we cannot
+    /// enumerate it without recursing into `.gitmodules`, so callers should log-skip.
+    #[allow(dead_code)]
+    pub fn is_gitlink(&self) -> bool {
+        self.normalized_mode() == "160000"
+    }
+
+    /// Symlink blob — content is the target path string.
+    #[allow(dead_code)]
+    pub fn is_symlink(&self) -> bool {
+        self.normalized_mode() == "120000"
+    }
+
+    /// Strip leading zeros so `"040000"` and `"40000"` compare equal. Git's canonical
+    /// tree encoding omits the leading zero, but some third-party writers pad it.
+    fn normalized_mode(&self) -> &str {
+        let trimmed = self.mode.trim_start_matches('0');
+        if trimmed.is_empty() { "0" } else { trimmed }
     }
 }
 
@@ -110,8 +137,17 @@ impl IndexParser {
             None => return Err("Invalid index file: truncated entry count".into()),
         };
 
-        if !matches!(version, 2..=4) {
-            return Err(format!("Unsupported index version: {version}"));
+        if !matches!(version, 2..=3) {
+            // Index v4 uses path-prefix compression: each entry's filename is preceded by a
+            // varint indicating how many bytes are shared with the previous entry's path.
+            // Without that decoder every entry after the first would have garbled filenames
+            // AND misaligned offsets — silently corrupting the SHA1→path map. Reject rather
+            // than pretend to support it. Callers can ask the source repo to downgrade with
+            // `git update-index --index-version=3`.
+            return Err(format!(
+                "Unsupported index version: {version} (v4 path-prefix compression not implemented — \
+                 downgrade with `git update-index --index-version=3` on source repo)"
+            ));
         }
 
         let mut entries = Vec::new();
@@ -711,5 +747,85 @@ mod tests {
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].ref_name, "refs/heads/main");
         assert_eq!(refs[0].peeled.as_deref(), Some("b3b4c5d6e7f8a3b4c5d6e7f8a3b4c5d6e7f8a3b4"));
+    }
+
+    // ── Sprint 1 — TreeEntry mode classification ─────────────────────────────
+    fn te(mode: &str) -> TreeEntry {
+        TreeEntry { mode: mode.to_string(), name: "x".into(), sha1: "a".repeat(40) }
+    }
+
+    #[test]
+    fn tree_entry_regular_file_is_blob() {
+        assert!(te("100644").is_blob());
+        assert!(!te("100644").is_tree());
+    }
+
+    #[test]
+    fn tree_entry_executable_is_blob() {
+        assert!(te("100755").is_blob());
+    }
+
+    #[test]
+    fn tree_entry_symlink_is_blob() {
+        // Regression: symlink target strings often point to secret material (.env, /etc/passwd).
+        // They must be enumerated, not silently dropped.
+        assert!(te("120000").is_blob());
+        assert!(te("120000").is_symlink());
+    }
+
+    #[test]
+    fn tree_entry_subtree_canonical_form_is_tree() {
+        // Regression: Git writes subtree mode as "40000" (no leading zero). Comparing
+        // against "040000" — as the old walker did — never matched, silently dropping
+        // every subdirectory.
+        assert!(te("40000").is_tree());
+        assert!(!te("40000").is_blob());
+    }
+
+    #[test]
+    fn tree_entry_subtree_padded_form_is_tree() {
+        // Some third-party tools pad the leading zero.
+        assert!(te("040000").is_tree());
+    }
+
+    #[test]
+    fn tree_entry_gitlink_neither_blob_nor_tree() {
+        // Submodule (foreign commit reference) — must be recognisable so callers can skip.
+        assert!(te("160000").is_gitlink());
+        assert!(!te("160000").is_blob());
+        assert!(!te("160000").is_tree());
+    }
+
+    // ── Sprint 1 — IndexParser version guard ─────────────────────────────────
+    #[test]
+    fn index_parser_rejects_v4_with_actionable_error() {
+        // Craft a minimal DIRC v4 header. Parser must refuse it — v4 uses path-prefix
+        // compression that would corrupt every entry past the first.
+        let mut data = Vec::from(b"DIRC" as &[u8]);
+        data.extend_from_slice(&4u32.to_be_bytes()); // version = 4
+        data.extend_from_slice(&0u32.to_be_bytes()); // entry count = 0
+
+        let err = IndexParser.parse(&data).expect_err("v4 must be rejected");
+        assert!(err.contains("Unsupported index version: 4"), "unexpected message: {err}");
+        assert!(err.contains("index-version=3"), "message should hint at the downgrade command: {err}");
+    }
+
+    #[test]
+    fn index_parser_accepts_v2_and_v3_header() {
+        for version in [2u32, 3u32] {
+            let mut data = Vec::from(b"DIRC" as &[u8]);
+            data.extend_from_slice(&version.to_be_bytes());
+            data.extend_from_slice(&0u32.to_be_bytes());
+            let out = IndexParser.parse(&data).expect("v2/v3 header must parse");
+            assert!(out.is_empty(), "empty index expected for zero entries");
+        }
+    }
+
+    #[test]
+    fn index_parser_rejects_v1() {
+        let mut data = Vec::from(b"DIRC" as &[u8]);
+        data.extend_from_slice(&1u32.to_be_bytes());
+        data.extend_from_slice(&0u32.to_be_bytes());
+        assert!(IndexParser.parse(&data).is_err());
     }
 }

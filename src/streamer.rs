@@ -1594,10 +1594,19 @@ fn process_blob_content(
 
     match obj.obj_type.as_str() {
         "blob" => {
-            // Persist blob to disk first, before any scan-skip guards
+            // Persist blob to disk first, before any scan-skip guards.
+            //
+            // For blobs WITHOUT a filename mapping (deep-history blobs discovered via pack
+            // enumeration or commit-graph walks beyond `max_commits`, dangling refs, etc.)
+            // we still write the content under an `_unreferenced/<xx>/<rest>` fallback path
+            // so the reconstruction is lossless. Previously these were silently dropped —
+            // `save_result = None` — leaving the local tree incomplete with no diagnostic.
             let save_result = if let Some(ref dir) = save_dir {
                 if let Some(actual_name) = sha1_to_file.get(sha1) {
                     Some(write_blob_to_disk(actual_name, &obj.data, dir))
+                } else if sha1.len() >= 3 {
+                    let fallback = format!("_unreferenced/{}/{}", &sha1[..2], &sha1[2..]);
+                    Some(write_blob_to_disk(&fallback, &obj.data, dir))
                 } else {
                     None
                 }
@@ -1895,13 +1904,25 @@ async fn fetch_and_process(
     let content_length: Option<u64> = resp.headers.get("content-length")
         .and_then(|v| v.parse().ok());
 
-    // Enforce max_scan_bytes limit before processing
-    if let Err(_e) = crate::validation::validate_content_length(content_length, max_scan_bytes) {
-        if verbose {
-            eprintln!("  [!] Blob {} exceeds --max-blob-size limit (Content-Length: {:?}), skipping",
-                &sha1[..sha1.len().min(8)], content_length);
+    // Enforce max_scan_bytes limit before processing — but ONLY when the user is not
+    // reconstructing to disk. `--save` reconstruction must be lossless: an oversized
+    // blob should still be written; only the scan pass is skipped (handled inside
+    // process_blob_content via the per_blob_limit guard).
+    if save_dir.is_none() {
+        if let Err(_e) = crate::validation::validate_content_length(content_length, max_scan_bytes) {
+            if verbose {
+                eprintln!("  [!] Blob {} exceeds --max-blob-size limit (Content-Length: {:?}), skipping",
+                    &sha1[..sha1.len().min(8)], content_length);
+            }
+            return WorkerResult::Skipped;
         }
-        return WorkerResult::Skipped;
+    } else if verbose {
+        if let Some(len) = content_length {
+            if len as usize > max_scan_bytes {
+                eprintln!("  [!] Blob {} ({} bytes) exceeds --max-blob-size but --save is on: saving without scan",
+                    &sha1[..sha1.len().min(8)], len);
+            }
+        }
     }
 
     // PERF-005: Store fetched content in cache (BUG-ERR-009: now async)
@@ -3539,6 +3560,24 @@ mod tests {
         assert!(dir.join("large_file.bin").exists(), "Oversized blob file must exist on disk");
         let saved = std::fs::read(dir.join("large_file.bin")).unwrap();
         assert_eq!(saved.len(), MAX_SCAN_BYTES + 1, "Saved oversized content must be complete");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_blob_to_disk_unreferenced_fallback_layout() {
+        // Sprint 1 regression: blobs without a filename mapping (deep-history, dangling
+        // refs, pack-only enumeration) must still land on disk under the
+        // `_unreferenced/<xx>/<rest>` fallback so --save is lossless.
+        let dir = std::env::temp_dir().join("gitrecon_test_unreferenced");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let sha1 = "abcdef1234567890abcdef1234567890abcdef12";
+        let fallback = format!("_unreferenced/{}/{}", &sha1[..2], &sha1[2..]);
+        let ok = write_blob_to_disk(&fallback, b"unmapped blob content", &dir);
+        assert!(ok, "fallback path must be writable");
+        let expected = dir.join("_unreferenced").join("ab").join("cdef1234567890abcdef1234567890abcdef12");
+        assert!(expected.exists(), "fallback path shape must be _unreferenced/<xx>/<rest>");
+        assert_eq!(std::fs::read(&expected).unwrap(), b"unmapped blob content");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

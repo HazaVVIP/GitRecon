@@ -158,11 +158,22 @@ lazy_static! {
 
 pub struct Mapper {
     client: HttpClient,
+    /// Sprint 1: how deep to walk the commit graph (was hardcoded to 100).
+    /// Applies only to the fallback traversal that builds `graph_sha1_to_file` when the
+    /// index is missing or partial. `None` uses the historical default (100).
+    max_history: Option<usize>,
 }
 
 impl Mapper {
     pub fn new(client: HttpClient) -> Self {
-        Self { client }
+        Self { client, max_history: None }
+    }
+
+    /// Configure commit-graph traversal depth. `0` means unlimited (careful — pathological
+    /// repos can have millions of commits).
+    pub fn with_max_history(mut self, max_history: usize) -> Self {
+        self.max_history = Some(max_history);
+        self
     }
 
     pub async fn run(&self, git_url: &str, branch: Option<&str>, verify_objects: bool) -> MapResult {
@@ -307,14 +318,24 @@ impl Mapper {
         // 5. Parse index (DIRC)
         if let Some(raw) = meta.get("index") {
             let parser = IndexParser;
-            if let Ok(entries) = parser.parse(raw) {
-                for e in &entries {
-                    sha1s.insert(e.sha1.clone());
-                    result.blob_sha1s.insert(e.sha1.clone());
-                    // Populate index_sha1_to_file mapping
-                    result.index_sha1_to_file.insert(e.sha1.clone(), e.filename.clone());
+            match parser.parse(raw) {
+                Ok(entries) => {
+                    for e in &entries {
+                        sha1s.insert(e.sha1.clone());
+                        result.blob_sha1s.insert(e.sha1.clone());
+                        // Populate index_sha1_to_file mapping
+                        result.index_sha1_to_file.insert(e.sha1.clone(), e.filename.clone());
+                    }
+                    result.index_entries = entries;
                 }
-                result.index_entries = entries;
+                Err(e) => {
+                    // Surface parse errors instead of silently degrading. Common cause is index v4
+                    // (path-prefix compression), which we refuse rather than corrupting the map.
+                    let _ = writeln!(
+                        &mut std::io::stderr(),
+                        "  [!] Index parse failed: {e} — SHA1→path map will fall back to commit-graph walk"
+                    );
+                }
             }
         }
 
@@ -495,7 +516,9 @@ impl Mapper {
                 let git_url_walk = git_url.to_string();
 
                 // Walk commit graph and collect all blob SHA1s with paths
-                let max_commits = 100; // Limit traversal for performance
+                // Sprint 1: was hardcoded 100. Now configurable via `with_max_history`
+                // (surfaced as CLI `--max-history`). `0` means unlimited.
+                let max_commits = self.max_history.unwrap_or(100);
                 let mut visited_commits = std::collections::HashSet::new();
                 let mut graph_blobs = std::collections::HashSet::new();
                 let mut graph_paths = std::collections::HashMap::new();
@@ -507,7 +530,7 @@ impl Mapper {
                     if visited_commits.contains(&commit_sha1) {
                         continue;
                     }
-                    if visited_commits.len() >= max_commits {
+                    if max_commits > 0 && visited_commits.len() >= max_commits {
                         break;
                     }
 
@@ -563,10 +586,12 @@ impl Mapper {
                             if entry.is_blob() {
                                 graph_blobs.insert(entry.sha1.clone());
                                 graph_paths.entry(entry.sha1).or_insert(full_path);
-                            } else if entry.mode == "040000" {
-                                // Queue nested tree
+                            } else if entry.is_tree() {
+                                // Queue nested tree — Git stores tree mode as "40000" (no leading zero).
+                                // Previously compared against "040000" which never matched → all subdirs silently dropped.
                                 tree_queue.push_back((entry.sha1, full_path));
                             }
+                            // Submodule (is_gitlink) intentionally skipped — commit lives in a foreign repo.
                         }
                     }
 
@@ -768,5 +793,28 @@ mod tests {
     #[test]
     fn test_meta_files_contains_upstream_remote() {
         assert!(META_FILES.contains(&"refs/remotes/upstream/HEAD"), "upstream/HEAD should be in META_FILES");
+    }
+
+    // ── Sprint 1 — Mapper history depth ──────────────────────────────────────
+    #[test]
+    fn mapper_default_max_history_is_none_until_configured() {
+        let client = crate::http_client::HttpClient::new(Default::default()).unwrap();
+        let m = Mapper::new(client);
+        assert!(m.max_history.is_none(), "default constructor should not set max_history");
+    }
+
+    #[test]
+    fn mapper_with_max_history_stores_value() {
+        let client = crate::http_client::HttpClient::new(Default::default()).unwrap();
+        let m = Mapper::new(client).with_max_history(500);
+        assert_eq!(m.max_history, Some(500));
+    }
+
+    #[test]
+    fn mapper_with_max_history_zero_means_unlimited() {
+        // The walker interprets max_commits == 0 as "no cap" — see the guard in Mapper::run.
+        let client = crate::http_client::HttpClient::new(Default::default()).unwrap();
+        let m = Mapper::new(client).with_max_history(0);
+        assert_eq!(m.max_history, Some(0));
     }
 }

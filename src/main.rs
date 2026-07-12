@@ -235,6 +235,11 @@ struct Cli {
     #[arg(long = "max-blob-size", default_value = "4", value_name = "MB")]
     max_blob_size: usize,
 
+    // Sprint 1: bound the commit-graph traversal depth (previously hardcoded to 100 in mapper.rs).
+    // Deeper history means more historical blobs discovered — at the cost of extra HTTP fetches.
+    #[arg(long = "max-history", default_value = "500", value_name = "COMMITS")]
+    max_history: usize,
+
     // DX-3: --entropy-threshold
     #[arg(long = "entropy-threshold", default_value = "4.5", value_name = "FLOAT")]
     entropy_threshold: f64,
@@ -3667,7 +3672,7 @@ async fn main() {
                     println!("  ◈  Repository reconnaissance...");
                 }
 
-                let mapper  = mapper::Mapper::new(client.clone());
+                let mapper  = mapper::Mapper::new(client.clone()).with_max_history(args.max_history);
                 let map_r   = mapper.run(&dr.git_url, dr.branch.as_deref(), args.verify_objects).await;
 
                 // DX-4: --dry-run
