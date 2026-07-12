@@ -15,7 +15,7 @@ use sha1::{Sha1, Digest};
 
 /// Safely read a big-endian u32 from a slice at a given offset.
 /// Returns None if the slice is too short.
-fn read_u32_be(data: &[u8], offset: usize) -> Option<u32> {
+pub(crate) fn read_u32_be(data: &[u8], offset: usize) -> Option<u32> {
     if data.len() < offset + 4 {
         return None;
     }
@@ -60,6 +60,18 @@ pub struct CommitInfo {
     pub author_ts: i64,
     #[allow(dead_code)]
     pub message: String,
+}
+
+/// Sprint 5 (S5.2): metadata extracted from an annotated tag object. Callers use
+/// `target` to recurse into whatever the tag points at (commit / tree / blob /
+/// another tag — annotated tags CAN be nested).
+#[derive(Debug, Clone)]
+pub struct TagInfo {
+    pub target: String,
+    #[allow(dead_code)]
+    pub target_type: String,
+    #[allow(dead_code)]
+    pub tag_name: String,
 }
 
 #[derive(Debug, Clone)]
@@ -396,6 +408,49 @@ impl ObjectParser {
             author_ts,
             message: msg_lines.join("\n").trim().to_string(),
         })
+    }
+
+    /// Sprint 5 (S5.2): parse an annotated tag object.
+    ///
+    /// Annotated tags (`git tag -a v1.0`) are first-class objects containing:
+    /// ```text
+    /// object <sha1>       ← target commit / tree / blob / another tag
+    /// type <object-type>
+    /// tag <tag-name>
+    /// tagger <name> <email> <ts> <tz>
+    ///
+    /// <optional message>
+    /// ```
+    /// Historically the mapper stopped at `obj_type == "commit"` in the graph walk
+    /// which meant a HEAD pointing at a tag terminated traversal immediately.
+    /// This returns the `object` SHA1 so callers can recurse.
+    pub fn parse_tag(&self, obj: &GitObject) -> Option<TagInfo> {
+        if obj.obj_type != "tag" {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&obj.data);
+
+        let mut target = String::new();
+        let mut target_type = String::new();
+        let mut tag_name = String::new();
+
+        for line in text.lines() {
+            if line.is_empty() {
+                break; // header/body separator
+            }
+            if let Some(rest) = line.strip_prefix("object ") {
+                target = rest.trim().to_string();
+            } else if let Some(rest) = line.strip_prefix("type ") {
+                target_type = rest.trim().to_string();
+            } else if let Some(rest) = line.strip_prefix("tag ") {
+                tag_name = rest.trim().to_string();
+            }
+        }
+
+        if !is_valid_sha1(&target) {
+            return None;
+        }
+        Some(TagInfo { target, target_type, tag_name })
     }
 
     pub fn parse_tree(&self, obj: &GitObject) -> Vec<TreeEntry> {
@@ -994,5 +1049,58 @@ mod tests {
         // what a real git command would produce for the empty tree.
         let empty_tree_sha1 = ObjectParser.sha1_of("tree", b"");
         assert_eq!(empty_tree_sha1, "4b825dc642cb6eb9a060e54bf8d69288fbee4904");
+    }
+
+    // ── Sprint 5 (S5.2) — tag object dereference ─────────────────────────────
+
+    #[test]
+    fn parse_tag_extracts_target_sha() {
+        let target = "1".repeat(40);
+        let body = format!("object {target}\ntype commit\ntag v1.0\ntagger Someone <s@e> 0 +0000\n\nrelease note\n");
+        let obj = GitObject {
+            sha1: "a".repeat(40),
+            obj_type: "tag".to_string(),
+            size: body.len(),
+            data: body.into_bytes(),
+        };
+        let info = ObjectParser.parse_tag(&obj).expect("valid tag must parse");
+        assert_eq!(info.target, target);
+        assert_eq!(info.target_type, "commit");
+        assert_eq!(info.tag_name, "v1.0");
+    }
+
+    #[test]
+    fn parse_tag_rejects_non_tag() {
+        let obj = GitObject {
+            sha1: "a".repeat(40),
+            obj_type: "commit".to_string(),
+            size: 0,
+            data: b"".to_vec(),
+        };
+        assert!(ObjectParser.parse_tag(&obj).is_none());
+    }
+
+    #[test]
+    fn parse_tag_rejects_missing_object_line() {
+        let body = "type commit\ntag v1.0\n\nnote";
+        let obj = GitObject {
+            sha1: "a".repeat(40),
+            obj_type: "tag".to_string(),
+            size: body.len(),
+            data: body.as_bytes().to_vec(),
+        };
+        assert!(ObjectParser.parse_tag(&obj).is_none());
+    }
+
+    #[test]
+    fn parse_tag_rejects_malformed_sha() {
+        let body = "object not-a-sha\ntype commit\ntag v1.0\n\n";
+        let obj = GitObject {
+            sha1: "a".repeat(40),
+            obj_type: "tag".to_string(),
+            size: body.len(),
+            data: body.as_bytes().to_vec(),
+        };
+        assert!(ObjectParser.parse_tag(&obj).is_none());
     }
 }

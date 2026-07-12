@@ -72,6 +72,10 @@ env_logger = "0.11"
 dirs = "5.0"
 
 # SEC-004: Signal handling for cleanup
+# Sprint 5 (S5.8): gated to Unix — signal-hook-tokio pulls tokio::net::UnixStream
+# which fails to compile on Windows. On Windows the signal-handler task in
+# main.rs is a no-op and Ctrl-C reaches the process via the default OS handler.
+[target.'cfg(unix)'.dependencies]
 signal-hook = "0.3"
 signal-hook-tokio = { version = "0.3", features = ["futures-v0_3"] }
 
@@ -85,7 +89,9 @@ subtle = "2.6"
 # URL validation
 url = "2.5"
 
-# SEC-007: TOCTOU protection - libc for uid checks
+# SEC-007 / TTY layout: libc used across checkpoint.rs (getuid) and layout.rs
+# (TIOCGWINSZ). Both are Unix-only APIs but the crate itself builds on Windows
+# (empty stub), so keep it unconditional here to avoid a `no libc found` error.
 libc = "0.2"
 
 # DEADLOCK FIX: Fair mutex for high-concurrency cache operations

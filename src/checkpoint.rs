@@ -39,6 +39,7 @@
 use std::fs;
 use std::fs::File;
 use std::io::{BufReader, Read};
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::path::PathBuf;
@@ -401,23 +402,30 @@ fn validate_directory_safe(path: &Path) -> Result<()> {
         anyhow::bail!("Security violation: checkpoint path is a symlink: {}", path.display());
     }
 
-    // Check: owned by current user
-    let uid = metadata.uid();
-    let current_uid = unsafe { libc::getuid() };
-    if uid != current_uid {
-        anyhow::bail!(
-            "Security violation: checkpoint directory not owned by current user (uid={}, expected={}): {}",
-            uid, current_uid, path.display()
-        );
-    }
+    // Sprint 5 (S5.8): Unix-only ownership + mode checks. See validate_checkpoint_file
+    // for the rationale — Windows uses NTFS ACLs, unreproducible portably here.
+    #[cfg(unix)]
+    {
+        let uid = metadata.uid();
+        let current_uid = unsafe { libc::getuid() };
+        if uid != current_uid {
+            anyhow::bail!(
+                "Security violation: checkpoint directory not owned by current user (uid={}, expected={}): {}",
+                uid, current_uid, path.display()
+            );
+        }
 
-    // Check: not world-writable (no o+w)
-    let mode = metadata.mode() & 0o777;
-    if mode & 0o002 != 0 {
-        anyhow::bail!(
-            "Security violation: checkpoint directory is world-writable: {}",
-            path.display()
-        );
+        let mode = metadata.mode() & 0o777;
+        if mode & 0o002 != 0 {
+            anyhow::bail!(
+                "Security violation: checkpoint directory is world-writable: {}",
+                path.display()
+            );
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata; // silence unused warning
     }
 
     Ok(())
@@ -435,13 +443,18 @@ pub fn ensure_checkpoint_dir() -> Result<PathBuf> {
         fs::create_dir_all(&dir)
             .with_context(|| format!("Failed to create checkpoint directory: {}", dir.display()))?;
 
-        // Set restrictive permissions (0700 = owner rwx only)
-        let mut perms = fs::metadata(&dir)
-            .with_context(|| format!("Failed to get metadata for checkpoint directory: {}", dir.display()))?
-            .permissions();
-        perms.set_mode(0o700);
-        fs::set_permissions(&dir, perms)
-            .with_context(|| format!("Failed to set permissions on checkpoint directory: {}", dir.display()))?;
+        // Sprint 5 (S5.8): 0700 dir permissions are Unix-only. On Windows the
+        // parent %APPDATA% inherits owner-only ACLs, so this stays secure by
+        // NTFS default without an explicit set_permissions call.
+        #[cfg(unix)]
+        {
+            let mut perms = fs::metadata(&dir)
+                .with_context(|| format!("Failed to get metadata for checkpoint directory: {}", dir.display()))?
+                .permissions();
+            perms.set_mode(0o700);
+            fs::set_permissions(&dir, perms)
+                .with_context(|| format!("Failed to set permissions on checkpoint directory: {}", dir.display()))?;
+        }
     }
 
     // Validate directory is safe (TOCTOU protection: validate after creation)
@@ -487,23 +500,32 @@ fn validate_checkpoint_file(file: &File) -> Result<()> {
         anyhow::bail!("Security violation: checkpoint path is not a regular file");
     }
 
-    // Check: owned by current user
-    let uid = metadata.uid();
-    let current_uid = unsafe { libc::getuid() };
-    if uid != current_uid {
-        anyhow::bail!(
-            "Security violation: checkpoint file not owned by current user (uid={}, expected={})",
-            uid, current_uid
-        );
-    }
+    // Sprint 5 (S5.8): the ownership + permission checks below are Unix-only.
+    // Windows relies on NTFS ACLs; we can't reproduce the exact "owned by
+    // current user + mode 0600" contract portably. Skip on Windows — the file
+    // was created by the same process (see save_checkpoint's create_new + mode
+    // 0600 write which is also Unix-gated), so a Windows attacker would need
+    // filesystem-level access we can't defend against at this layer anyway.
+    #[cfg(unix)]
+    {
+        // Check: owned by current user
+        let uid = metadata.uid();
+        let current_uid = unsafe { libc::getuid() };
+        if uid != current_uid {
+            anyhow::bail!(
+                "Security violation: checkpoint file not owned by current user (uid={}, expected={})",
+                uid, current_uid
+            );
+        }
 
-    // Check: permissions are exactly 0600 (owner read/write only)
-    let mode = metadata.mode() & 0o777;
-    if mode != 0o600 {
-        anyhow::bail!(
-            "Security violation: checkpoint file has insecure permissions (mode={:04o}, expected=0600)",
-            mode
-        );
+        // Check: permissions are exactly 0600 (owner read/write only)
+        let mode = metadata.mode() & 0o777;
+        if mode != 0o600 {
+            anyhow::bail!(
+                "Security violation: checkpoint file has insecure permissions (mode={:04o}, expected=0600)",
+                mode
+            );
+        }
     }
 
     // Check: file size is reasonable (< 10MB)
@@ -632,10 +654,21 @@ pub fn save_checkpoint(checkpoint: &Checkpoint) -> Result<()> {
         // BUG-STAB-009: Helper function to write to temp file with proper cleanup
         let write_result = (|| {
             use std::io::Write;
+            // Sprint 5 (S5.8): OpenOptions::mode() is a Unix-only extension.
+            // On Windows, permissions come from NTFS ACL inheritance and there's
+            // no direct portable equivalent — the file lives in %APPDATA% which
+            // inherits owner-only ACLs from the user's profile.
+            #[cfg(unix)]
             let mut file = fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .mode(0o600)
+                .open(&temp_path)
+                .with_context(|| format!("Failed to create temp checkpoint: {}", temp_path.display()))?;
+            #[cfg(not(unix))]
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
                 .open(&temp_path)
                 .with_context(|| format!("Failed to create temp checkpoint: {}", temp_path.display()))?;
 
@@ -777,9 +810,13 @@ pub fn delete_checkpoint(target: &str) -> Result<()> {
         anyhow::bail!("Security violation: checkpoint path is not a regular file: {}", path.display());
     }
 
-    let current_uid = unsafe { libc::getuid() };
-    if metadata.uid() != current_uid {
-        anyhow::bail!("Security violation: checkpoint file not owned by current user: {}", path.display());
+    // Sprint 5 (S5.8): Unix-only ownership check.
+    #[cfg(unix)]
+    {
+        let current_uid = unsafe { libc::getuid() };
+        if metadata.uid() != current_uid {
+            anyhow::bail!("Security violation: checkpoint file not owned by current user: {}", path.display());
+        }
     }
 
     // Close handle, then unlink (safe because we validated the handle)
@@ -836,11 +873,14 @@ pub fn cleanup_old_checkpoints() -> Result<usize> {
             continue;
         }
 
-        // Skip files not owned by us
-        let current_uid = unsafe { libc::getuid() };
-        if metadata.uid() != current_uid {
-            drop(file);
-            continue;
+        // Skip files not owned by us (Unix only — see S5.8).
+        #[cfg(unix)]
+        {
+            let current_uid = unsafe { libc::getuid() };
+            if metadata.uid() != current_uid {
+                drop(file);
+                continue;
+            }
         }
 
         // Check age
@@ -912,9 +952,13 @@ pub fn find_latest_checkpoints(limit: usize) -> Result<Vec<Checkpoint>> {
             continue;
         }
 
-        let current_uid = unsafe { libc::getuid() };
-        if metadata.uid() != current_uid {
-            continue;
+        // Sprint 5 (S5.8): Unix-only ownership check.
+        #[cfg(unix)]
+        {
+            let current_uid = unsafe { libc::getuid() };
+            if metadata.uid() != current_uid {
+                continue;
+            }
         }
 
         // Try to load the checkpoint
@@ -1250,9 +1294,12 @@ mod tests {
             "Checkpoint directory should not be a symlink"
         );
 
-        // Verify it's owned by current user
-        let current_uid = unsafe { libc::getuid() };
-        assert_eq!(metadata.uid(), current_uid);
+        // Verify it's owned by current user (Unix only — see S5.8).
+        #[cfg(unix)]
+        {
+            let current_uid = unsafe { libc::getuid() };
+            assert_eq!(metadata.uid(), current_uid);
+        }
 
         // temp_dir dropped here
         drop(temp_dir);
@@ -1296,6 +1343,8 @@ mod tests {
     /// Test 9: Checkpoint version compatibility and migration
     ///
     /// Verifies V1 to V2 migration works correctly.
+    // Sprint 5 (S5.8): test uses OpenOptions::mode which is Unix-only.
+    #[cfg(unix)]
     #[test]
     fn test_checkpoint_version_migration() {
         let _lock = TEST_MUTEX.lock().unwrap();

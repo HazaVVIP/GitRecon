@@ -60,18 +60,28 @@ impl GiteaForgeClient {
 
     /// Make a GET request and update rate limit tracking.
     async fn get_with_rate_limit(&self, url: &str) -> anyhow::Result<crate::http_client::Response> {
-        let resp = self.client.get(url).await;
-
-        // Update rate limit from headers
-        if resp.status == 200 || resp.status == 0 {
+        // Sprint 5 (S5.5): retry on 429 with Retry-After; see github_api counterpart.
+        for attempt in 0..3u32 {
+            let resp = self.client.get(url).await;
+            if resp.status == 429 {
+                let wait_s = resp.headers.get("retry-after")
+                    .and_then(|v| v.trim().parse::<u64>().ok())
+                    .unwrap_or(60).min(300);
+                log::warn!(
+                    "Gitea rate-limited (HTTP 429); sleeping {}s before retry {}/3",
+                    wait_s, attempt + 1,
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(wait_s)).await;
+                continue;
+            }
             let mut headers = std::collections::HashMap::new();
             for (k, v) in resp.headers.iter() {
                 headers.insert(k.to_lowercase(), v.clone());
             }
             self.update_rate_limit(&headers);
+            return Ok(resp);
         }
-
-        Ok(resp)
+        anyhow::bail!("Rate limit exhausted after 3 retries for {}", crate::validation::redact_url(url))
     }
 }
 

@@ -107,6 +107,11 @@ pub struct MapResult {
     /// Whether at least one git object (blob/tree/commit) is accessible
     /// This distinguishes between full exposure and partial (metadata-only) exposure
     pub objects_accessible: bool,
+    /// Sprint 5 (S5.1): pack-derived objects, encoded as loose-object bytes so
+    /// the streamer can treat them identically to a fetched `objects/xx/yy` blob.
+    /// Keys are SHA1; values are zlib-compressed `<type> <size>\0<content>` bytes.
+    /// Populated when the scanner successfully fetches `.pack` files.
+    pub pack_objects: HashMap<String, Vec<u8>>,
 }
 
 impl MapResult {
@@ -145,6 +150,36 @@ impl MapResult {
         // (historical files, bare repos without index)
         for (sha1, path) in &self.graph_sha1_to_file {
             result.entry(sha1.clone()).or_insert_with(|| path.clone());
+        }
+
+        result
+    }
+
+    /// Sprint 5 (S5.3): SHA1→ALL known paths mapping.
+    ///
+    /// A single blob can appear at multiple paths (LICENSE files copied across
+    /// subdirectories, generated stubs, shared fixtures). `complete_sha1_to_file`
+    /// keeps only ONE path per SHA1, so `--save` used to reconstruct only one of
+    /// the duplicate locations. This variant returns every known path so the
+    /// writer can materialise all of them.
+    pub fn complete_sha1_to_files(&self) -> HashMap<String, Vec<String>> {
+        let mut result: HashMap<String, Vec<String>> = HashMap::new();
+
+        // Index entries first — they carry the "current" filesystem layout.
+        for entry in &self.index_entries {
+            result.entry(entry.sha1.clone())
+                .or_default()
+                .push(entry.filename.clone());
+        }
+
+        // Graph-derived paths supplement with historical / dangling entries.
+        // We only ADD a graph path if it isn't already present under this SHA1
+        // (prevents dupes when a file exists in both current index and history).
+        for (sha1, path) in &self.graph_sha1_to_file {
+            let entry = result.entry(sha1.clone()).or_default();
+            if !entry.iter().any(|p| p == path) {
+                entry.push(path.clone());
+            }
         }
 
         result
@@ -357,18 +392,32 @@ impl Mapper {
                     // Multi-line ref files (e.g. info/refs format in some bare repos)
                     sha1s.extend(extract_sha1s(&String::from_utf8_lossy(body)));
                 }
-            } else if path == "info/refs" {
-                // info/refs lists all refs as "<sha1>\t<refname>"; also extract branch names
+            } else if path.starts_with("info/refs") {
+                // Sprint 5 (S5.4): both `info/refs` (dumb-HTTP TSV) AND
+                // `info/refs?service=git-upload-pack` (smart-HTTP pkt-line) land
+                // in `meta`. Previously only the exact key `"info/refs"` was
+                // parsed for SHA1s — repos where dumb-HTTP is disabled but the
+                // smart-HTTP endpoint happens to leak lost EVERY ref.
+                //
+                // extract_sha1s uses a `\b[0-9a-f]{40}\b` regex so it works fine
+                // on both the plain TSV format ("<sha>\t<refname>") AND the
+                // smart-HTTP pkt-line body (which prefixes each line with a
+                // 4-byte hex length and embeds refnames after the SHA).
                 let text = String::from_utf8_lossy(body);
                 sha1s.extend(extract_sha1s(&text));
-                for line in text.lines() {
-                    let parts: Vec<&str> = line.splitn(2, '\t').collect();
-                    if parts.len() == 2 {
-                        let ref_name = parts[1].trim();
-                        if let Some(br) = ref_name.strip_prefix("refs/heads/") {
-                            let br = br.to_string();
-                            if !result.branches.contains(&br) {
-                                result.branches.push(br);
+                // Only the dumb-HTTP variant gives us a clean tab-separated
+                // format for branch-name extraction; the smart-HTTP variant
+                // wraps everything in pkt-lines and is skipped here.
+                if path == "info/refs" {
+                    for line in text.lines() {
+                        let parts: Vec<&str> = line.splitn(2, '\t').collect();
+                        if parts.len() == 2 {
+                            let ref_name = parts[1].trim();
+                            if let Some(br) = ref_name.strip_prefix("refs/heads/") {
+                                let br = br.to_string();
+                                if !result.branches.contains(&br) {
+                                    result.branches.push(br);
+                                }
                             }
                         }
                     }
@@ -462,26 +511,65 @@ impl Mapper {
 
         result.pack_sha1s = packs.clone();
 
-        // Fetch all pack indexes concurrently
+        // Fetch all pack indexes concurrently.
+        // Sprint 5 (S5.1): now ALSO fetch the corresponding `.pack` file and
+        // resolve every object (including deltified ones) via `pack_reader`.
+        // Resolved objects land in `result.pack_objects` so the streamer can
+        // treat pack-only exposure identically to loose-object exposure.
         let mut pack_handles = Vec::new();
         for pack_sha1 in &packs {
             let client = self.client.clone();
+            let pack_sha1_owned = pack_sha1.clone();
             let idx_url = format!("{}/objects/pack/pack-{}.idx", git_url, pack_sha1);
+            let pack_url = format!("{}/objects/pack/pack-{}.pack", git_url, pack_sha1);
             pack_handles.push(tokio::spawn(async move {
-                let r = client.get(&idx_url).await;
-                if r.ok() && !r.body.is_empty() {
-                    Some(r.body.to_vec())
+                let idx_resp = client.get(&idx_url).await;
+                if !idx_resp.ok() || idx_resp.body.is_empty() {
+                    return None;
+                }
+                let idx_body = idx_resp.body.to_vec();
+                let pack_resp = client.get(&pack_url).await;
+                let pack_body = if pack_resp.ok() && !pack_resp.body.is_empty() {
+                    Some(pack_resp.body.to_vec())
                 } else {
                     None
-                }
+                };
+                Some((pack_sha1_owned, idx_body, pack_body))
             }));
         }
 
         // Collect pack index results
         for h in pack_handles {
-            if let Ok(Some(body)) = h.await {
+            if let Ok(Some((pack_sha1, idx_body, pack_body))) = h.await {
+                // 1. Enumerate SHA1s from .idx (fast, always works).
                 let parser = PackIndexParser;
-                sha1s.extend(parser.parse(&body));
+                sha1s.extend(parser.parse(&idx_body));
+
+                // 2. If we also got the .pack, resolve every object so the
+                //    streamer can serve deltified content that would otherwise
+                //    404 at objects/xx/yy.
+                if let Some(pack_body) = pack_body {
+                    match crate::pack_reader::read_pack(&idx_body, &pack_body) {
+                        Ok(objects) => {
+                            for obj in objects {
+                                // Encode as loose-object bytes so the streamer's
+                                // existing ObjectParser::parse path can consume
+                                // it identically to a real `.git/objects/xx/yy`
+                                // fetch. Skip on encode error (very unlikely).
+                                if let Ok(encoded) = crate::pack_reader::encode_as_loose(&obj) {
+                                    result.pack_objects.insert(obj.sha1.clone(), encoded);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            let _ = writeln!(
+                                &mut std::io::stderr(),
+                                "  [!] Pack resolve failed for pack-{}: {} — falling back to loose-object fetch",
+                                pack_sha1, e
+                            );
+                        }
+                    }
+                }
             }
         }
 
@@ -544,9 +632,44 @@ impl Mapper {
                     };
 
                     let parser = ObjectParser;
-                    let commit_obj = match parser.parse(&commit_data, &commit_sha1) {
-                        Some(obj) if obj.obj_type == "commit" => obj,
-                        _ => continue,
+
+                    // Sprint 5 (S5.2): dereference annotated tags before requiring a
+                    // commit object. HEAD detached at an annotated tag (e.g. release
+                    // point) used to terminate the walk immediately because the
+                    // fetched object was `type=tag`, not `type=commit`. We follow
+                    // the `object <sha>` line up to 8 layers deep (annotated tags
+                    // can nest tag→tag→commit) before giving up.
+                    let mut current_sha = commit_sha1.clone();
+                    let mut current_data = commit_data;
+                    let mut deref_hops = 0u8;
+                    let commit_obj = loop {
+                        let parsed = match parser.parse(&current_data, &current_sha) {
+                            Some(o) => o,
+                            None => break None,
+                        };
+                        match parsed.obj_type.as_str() {
+                            "commit" => break Some(parsed),
+                            "tag" if deref_hops < 8 => {
+                                deref_hops += 1;
+                                let tag_info = match parser.parse_tag(&parsed) {
+                                    Some(t) => t,
+                                    None => break None,
+                                };
+                                // Fetch the tag's target.
+                                let target_url = format!("{}/{}", git_url_walk, obj_path(&tag_info.target));
+                                let target_resp = client.get(&target_url).await;
+                                if !target_resp.ok() || target_resp.body.is_empty() {
+                                    break None;
+                                }
+                                current_sha = tag_info.target;
+                                current_data = target_resp.body.to_vec();
+                            }
+                            _ => break None,
+                        }
+                    };
+                    let commit_obj = match commit_obj {
+                        Some(o) => o,
+                        None => continue,
                     };
 
                     let commit_info = match parser.parse_commit(&commit_obj) {
@@ -816,5 +939,48 @@ mod tests {
         let client = crate::http_client::HttpClient::new(Default::default()).unwrap();
         let m = Mapper::new(client).with_max_history(0);
         assert_eq!(m.max_history, Some(0));
+    }
+
+    // ── Sprint 5 (S5.3) — multi-path map ─────────────────────────────────────
+
+    #[test]
+    fn complete_sha1_to_files_returns_all_paths_for_duplicate_blob() {
+        // Same SHA1 referenced from index AND graph; the multi-path helper must
+        // preserve both. The single-path helper (complete_sha1_to_file) keeps
+        // just the index path (its historical behaviour).
+        let mut m = MapResult::default();
+        let sha = "a".repeat(40);
+        m.index_entries.push(crate::git_parser::IndexEntry {
+            sha1: sha.clone(),
+            filename: "LICENSE".into(),
+            mode: 0,
+            file_size: 0,
+        });
+        m.graph_sha1_to_file.insert(sha.clone(), "subdir/LICENSE".into());
+
+        let single = m.complete_sha1_to_file();
+        assert_eq!(single.get(&sha).unwrap(), "LICENSE");
+
+        let multi = m.complete_sha1_to_files();
+        let paths = multi.get(&sha).unwrap();
+        assert_eq!(paths.len(), 2, "must return both index and graph paths");
+        assert!(paths.contains(&"LICENSE".to_string()));
+        assert!(paths.contains(&"subdir/LICENSE".to_string()));
+    }
+
+    #[test]
+    fn complete_sha1_to_files_deduplicates_identical_paths() {
+        // Both index and graph agree on the same path — must appear once.
+        let mut m = MapResult::default();
+        let sha = "b".repeat(40);
+        m.index_entries.push(crate::git_parser::IndexEntry {
+            sha1: sha.clone(),
+            filename: "same.txt".into(),
+            mode: 0,
+            file_size: 0,
+        });
+        m.graph_sha1_to_file.insert(sha.clone(), "same.txt".into());
+        let paths = m.complete_sha1_to_files().remove(&sha).unwrap();
+        assert_eq!(paths, vec!["same.txt"]);
     }
 }

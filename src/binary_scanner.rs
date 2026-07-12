@@ -51,128 +51,29 @@ pub fn detect_binary_type(data: &[u8]) -> BinaryType {
     }
 }
 
-/// Extract strings from SQLite database using rusqlite
+/// Extract strings from a SQLite database blob.
 ///
-/// Attempts to open the database as an in-memory SQLite database and
-/// query all tables for string values that might contain secrets.
+/// Sprint 5 (S5.6): this used to open an in-memory SQLite connection and query
+/// each user table's TEXT columns via `restore_sqlite_from_bytes` — a function
+/// that was hard-coded to return `Err(InvalidQuery)` because the `rusqlite`
+/// `backup` feature wasn't enabled. Every SQLite blob fell through to
+/// `extract_printable_strings` regardless. Marketing copy claimed "table
+/// querying" that never fired.
+///
+/// The dead branch is removed; we call `extract_printable_strings` directly.
+/// If proper table-level parsing is ever needed, enable `rusqlite = { features
+/// = ["backup"] }` in Cargo.toml and reintroduce the query loop.
 pub fn extract_sqlite_strings_enhanced(data: &[u8]) -> Vec<String> {
-    let mut strings = Vec::new();
-
-    // Try to open as SQLite database
-    let conn = match rusqlite::Connection::open_in_memory() {
-        Ok(conn) => conn,
-        Err(_) => {
-            // Fallback to basic string extraction
-            return extract_printable_strings(data, 4);
-        }
-    };
-
-    // Load the data into the in-memory database
-    // Use backup API for reliable restoration
-    match restore_sqlite_from_bytes(&conn, data) {
-        Ok(_) => {}
-        Err(_) => {
-            // Fallback to basic string extraction if restore fails
-            return extract_printable_strings(data, 4);
-        }
-    }
-
-    // Query all tables and their string columns
-    let mut table_names = Vec::new();
-    if let Ok(mut stmt) = conn.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'") {
-        let mut rows = stmt.query([]).unwrap();
-        while let Ok(Some(row)) = rows.next() {
-            if let Ok(name) = row.get::<_, String>(0) {
-                table_names.push(name);
-            }
-        }
-    } else {
-        // Fallback to basic extraction
-        return extract_printable_strings(data, 4);
-    }
-
-    // For each table, extract string values
-    for table in &table_names {
-        // Get table schema to identify string columns
-        let mut column_names = Vec::new();
-        let pragma_query = format!("PRAGMA table_info('{}')", table.replace("'", "''"));
-
-        if let Ok(mut stmt) = conn.prepare(&pragma_query) {
-            if let Ok(mut rows) = stmt.query([]) {
-                while let Ok(Some(row)) = rows.next() {
-                    let col_name: String = row.get(1).unwrap_or_default();
-                    let col_type: String = row.get(2).unwrap_or_default();
-
-                    // Focus on string-like columns
-                    if col_type.contains("TEXT") || col_type.contains("CHAR") || col_type.contains("VARCHAR") {
-                        column_names.push(col_name);
-                    }
-                }
-            }
-        }
-
-        // If no columns identified, try common secret column names
-        if column_names.is_empty() {
-            let potential_cols = [
-                "key", "secret", "token", "password", "api_key", "access_token",
-                "auth", "credential", "private_key", "secret_key", "value"
-            ];
-
-            if let Ok(mut stmt) = conn.prepare(&pragma_query) {
-                if let Ok(mut rows) = stmt.query([]) {
-                    while let Ok(Some(row)) = rows.next() {
-                        let col_name: String = row.get(1).unwrap_or_default();
-                        let col_lower = col_name.to_lowercase();
-                        for potential in &potential_cols {
-                            if col_lower.contains(potential) {
-                                column_names.push(col_name);
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Query string values from identified columns
-        for col in &column_names {
-            let query = format!("SELECT {} FROM '{}' WHERE {} IS NOT NULL LIMIT 1000",
-                col, table.replace("'", "''"), col);
-
-            if let Ok(mut stmt) = conn.prepare(&query) {
-                if let Ok(mut rows) = stmt.query([]) {
-                    while let Ok(Some(row)) = rows.next() {
-                        if let Ok(val) = row.get::<_, String>(0) {
-                            if val.len() >= 4 {
-                                strings.push(val);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Also scan the entire database for printable strings as a fallback
-    strings.extend(extract_printable_strings(data, 4));
-
     // Deduplicate while preserving order
-    let mut seen = HashSet::new();
-    strings.retain(|s| seen.insert(s.clone()));
-
-    strings
-}
-
-/// Restore SQLite database from bytes (simplified version)
-///
-/// Since rusqlite's backup API requires the "backup" feature,
-/// this uses a simpler approach: just extract strings directly.
-fn restore_sqlite_from_bytes(_conn: &rusqlite::Connection, _data: &[u8]) -> Result<(), rusqlite::Error> {
-    // The enhanced SQLite scanning relies on string extraction,
-    // not actual database parsing, so we just return Ok for now.
-    // If we need full database parsing in the future, we should
-    // enable the "backup" feature for rusqlite in Cargo.toml.
-    Err(rusqlite::Error::InvalidQuery)
+    let raw = extract_printable_strings(data, 4);
+    let mut seen = HashSet::with_capacity(raw.len());
+    let mut out = Vec::with_capacity(raw.len());
+    for s in raw {
+        if seen.insert(s.clone()) {
+            out.push(s);
+        }
+    }
+    out
 }
 
 /// Maximum total extraction size for ZIP/JAR archives (100MB)

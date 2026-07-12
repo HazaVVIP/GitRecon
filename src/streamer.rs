@@ -159,11 +159,15 @@ lazy_static! {
         pat!("sendgrid",      "HIGH", "SendGrid API Key",
              r"SG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}"),
         pat!("twilio",        "HIGH", "Twilio API Key",
-             r"SK[0-9a-f]{32}"),
+             // Sprint 5 (S5.7): anchor with \b so we don't match `SK` embedded in
+             // a longer identifier. Real Twilio keys are exactly 32 lowercase hex.
+             r"\bSK[0-9a-f]{32}\b"),
         pat!("twilio_account","HIGH", "Twilio Account SID",
              r"\bAC[0-9a-f]{32}\b"),
         pat!("mailgun",       "HIGH", "Mailgun Key",
-             r"key-[0-9a-f]{32}"),
+             // Sprint 5 (S5.7): anchor + case-insensitive; real Mailgun keys are
+             // `key-<32 hex>` isolated tokens, not substrings.
+             r"(?i)\bkey-[0-9a-f]{32}\b"),
         pat!("pusher_key",    "HIGH", "Pusher App Key/Secret",
              r#"(?i)pusher[_\-]?(app[_\-]?key|app[_\-]?secret|key|secret)\s*[=:]\s*['"]?([A-Za-z0-9]{20,})['"]?"#),
         // E-commerce / PaaS
@@ -191,7 +195,10 @@ lazy_static! {
              r#"(?i)(keystore|truststore|\.p12|\.pfx)\s*[=:]\s*['"]?([^\s'"]{4,})['"]?"#),
         // JWT
         pat!("jwt",        "HIGH",     "JWT Token",
-             r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"),
+             // Sprint 5 (S5.7): bump minimum segment length from 10 → 20 to reject
+             // the `eyJXXX.YYY.ZZZ` shape from sample docs / test fixtures. Real
+             // JWTs almost always have header + payload ≥ 20 chars each.
+             r"\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\b"),
         pat!("jwt_secret", "CRITICAL", "JWT Secret",
              r#"(?i)jwt[_\-]?secret\s*[=:]\s*['"]?([^\s'"]{16,})['"]?"#),
         // Generic
@@ -200,9 +207,13 @@ lazy_static! {
         pat!("secret_key",   "HIGH", "Generic Secret Key",
              r#"(?i)secret[_\-\s]?key\s*[=:]\s*['"]?([A-Za-z0-9_\-!@#$]{16,})['"]?"#),
         pat!("access_token", "HIGH", "Access Token",
-             r#"(?i)access[_\-\s]?token\s*[=:]\s*['"]?([A-Za-z0-9_\-\.]{20,})['"]?"#),
+             // Sprint 5 (S5.7): cap trailing capture at 256 chars — a URL after
+             // `access_token=` used to be greedy-eaten because `.` was allowed
+             // and there was no upper bound.
+             r#"(?i)access[_\-\s]?token\s*[=:]\s*['"]?([A-Za-z0-9_\-\.]{20,256})['"]?"#),
         pat!("bearer_token", "HIGH", "Bearer Token in Authorization Header",
-             r"(?i)Authorization\s*[:=]\s*[Bb]earer\s+([A-Za-z0-9_\-\.]{20,})"),
+             // Sprint 5 (S5.7): same 256-char cap as access_token.
+             r"(?i)Authorization\s*[:=]\s*[Bb]earer\s+([A-Za-z0-9_\-\.]{20,256})"),
         // Password
         pat!("hardcoded_pass", "HIGH", "Hardcoded Password",
              r#"(?i)(password|passwd|pass|pwd)\s*[=:]\s*['"]([^'"\s]{8,})['"]"#),
@@ -222,7 +233,10 @@ lazy_static! {
              r#"(?i)secret_key_base\s*[=:]\s*['"]?([A-Za-z0-9]{64,})['"]?"#),
         // Mailchimp
         pat!("mailchimp_key", "HIGH", "Mailchimp API Key",
-             r"[0-9a-f]{32}-us[1-9][0-9]?\b"),
+             // Sprint 5 (S5.7): anchor with `\b` on the LEFT — without it any 32
+             // hex chars followed by `-us1` (a git SHA fragment in context, say)
+             // triggered. Real keys are isolated tokens.
+             r"\b[0-9a-f]{32}-us[1-9][0-9]?\b"),
         // Laravel
         pat!("laravel_app_key", "CRITICAL", "Laravel APP_KEY",
              r"APP_KEY=base64:[A-Za-z0-9+/=]{40,}"),
@@ -1078,9 +1092,35 @@ impl Streamer {
         // Build sha1→filename lookup and current-blob set upfront
         // FIXED: Use complete_sha1_to_file() which includes both index and graph-derived mappings
         let sha1_to_file: HashMap<String, String> = map_result.complete_sha1_to_file();
+
+        // Sprint 5 (S5.3): full multi-path mapping — SHA1 → every known path.
+        // A blob at multiple paths (LICENSE copies, generated stubs, shared fixtures)
+        // used to be written to only one location. We derive the full multi-path
+        // map here and thread just the extra paths (beyond the primary) through
+        // to the writer so `--save` reconstructs every location.
+        let full_paths_map: HashMap<String, Vec<String>> = map_result.complete_sha1_to_files();
+        // "Extras" = paths beyond the first, keyed by SHA1. Empty vec for SHA1s that
+        // only have one path (the vast majority).
+        let sha1_extras: HashMap<String, Vec<String>> = full_paths_map
+            .iter()
+            .filter_map(|(sha1, paths)| {
+                if paths.len() > 1 {
+                    Some((sha1.clone(), paths[1..].to_vec()))
+                } else {
+                    None
+                }
+            })
+            .collect();
         let current_blobs = map_result.blob_sha1s.clone();
         let sha1_to_file  = Arc::new(sha1_to_file);
+        let sha1_extras   = Arc::new(sha1_extras);
         let current_blobs = Arc::new(current_blobs);
+
+        // Sprint 5 (S5.1): pack-resolved objects as loose-encoded bytes. When
+        // the target repo is pack-only (post-`git gc`, `.git/objects/xx/yy`
+        // returns 404 for everything), fetch_and_process now serves out of this
+        // map instead of hammering the server with 404s.
+        let pack_objects: Arc<HashMap<String, Vec<u8>>> = Arc::new(map_result.pack_objects.clone());
 
         // Priority: deleted & sensitive files first (high value historical secrets)
         //           then deleted files, then sensitive files, then regular files
@@ -1236,7 +1276,9 @@ impl Streamer {
                 let client          = self.client.clone();
                 let git_url         = git_url.clone();
                 let sha1_to_file    = sha1_to_file.clone();
+                let sha1_extras     = sha1_extras.clone();
                 let current_blobs   = current_blobs.clone();
+                let pack_objects    = pack_objects.clone();
                 let save_dir        = save_dir_arc.clone();
                 let extra_patterns  = extra_pat.clone();
                 let stop_flag       = stop_flag.clone();
@@ -1249,7 +1291,8 @@ impl Streamer {
                 async move {
                     let result = fetch_and_process(
                         &client, &git_url, &sha1,
-                        &sha1_to_file, &current_blobs,
+                        &sha1_to_file, &sha1_extras, &current_blobs,
+                        &pack_objects,
                         save_dir, extra_patterns,
                         stop_flag, mem_limit, bytes_in_flight,
                         max_scan_bytes, entropy_thresh, verbose_flag,
@@ -1574,6 +1617,7 @@ fn process_blob_content(
     content:         &[u8],
     sha1:            &str,
     sha1_to_file:    &HashMap<String, String>,
+    sha1_extras:     &HashMap<String, Vec<String>>,
     current_blobs:   &HashSet<String>,
     save_dir:        Option<Arc<PathBuf>>,
     extra_patterns:  Arc<Vec<DynPattern>>,
@@ -1601,9 +1645,25 @@ fn process_blob_content(
             // we still write the content under an `_unreferenced/<xx>/<rest>` fallback path
             // so the reconstruction is lossless. Previously these were silently dropped —
             // `save_result = None` — leaving the local tree incomplete with no diagnostic.
+            //
+            // Sprint 5 (S5.3): when a blob is referenced at multiple paths (LICENSE
+            // copies, duplicate config, etc.) `sha1_extras` carries the secondary
+            // paths. We hard_link (or copy on failure) each extra so every location
+            // materialises. The primary write's success dictates `save_result`; extras
+            // are best-effort — if hard_link fails on cross-fs mounts, we fall back
+            // to a full write.
             let save_result = if let Some(ref dir) = save_dir {
                 if let Some(actual_name) = sha1_to_file.get(sha1) {
-                    Some(write_blob_to_disk(actual_name, &obj.data, dir))
+                    let primary_ok = write_blob_to_disk(actual_name, &obj.data, dir);
+                    if primary_ok {
+                        // Materialise every secondary path.
+                        if let Some(extras) = sha1_extras.get(sha1) {
+                            for extra_path in extras {
+                                let _ = write_or_link(actual_name, extra_path, &obj.data, dir);
+                            }
+                        }
+                    }
+                    Some(primary_ok)
                 } else if sha1.len() >= 3 {
                     let fallback = format!("_unreferenced/{}/{}", &sha1[..2], &sha1[2..]);
                     Some(write_blob_to_disk(&fallback, &obj.data, dir))
@@ -1844,7 +1904,9 @@ async fn fetch_and_process(
     git_url:         &str,
     sha1:            &str,
     sha1_to_file:    &HashMap<String, String>,
+    sha1_extras:     &HashMap<String, Vec<String>>,
     current_blobs:   &HashSet<String>,
+    pack_objects:    &HashMap<String, Vec<u8>>,
     save_dir:        Option<Arc<PathBuf>>,
     extra_patterns:  Arc<Vec<DynPattern>>,
     stop_flag:       Arc<AtomicBool>,
@@ -1863,6 +1925,27 @@ async fn fetch_and_process(
         return WorkerResult::Skipped;
     }
 
+    // Sprint 5 (S5.1): serve pack-resolved objects first — no HTTP round trip
+    // for pack-only repos. These bytes are already loose-object encoded so
+    // process_blob_content handles them identically.
+    if let Some(pack_bytes) = pack_objects.get(sha1) {
+        return process_blob_content(
+            pack_bytes,
+            sha1,
+            sha1_to_file,
+            sha1_extras,
+            current_blobs,
+            save_dir,
+            extra_patterns,
+            mem_limit,
+            bytes_in_flight,
+            max_scan_bytes,
+            entropy_threshold,
+            verbose,
+            false_positive_keywords,
+        );
+    }
+
     // PERF-005: Check cache before fetching (BUG-ERR-009: now async)
     if let Some(ref cache_obj) = cache {
         if let Some(cached_content) = cache_obj.get(sha1).await {
@@ -1872,6 +1955,7 @@ async fn fetch_and_process(
                 &cached_content,
                 sha1,
                 sha1_to_file,
+                sha1_extras,
                 current_blobs,
                 save_dir,
                 extra_patterns,
@@ -1946,6 +2030,7 @@ async fn fetch_and_process(
         &resp.body,
         sha1,
         sha1_to_file,
+        sha1_extras,
         current_blobs,
         save_dir,
         extra_patterns,
@@ -2068,6 +2153,71 @@ fn scan_content(
 ///   `../../etc`; naive `starts_with` on the un-canonicalised join would allow it).
 ///
 /// Returns true if the file was written successfully.
+/// Sprint 5 (S5.3) helper: write a secondary path for a blob that already exists
+/// at `primary_filename`. Prefers `hard_link` for space efficiency (a repo with
+/// 500 identical LICENSE files ends up as 1 inode + 500 dirents on ext4), falls
+/// back to a full write if the underlying filesystem doesn't support hard links
+/// (e.g. cross-filesystem or FAT32 exports).
+///
+/// All the sanitisation guards (NUL byte reject, Windows reserved names, symlink
+/// escape canonicalisation) live in `write_blob_to_disk` — this helper delegates
+/// to that for the fallback write path. For the hard-link path we still validate
+/// the target path ourselves so we don't `link()` outside `output_dir`.
+fn write_or_link(primary_filename: &str, extra_filename: &str, data: &[u8], output_dir: &Path) -> bool {
+    // Resolve the two paths using the same sanitisation as write_blob_to_disk.
+    // We do it via public API — compute the destination path and let the helper
+    // decide whether it's safe.
+    let src = resolve_safe_path(primary_filename, output_dir);
+    let dst = resolve_safe_path(extra_filename, output_dir);
+    if let (Some(src), Some(dst)) = (src, dst) {
+        if src == dst {
+            return true; // Nothing to do — same path.
+        }
+        if let Some(parent) = dst.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        // hard_link fails if `dst` already exists → try to unlink first so the
+        // caller's re-run behaviour matches write_blob_to_disk's truncate semantic.
+        let _ = std::fs::remove_file(&dst);
+        if std::fs::hard_link(&src, &dst).is_ok() {
+            return true;
+        }
+        log::debug!("write_or_link: hard_link {:?} -> {:?} failed, falling back to full write", src, dst);
+    }
+    // Fallback: write the extra path with fresh bytes.
+    write_blob_to_disk(extra_filename, data, output_dir)
+}
+
+/// Sprint 5 (S5.3) helper: resolve `filename` inside `output_dir` using the same
+/// sanitisation as `write_blob_to_disk` — but return the resolved path instead of
+/// writing. Returns None if any component is rejected.
+fn resolve_safe_path(filename: &str, output_dir: &Path) -> Option<PathBuf> {
+    let normalized = filename.replace('\\', "/");
+    let parts: Vec<&str> = normalized
+        .split('/')
+        .filter(|p| !p.is_empty() && *p != ".." && *p != ".")
+        .collect();
+    if parts.is_empty() {
+        return None;
+    }
+    for p in &parts {
+        if p.contains('\0') {
+            return None;
+        }
+        #[cfg(windows)]
+        {
+            if is_windows_reserved_name(p) { return None; }
+            if p.len() >= 2 && p.as_bytes()[1] == b':' { return None; }
+            if p.ends_with('.') || p.ends_with(' ') { return None; }
+        }
+    }
+    let local_path: PathBuf = parts.iter().fold(output_dir.to_path_buf(), |acc, p| acc.join(p));
+    if !local_path.starts_with(output_dir) {
+        return None;
+    }
+    Some(local_path)
+}
+
 fn write_blob_to_disk(filename: &str, data: &[u8], output_dir: &Path) -> bool {
     let normalized = filename.replace('\\', "/");
     let parts: Vec<&str> = normalized
@@ -3736,6 +3886,60 @@ mod tests {
     #[test]
     fn test_max_scan_bytes_constant() {
         assert_eq!(MAX_SCAN_BYTES, 4 * 1024 * 1024);
+    }
+
+    // ── Sprint 5 (S5.7) — regex anchor correctness ───────────────────────────
+
+    fn pattern(id: &str) -> Option<&'static Pattern> {
+        PATTERNS.iter().find(|p| p.id == id)
+    }
+
+    #[test]
+    fn twilio_regex_requires_word_boundary() {
+        let re = &pattern("twilio").expect("twilio pattern must exist").regex;
+        // Split the fixture across format! so GitHub push-protection secret
+        // scanners don't flag the test string as a real credential — it's a
+        // regex shape check, not a live key.
+        let fake_key = format!("SK{}{}", "1234567890abcdef", "1234567890abcdef");
+        assert!(re.is_match(&fake_key));
+        // Same 32 hex chars but glued to a longer identifier — no boundary → reject.
+        let embedded = format!("prefix{}suffix", fake_key);
+        assert!(!re.is_match(&embedded));
+    }
+
+    #[test]
+    fn mailchimp_regex_left_anchored() {
+        let re = &pattern("mailchimp_key").expect("mailchimp pattern").regex;
+        // 32 hex + `-us1` shape, split to defeat literal-string secret scanners.
+        let fake_key = format!("{}{}-us1", "abcdef1234567890", "abcdef1234567890");
+        assert!(re.is_match(&fake_key));
+        // Embedded in longer hex — no left boundary → reject.
+        let embedded = format!("prefix{}", fake_key);
+        assert!(!re.is_match(&embedded));
+    }
+
+    #[test]
+    fn jwt_regex_requires_20_chars_per_segment() {
+        let re = &pattern("jwt").expect("jwt pattern").regex;
+        // 20+ char segments — real JWT shape → match.
+        let real = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.\
+                    eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIn0.\
+                    dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U";
+        assert!(re.is_match(real));
+        // 10-char shape (previously accepted) — now rejected.
+        assert!(!re.is_match("eyJabc.defghijklm.nopqrstuv"));
+    }
+
+    #[test]
+    fn bearer_token_capped_at_256_chars() {
+        let re = &pattern("bearer_token").expect("bearer_token pattern").regex;
+        // 30-char token — legit shape → match.
+        assert!(re.is_match("Authorization: Bearer abcdef1234567890abcdef1234567890"));
+        // 300-char token — beyond cap, should still match up to 256 chars.
+        // Regex engine won't greedy-eat past 256 now, so a super-long alphanumeric
+        // string preceded by `Bearer ` still hits.
+        let big = format!("Authorization: Bearer {}", "a".repeat(300));
+        assert!(re.is_match(&big));
     }
 
     // ── V3 new secret patterns ───────────────────

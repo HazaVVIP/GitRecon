@@ -55,20 +55,53 @@ impl GitHubForgeClient {
 
     /// Make a GET request and update rate limit tracking.
     async fn get_with_rate_limit(&self, url: &str) -> anyhow::Result<crate::http_client::Response> {
-        let resp = self.client.get(url).await;
+        // Sprint 5 (S5.5): actively respect Retry-After / X-RateLimit-Reset.
+        //
+        // Previously the code just tracked rate-limit headers when status==200 and
+        // let the caller drown in 429/403 responses. Now: up to 3 retries, sleeping
+        // according to the Retry-After header (capped at 300 s to avoid multi-hour
+        // hangs on hostile-slow servers). We treat 403 as rate-limited only when
+        // GitHub's X-RateLimit-Remaining header confirms 0 — otherwise 403 stays
+        // an auth failure and we surface it immediately.
+        for attempt in 0..3u32 {
+            let resp = self.client.get(url).await;
+            let is_rate_limited = resp.status == 429
+                || (resp.status == 403
+                    && resp.headers.get("x-ratelimit-remaining")
+                        .and_then(|v| v.parse::<u64>().ok())
+                        .map(|n| n == 0).unwrap_or(false));
 
-        // Update rate limit from headers
-        if resp.status == 200 || resp.status == 0 {
-            // Try to parse rate limit headers
+            if is_rate_limited {
+                let wait_s = parse_retry_after(&resp.headers).unwrap_or(60).min(300);
+                log::warn!(
+                    "GitHub rate-limited (HTTP {}); sleeping {}s before retry {}/3",
+                    resp.status, wait_s, attempt + 1,
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(wait_s)).await;
+                continue;
+            }
+
+            // Update rate limit from headers regardless of status — the counters
+            // are useful for pacing even on non-200 responses.
             let mut headers = std::collections::HashMap::new();
             for (k, v) in resp.headers.iter() {
                 headers.insert(k.to_lowercase(), v.clone());
             }
             self.update_rate_limit(&headers);
+            return Ok(resp);
         }
-
-        Ok(resp)
+        anyhow::bail!("Rate limit exhausted after 3 retries for {}", crate::validation::redact_url(url))
     }
+}
+
+/// Sprint 5 (S5.5) helper: parse `Retry-After` header from a HashMap<String, String>.
+/// Accepts either an integer number of seconds or an HTTP-date; if the value is a
+/// date we return None (callers substitute a sensible default). We do NOT try to
+/// interpret X-RateLimit-Reset as an epoch here — that's forge-specific formatting
+/// and each impl handles it in `update_rate_limit`.
+fn parse_retry_after(headers: &std::collections::HashMap<String, String>) -> Option<u64> {
+    let raw = headers.get("retry-after").or_else(|| headers.get("Retry-After"))?;
+    raw.trim().parse::<u64>().ok()
 }
 
 #[async_trait]

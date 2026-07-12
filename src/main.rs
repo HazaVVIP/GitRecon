@@ -37,9 +37,11 @@ mod validation;
 mod temp_cleanup; // SEC-004: Temp file cleanup
 mod rate_limiter; // PERF-004: Token bucket rate limiter
 mod cache; // PERF-005: SQLite cache layer
+mod pack_reader; // Sprint 5 (S5.1): pack file parser + delta resolver
 #[allow(dead_code)]
-mod reconstructor;
-mod config;
+// Sprint 5 (S5.6): removed dead modules — `reconstructor` was never wired
+// (its Reconstructor::run was defined but never instantiated), and `config`
+// was a 3-line placeholder. Constants live where they're used, per module.
 mod ui;
 
 use std::path::{Path, PathBuf};
@@ -3235,35 +3237,46 @@ async fn main() {
     // longer holds those files. Runs synchronously; typically a few ms.
     temp_cleanup::sweep_orphan_temp_dirs(std::time::Duration::from_secs(60 * 60));
 
-    // Register signal handlers for graceful shutdown
-    let cleanup_flag_clone = cleanup_flag.clone();
-    tokio::spawn(async move {
-        use signal_hook_tokio::Signals;
+    // Register signal handlers for graceful shutdown.
+    // Sprint 5 (S5.8): signal-hook-tokio is Unix-only (uses UnixStream); on Windows
+    // we let the default OS handler terminate the process — Drop will fire on
+    // TempDirGuard for normal exits, and the startup sweep above catches force-kill
+    // remnants on the next run.
+    #[cfg(unix)]
+    {
+        let cleanup_flag_clone = cleanup_flag.clone();
+        tokio::spawn(async move {
+            use signal_hook_tokio::Signals;
 
-        let mut signals = match Signals::new([signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM]) {
-            Ok(s) => s,
-            Err(_) => return,
-        };
+            let mut signals = match Signals::new([signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM]) {
+                Ok(s) => s,
+                Err(_) => return,
+            };
 
-        #[allow(clippy::never_loop)]
-        #[allow(clippy::while_let_loop)]
-        loop {
-            match signals.next().await {
-                Some(_signal) => {
-                    cleanup_flag_clone.store(true, Ordering::Relaxed);
-                    eprintln!("\n  [!] Interrupted. Cleaning up temporary files...");
-                    // Sprint 2 (S2.6): Drop handlers don't run under process::exit,
-                    // so we walk the registered TempDirGuard paths ourselves before
-                    // exiting. Previously reconstructed source of every scanned repo
-                    // survived in $TMPDIR after Ctrl+C — a nasty exposure on shared
-                    // red-team boxes.
-                    temp_cleanup::cleanup_registered_paths();
-                    std::process::exit(130); // Exit code for SIGINT (128 + 2)
+            #[allow(clippy::never_loop)]
+            #[allow(clippy::while_let_loop)]
+            loop {
+                match signals.next().await {
+                    Some(_signal) => {
+                        cleanup_flag_clone.store(true, Ordering::Relaxed);
+                        eprintln!("\n  [!] Interrupted. Cleaning up temporary files...");
+                        // Sprint 2 (S2.6): Drop handlers don't run under process::exit,
+                        // so we walk the registered TempDirGuard paths ourselves before
+                        // exiting. Previously reconstructed source of every scanned repo
+                        // survived in $TMPDIR after Ctrl+C — a nasty exposure on shared
+                        // red-team boxes.
+                        temp_cleanup::cleanup_registered_paths();
+                        std::process::exit(130); // Exit code for SIGINT (128 + 2)
+                    }
+                    None => break,
                 }
-                None => break,
             }
-        }
-    });
+        });
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = cleanup_flag; // silence unused warning on Windows
+    }
 
     let args = Cli::parse();
 
