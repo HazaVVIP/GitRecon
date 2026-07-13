@@ -189,8 +189,8 @@ struct Cli {
 
     /// Worker tasks untuk streaming (default: 50)
     // Sprint 4 (S4.1): `--workers 0` used to silent-hang because
-    // futures::stream::buffer_unordered(0) never polls. Enforce 1..=1000.
-    #[arg(short = 'w', long = "workers", default_value = "50", value_name = "N", value_parser = clap::value_parser!(usize).range(1..=1000))]
+    // futures::stream::buffer_unordered(0) never polls. Enforced post-parse in main().
+    #[arg(short = 'w', long = "workers", default_value = "50", value_name = "N")]
     workers: usize,
 
     /// Batas memori untuk streaming (default: 256MB)
@@ -236,14 +236,15 @@ struct Cli {
     patterns_help: bool,
 
     // DX-2: --max-blob-size
-    // Sprint 4 (S4.1): reject 0 (would make every blob "too big").
-    #[arg(long = "max-blob-size", default_value = "4", value_name = "MB", value_parser = clap::value_parser!(usize).range(1..=10_240))]
+    // Sprint 4 (S4.1): reject 0 in main() (would make every blob "too big").
+    #[arg(long = "max-blob-size", default_value = "4", value_name = "MB")]
     max_blob_size: usize,
 
     // Sprint 1: bound the commit-graph traversal depth (previously hardcoded to 100 in mapper.rs).
     // Deeper history means more historical blobs discovered — at the cost of extra HTTP fetches.
     // Sprint 4 (S4.1): 0 means unlimited (documented behaviour in Mapper::with_max_history).
-    #[arg(long = "max-history", default_value = "500", value_name = "COMMITS", value_parser = clap::value_parser!(usize).range(0..=1_000_000))]
+    // Range checked in main().
+    #[arg(long = "max-history", default_value = "500", value_name = "COMMITS")]
     max_history: usize,
 
     // DX-3: --entropy-threshold
@@ -320,7 +321,7 @@ struct Cli {
     #[arg(long = "targets", value_name = "FILE")]
     targets: Option<String>,
 
-    #[arg(long = "parallel-targets", default_value = "1", value_name = "N", value_parser = clap::value_parser!(usize).range(1..=64))]
+    #[arg(long = "parallel-targets", default_value = "1", value_name = "N")]
     parallel_targets: usize,
 
     // A-6: pipe mode
@@ -334,7 +335,7 @@ struct Cli {
     #[arg(long = "checkpoint-dir", value_name = "DIR")]
     checkpoint_dir: Option<String>,
 
-    #[arg(long = "checkpoint-interval", default_value = "1000", value_name = "N", value_parser = clap::value_parser!(usize).range(1..=1_000_000))]
+    #[arg(long = "checkpoint-interval", default_value = "1000", value_name = "N")]
     checkpoint_interval: usize,
 
     // S-3: binary file scanning
@@ -3280,6 +3281,30 @@ async fn main() {
 
     let args = Cli::parse();
 
+    // Sprint 4 (S4.1): explicit numeric range checks. Clap's value_parser!.range()
+    // only supports the fixed-width numeric types (u8..u64/i8..i64), not `usize`,
+    // so the usize fields validate here at start-up instead.
+    if args.workers == 0 || args.workers > 1000 {
+        eprintln!("  ✘  --workers must be in [1, 1000], got {}", args.workers);
+        std::process::exit(2);
+    }
+    if args.max_blob_size == 0 || args.max_blob_size > 10_240 {
+        eprintln!("  ✘  --max-blob-size must be in [1, 10240] MB, got {}", args.max_blob_size);
+        std::process::exit(2);
+    }
+    if args.max_history > 1_000_000 {
+        eprintln!("  ✘  --max-history must be in [0, 1_000_000], got {}", args.max_history);
+        std::process::exit(2);
+    }
+    if args.parallel_targets == 0 || args.parallel_targets > 64 {
+        eprintln!("  ✘  --parallel-targets must be in [1, 64], got {}", args.parallel_targets);
+        std::process::exit(2);
+    }
+    if args.checkpoint_interval == 0 || args.checkpoint_interval > 1_000_000 {
+        eprintln!("  ✘  --checkpoint-interval must be in [1, 1_000_000], got {}", args.checkpoint_interval);
+        std::process::exit(2);
+    }
+
     // BUG-HTTP-003: Warn when SSL verification is disabled
     if args.insecure {
         eprintln!("  ⚠️  WARNING: SSL verification disabled - MITM vulnerability!");
@@ -3935,7 +3960,7 @@ async fn main() {
                 // O-4: Webhook delivery
                 if let Some(ref webhook_url) = args.webhook {
                     if let Ok(json_body) = std::fs::read_to_string(&report_path) {
-                        match try_deliver_webhook(&rep, args, webhook_url, &json_body).await {
+                        match try_deliver_webhook(&rep, &args, webhook_url, &json_body).await {
                             Ok(true) => if verbose { println!("  ✔   Webhook delivered to {}", webhook_url); },
                             Ok(false) => if verbose { eprintln!("  ⚠   Webhook delivery failed (non-2xx response)"); },
                             Err(e) => eprintln!("  ✗   Webhook refused: {}", e),

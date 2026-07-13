@@ -735,12 +735,24 @@ impl HttpClient {
         //      more than `max_size` bytes. Cheap when the header is honest.
         //   2. Stream chunk-by-chunk and stop as soon as accumulated bytes exceed
         //      `max_size`. Catches liars that omit Content-Length or lie about it.
+        //
+        // Note: `do_get` returns `Result<Response, reqwest::Error>` (callers pattern
+        // match on `reqwest::Error::status()` and TLS classification), so we surface
+        // size-cap violations by returning `Ok(Response { status:0, error: Some(...) })`
+        // — same shape used elsewhere for TLS/connection failures.
         let max_size = self.cfg.max_size;
         if let Some(cl) = resp.content_length() {
             if cl as usize > max_size {
-                return Err(anyhow::anyhow!(
-                    "response body exceeds max_size ({} > {})", cl, max_size
-                ));
+                return Ok(Response {
+                    url: url.to_string(),
+                    status: 0,
+                    body: bytes::Bytes::new(),
+                    headers,
+                    elapsed_ms,
+                    error: Some(format!(
+                        "response body exceeds max_size ({} > {})", cl, max_size
+                    )),
+                });
             }
         }
 
@@ -754,15 +766,19 @@ impl HttpClient {
             let chunk = chunk?;
             let would_be = body_bytes.len().saturating_add(chunk.len());
             if would_be > max_size {
-                // Take only what fits, then abort — we DON'T grow past max_size even
-                // if the trailing chunk is oversized. This is not a size-truncation of
-                // a valid response; it's a defence, so we return an error rather than
-                // silently returning a partial body that callers might trust as complete.
+                // Same-shape error return as the Content-Length preflight above.
                 let remaining = max_size.saturating_sub(body_bytes.len());
                 body_bytes.extend_from_slice(&chunk[..remaining]);
-                return Err(anyhow::anyhow!(
-                    "response body streamed past max_size ({} > {})", would_be, max_size
-                ));
+                return Ok(Response {
+                    url: url.to_string(),
+                    status: 0,
+                    body: bytes::Bytes::from(body_bytes),
+                    headers,
+                    elapsed_ms,
+                    error: Some(format!(
+                        "response body streamed past max_size ({} > {})", would_be, max_size
+                    )),
+                });
             }
             body_bytes.extend_from_slice(&chunk);
         }

@@ -116,7 +116,7 @@ pub fn parse_idx_v2_offsets(idx: &[u8]) -> Option<Vec<(String, u64)>> {
         };
         out.push((sha1, offset));
     }
-    Ok(Some(out)).ok().flatten()
+    Some(out)
 }
 
 /// Read a full pack file into memory and resolve every object it contains,
@@ -283,7 +283,7 @@ fn inflate_from(pack: &[u8], pos: usize, expected_size: usize) -> Result<Vec<u8>
         return Err("Inflate start past pack end".into());
     }
     let cap = expected_size.min(MAX_INFLATED);
-    let mut decoder = ZlibDecoder::new(&pack[pos..]);
+    let decoder = ZlibDecoder::new(&pack[pos..]);
     let mut out = Vec::with_capacity(cap);
     decoder.take((cap as u64).saturating_add(1))
         .read_to_end(&mut out)
