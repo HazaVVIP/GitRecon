@@ -3003,9 +3003,15 @@ fn scan_multiline(content: &str, filename: &str, sha1: &str, is_deleted: bool, f
             r#"(?im)^([A-Z_]*(?:PASSWORD|SECRET|KEY|TOKEN)[A-Z_]*)\s*=\s*<<(?:[-~])['"]?([A-Z]+)['"]?\n\s+([^\n]{8,})"#
         ).unwrap();
 
-        // PHP multi-line array config with secret values
+        // PHP multi-line array config with secret values.
+        // v3.2.7: tightened from [A-Z_]*(?:PASSWORD|SECRET|KEY|TOKEN)[A-Z_]*
+        // to require the keyword to be preceded by underscore or be at start,
+        // and followed by underscore or end.  This stops matching camelCase
+        // API method names (getPageToken, setPageToken, NextToken) from
+        // AWS SDK paginator files and Google API descriptor configs that
+        // were generating 9 000+ false positives per run.
         static ref PHP_MULTILINE_SECRET: Regex = Regex::new(
-            r#"(?im)['"]([A-Z_]*(?:PASSWORD|SECRET|KEY|TOKEN)[A-Z_]*)['"]\s*=>\s*['"]([^'\n]{8,})['"]"#
+            r#"(?im)['"]([A-Z_]*_(?:PASSWORD|SECRET|KEY|TOKEN)(?:_[A-Z_]+)?)['"]\s*=>\s*['"]([^'\n]{8,})['"]"#
         ).unwrap();
     }
     let lines: Vec<&str> = content.lines().collect();
@@ -3178,6 +3184,19 @@ fn scan_multiline(content: &str, filename: &str, sha1: &str, is_deleted: bool, f
     }
 
     // 6. PHP multi-line array config
+    // Skip known false-positive paths: AWS SDK paginator configs and
+    // Google API descriptor configs that contain camelCase key names
+    // like getPageToken, setPageToken, NextToken — these are API method
+    // names, not secrets.
+    {
+        let lower = filename.to_lowercase();
+        if lower.contains("/data/") && lower.ends_with("paginators-1.json.php")
+            || lower.contains("descriptor_config.php")
+        {
+            return findings; // skip this file entirely (pure false positives)
+        }
+    }
+
     for cap in PHP_MULTILINE_SECRET.captures_iter(content) {
         let key_name = cap.get(1).unwrap().as_str();
         let secret_value = cap.get(2).unwrap().as_str();
