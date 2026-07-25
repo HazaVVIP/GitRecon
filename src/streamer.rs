@@ -20,6 +20,10 @@ use crate::text_utils::truncate_utf8;
 use crate::checkpoint::{self, Checkpoint, CheckpointPhase, StreamCheckpoint, AdaptiveConcurrencyState};
 use crate::binary_scanner;
 
+// ── parse-failure throttle: only print the first 3 \"did not parse\" errors
+// per run; the blobs_failed counter in the final summary reports the total.
+static UNPARSEABLE: AtomicUsize = AtomicUsize::new(0);
+
 // ════════════════════════════════════════════════
 // SECRET PATTERNS
 // ════════════════════════════════════════════════
@@ -2019,10 +2023,18 @@ async fn fetch_and_process(
             cache_obj.put(sha1, &resp.body, Some(&url)).await;
         }
     } else if verbose {
-        eprintln!(
-            "  [!] Fetched blob {} did not parse as a valid git object — skipping cache write",
-            &sha1[..sha1.len().min(8)]
-        );
+        // Only print the first 3 failures to stderr — beyond that the blobs_failed
+        // counter in the final summary is sufficient. This prevents 1600+ lines of
+        // spam when the server returns HTML 200 for missing loose objects.
+        let n = UNPARSEABLE.fetch_add(1, Ordering::Relaxed) + 1;
+        if n <= 3 {
+            eprintln!(
+                "  [!] Fetched blob {} did not parse as a valid git object — skipping cache write",
+                &sha1[..sha1.len().min(8)]
+            );
+        } else if n == 4 {
+            eprintln!("  [!] Suppressing further blob-parse errors (see final summary) ...");
+        }
     }
 
     // Process the fetched content using the helper function

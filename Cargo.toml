@@ -1,6 +1,6 @@
 [package]
 name = "gitrecon"
-version = "3.2.4"
+version = "3.2.5"
 edition = "2021"
 description = "GitRecon — Streaming Git Exposure Scanner (Rust rewrite)"
 authors = ["GitRecon Contributors"]

@@ -3759,7 +3759,7 @@ async fn main() {
                 // This catches partial exposure cases where only metadata is exposed
                 if !map_r.objects_accessible {
                     if verbose {
-                        println!("  ⚠  PARTIAL EXPOSURE DETECTED: Git metadata accessible but objects return 404");
+                        println!("  ⚠  PARTIAL EXPOSURE DETECTED: Git metadata files (HEAD, index, config) are accessible, but git objects cannot be fetched (blocked, 404, or non-git response)");
                         println!("  → Skipping analysis (no accessible objects to scan)");
                         println!("  → Detection downgraded from {} to PARTIAL", dr.label);
                     } else {
@@ -3792,7 +3792,7 @@ async fn main() {
                                 "blobs_scanned": 0,
                                 "findings": [],
                                 "severity_counts": {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0},
-                                "note": "Git metadata files (HEAD, config, index) are accessible, but git objects (blobs/trees/commits) return 404. This indicates partial .git exposure where only repository metadata is exposed."
+                                "note": "Git metadata files (HEAD, config, index) are accessible, but git objects (blobs/trees/commits) cannot be fetched. This indicates partial .git exposure where the server blocks or restricts access to objects/, or returns non-git responses."
                             }
                         }).to_string()
                     ) {

@@ -460,54 +460,17 @@ impl Mapper {
 
         // 9. Pack discovery via objects/info/packs
         // ENHANCED: Added fallback for missing/incomplete info/packs file
-        let mut packs = if let Some(raw) = meta.get("objects/info/packs") {
+        let packs = if let Some(raw) = meta.get("objects/info/packs") {
             let text = String::from_utf8_lossy(raw);
             parse_info_packs(&text)
         } else {
             Vec::new()
         };
 
-        // Fallback: Try to discover pack files directly if info/packs is empty/missing
-        if packs.is_empty() {
-            // Try common pack file patterns by directly probing .idx files
-            // This handles cases where info/packs doesn't list all packs or is missing
-            let potential_packs = [
-                "pack-0000000000000000000000000000000000000000.idx",
-                "pack-a000000000000000000000000000000000000000.idx",
-                "pack-b000000000000000000000000000000000000000.idx",
-                "pack-c000000000000000000000000000000000000000.idx",
-                "pack-d000000000000000000000000000000000000000.idx",
-                "pack-e000000000000000000000000000000000000000.idx",
-                "pack-f000000000000000000000000000000000000000.idx",
-            ];
-
-            let mut pack_handles = Vec::new();
-            for pack_name in potential_packs.iter() {
-                let client = self.client.clone();
-                let git_url = git_url.to_string();
-                let pack_name = pack_name.to_string();
-                pack_handles.push(tokio::spawn(async move {
-                    let idx_url = format!("{}/objects/pack/{}", git_url, pack_name);
-                    let r = client.get(&idx_url).await;
-                    if r.ok() && !r.body.is_empty() {
-                        Some(pack_name.strip_suffix(".idx").unwrap_or(&pack_name).to_string())
-                    } else {
-                        None
-                    }
-                }));
-            }
-
-            for h in pack_handles {
-                if let Ok(Some(pack_sha1)) = h.await {
-                    // Extract SHA1 from pack-xxxxx... format
-                    if let Some(sha1) = pack_sha1.strip_prefix("pack-") {
-                        if sha1.len() == 40 && sha1.bytes().all(|b| b.is_ascii_hexdigit()) {
-                            packs.push(sha1.to_string());
-                        }
-                    }
-                }
-            }
-        }
+        // Fallback: no packs discovered from objects/info/packs.
+        // The old synthetic-pack probing (pack-00000000…, pack-a000000…) was a debug
+        // artifact that never matched a real repo — real pack SHAs are cryptographic,
+        // not sequential. Removed in v3.2.5.
 
         result.pack_sha1s = packs.clone();
 
@@ -760,36 +723,45 @@ impl Mapper {
             result.estimated_files * SIZE_PER_BLOB
         };
 
-        // VERIFICATION: Check if git objects are actually accessible
-        // This distinguishes between full exposure and partial (metadata-only) exposure
-        // Only runs when verify_objects flag is explicitly enabled
-        result.objects_accessible = if !verify_objects || result.blob_sha1s.is_empty() {
-            // Default: skip verification and assume objects are accessible
-            // This avoids false negatives when verification is not explicitly requested
+        // VERIFICATION: Sample blobs to check if git objects are actually
+        // accessible. Many servers expose metadata (HEAD, index, config) but
+        // return HTML 200 for missing objects instead of 404, so a few failed
+        // probes is not enough to declare partial exposure.
+        //
+        // Strategy: sample up to 10 blobs spread across the index to avoid
+        // hitting a cluster of inaccessible entries. Only declare partial
+        // exposure if ZERO succeed — a single valid object proves the objects/
+        // tree is reachable. --verify-objects raises the bar to ≥30%.
+        result.objects_accessible = if result.blob_sha1s.is_empty() {
             true
         } else {
-            // Try to fetch a sample of blobs to verify accessibility
-            // Sample up to 10 blobs to get a better representation
-            // Require at least 30% of samples to succeed before declaring full exposure
-            // (This handles cases where some blobs are genuinely missing/deleted)
-            let sample_size = result.blob_sha1s.len().min(10);
-            let sample_sha1s: Vec<_> = result.blob_sha1s.iter().take(sample_size).cloned().collect();
-            let mut accessible_count = 0;
-            for sha1 in sample_sha1s {
-                let url = format!("{}/{}", git_url, obj_path(&sha1));
+            // Distribute samples across the index entries (which are ordered)
+            // rather than iterating a HashSet, so a cluster of blocked entries
+            // near the front can't produce a false PARTIAL_EXPOSURE.
+            let entries: Vec<_> = result.index_entries.iter()
+                .filter(|e| is_valid_sha1(&e.sha1) && result.blob_sha1s.contains(&e.sha1))
+                .collect();
+            let sample_size = entries.len().min(10);
+            let step = if sample_size > 1 { entries.len() / sample_size } else { 1 };
+            let mut accessible_count = 0usize;
+            for i in 0..sample_size {
+                let idx = (i * step).min(entries.len().saturating_sub(1));
+                let sha1 = &entries[idx].sha1;
+                let url = format!("{}/{}", git_url, obj_path(sha1));
                 let resp = self.client.get(&url).await;
                 if resp.ok() && !resp.body.is_empty() {
-                    // Verify it's a valid git object
                     let parser = ObjectParser;
-                    if parser.parse(&resp.body, &sha1).is_some() {
+                    if parser.parse(&resp.body, sha1).is_some() {
                         accessible_count += 1;
                     }
                 }
             }
-            // Require at least 30% of samples to be accessible
-            // (e.g., 3 out of 10, or 1 out of 3)
-            let threshold = (sample_size as f64 * 0.3).ceil() as usize;
-            accessible_count >= threshold.max(1)
+            if verify_objects {
+                let threshold = ((sample_size as f64) * 0.3_f64).ceil() as usize;
+                accessible_count >= threshold.max(1)
+            } else {
+                accessible_count > 0
+            }
         };
 
         result
