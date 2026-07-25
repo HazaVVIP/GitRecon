@@ -1,0 +1,103 @@
+<?php
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+ini_set("memory_limit", "-1");
+set_time_limit(0);
+
+define("DOC_ROOT","/var/www/html/web-cron/");
+
+$time_start = time();
+
+include DOC_ROOT."config/config.php";
+include DOC_ROOT."lib/Opensearch.php";
+
+
+$dateStart = isset($_GET['start'])?$_GET['start']:"";
+$dateEnd = isset($_GET['end'])?$_GET['end']:"";
+
+if(empty($dateStart)){	
+	$dateStart = date("Y-m-d", strtotime('-1 days'));
+}
+
+if(empty($dateEnd)){	
+	$dateEnd = date("Y-m-d", strtotime('-1 days'));
+}
+
+echo $dateStart." - ".$dateEnd."<br>";
+
+//RDS
+mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT);
+
+$con = mysqli_connect(RDS_HOST,RDS_USERNAME,RDS_PASSWORD,"tribunnews");
+
+if (mysqli_connect_errno()) {
+	echo "Failed to connect to MySQL: " . mysqli_connect_error();
+	exit();
+}
+
+$sql = "SELECT count(id) as total FROM images 
+		WHERE 
+		date_upload BETWEEN '".$dateStart." 00:00:00' AND '".$dateEnd." 23:59:59'";
+$result = $result = mysqli_query($con, $sql);
+$row = mysqli_fetch_array($result, MYSQLI_ASSOC);
+$totalRds = isset($row['total'])?$row['total']:0;
+
+mysqli_free_result($result);
+
+mysqli_close($con);
+
+echo "RDS Total : ".$totalRds."<br>";
+
+///
+
+//OS	
+$where = array();
+array_push($where,array("range" => array("date_upload" => array("gte" => ''.$dateStart.' 00:00:00', "lte" => ''.$dateEnd.' 23:59:59'))));	
+$condition = array();
+if(count($where) > 0){
+	$condition = array("bool" =>
+					array("must" =>
+						$where
+					)
+				);
+}
+
+$opensearch = new Opensearch();
+$opensearch->init(OS_TNEWS_IMAGE_URL,OS_TNEWS_IMAGE_USERNAME,OS_TNEWS_IMAGE_PASSWORD,true);
+$response = $opensearch->count_total('tribunnews-images',$condition);
+
+$totalOs = 0;
+if($response['status']){
+	$totalOs = isset($response['total'])?$response['total']:0;
+}
+
+echo "OS Total : ".$totalOs."<br>";
+
+///
+
+$where = array();
+array_push($where,array("range" => array("date_upload" => array("gte" => ''.$dateStart.' 00:00:00', "lte" => ''.$dateEnd.' 23:59:59'))));	
+array_push($where,array("match_phrase" => array("typ" => 'images')));
+//array_push($where,array("match_phrase" => array("domain" => $domain)));
+$condition = array();
+if(count($where) > 0){
+	$condition = array("bool" =>
+					array("must" =>
+						$where
+					)
+				);
+}
+
+$opensearchAllNetwork = new Opensearch();
+$opensearchAllNetwork->init(OS_ALLNETWOORK_URL,OS_ALLNETWOORK_USERNAME,OS_ALLNETWOORK_PASSWORD,true);
+$responseAllNetwork = $opensearchAllNetwork->count_total('allnetwork-images',$condition);
+
+$totalSyncOsAllNetwork = 0;
+if($responseAllNetwork['status']){
+	$totalSyncOsAllNetwork = isset($responseAllNetwork['total'])?$responseAllNetwork['total']:0;
+}
+
+echo "OS Total All Network : ".$totalSyncOsAllNetwork."<br>";
+
+echo '<br>Execution time in seconds: ' . (microtime(true) - $time_start) . "<br>";
+?>

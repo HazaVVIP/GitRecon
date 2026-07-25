@@ -1,0 +1,166 @@
+{
+  "detection": {
+    "branch": "dev-app",
+    "confidence": 92,
+    "git_path": ".git",
+    "git_url": "https://dev.megadata.net.id/.git",
+    "label": "CONFIRMED",
+    "listing": false,
+    "remote_url": "git@bitbucket.org:soekee/billing.git",
+    "server": "Nginx"
+  },
+  "map": {
+    "blob_sha1s": 1692,
+    "branches": [
+      "alpha",
+      "dev-app",
+      "new-dev",
+      "prod"
+    ],
+    "commit_sha1s": 246,
+    "estimated_bytes": 90233312,
+    "estimated_files": 1940,
+    "pack_count": 0,
+    "remote_urls": [
+      {
+        "remote": "origin",
+        "url": "git@bitbucket.org:soekee/billing.git"
+      }
+    ],
+    "size_human": "86.1 MB",
+    "total_sha1s": 1938
+  },
+  "result": {
+    "ai_category_counts": {},
+    "ai_findings_total": 0,
+    "blobs_scanned": 136,
+    "bytes_scanned": 603868,
+    "commit_count": 201,
+    "contributors": [
+      {
+        "email": "git@stash",
+        "name": "git stash"
+      },
+      {
+        "email": "abdulkholiqhasan@yahoo.co.id",
+        "name": "Abdul Kholiq Hasan"
+      },
+      {
+        "email": "djoegis@gmail.com",
+        "name": "Sukirmanto"
+      },
+      {
+        "email": "joe.witaya@gmail.com",
+        "name": "Joe"
+      }
+    ],
+    "elapsed_s": 3.43,
+    "findings": [
+      {
+        "ai_category": null,
+        "ai_related": false,
+        "ai_tags": [],
+        "blob_sha1": "f9fec58fc87e2beebc835d19d94539226056602b",
+        "confidence_adjustment": "context: comment only (reduced confidence)",
+        "context": "function md5_encrypt($plain_text, $iv_len = 16) | { | $password = 'MegadataISP123!@#$'; | $plain_text .= \"\\x13\"; | $n = strlen($plain_text);",
+        "deleted": false,
+        "desc": "Hardcoded Password",
+        "file": "application/helpers/racode_helper.php",
+        "line": 914,
+        "match": "password = 'MegadataISP123!@#$'",
+        "severity": "MEDIUM",
+        "type": "hardcoded_pass"
+      },
+      {
+        "ai_category": null,
+        "ai_related": false,
+        "ai_tags": [],
+        "blob_sha1": "f9fec58fc87e2beebc835d19d94539226056602b",
+        "confidence_adjustment": "likely placeholder: 2+ keywords + comment",
+        "context": "function md5_decrypt($enc_text, $iv_len = 16) | { | $password = 'MegadataISP123!@#$'; | $enc_text = str_replace('@', '+', $enc_text); | $enc_text = str_replace('_', '/', $enc_text);",
+        "deleted": false,
+        "desc": "Hardcoded Password",
+        "file": "application/helpers/racode_helper.php",
+        "line": 937,
+        "match": "password = 'MegadataISP123!@#$'",
+        "severity": "MEDIUM",
+        "type": "hardcoded_pass"
+      },
+      {
+        "ai_category": null,
+        "ai_related": false,
+        "ai_tags": [],
+        "blob_sha1": "61557948e68d5f8e520c90f3435060a615eaa6ee",
+        "confidence_adjustment": "context: comment only (reduced confidence)",
+        "context": "PHP array config (pppoe_password)",
+        "deleted": false,
+        "desc": "PHP config: pppoe_password",
+        "file": "application/libraries/Telnet_lib.php",
+        "line": 396,
+        "match": "12345678",
+        "severity": "MEDIUM",
+        "type": "php_multiline_secret"
+      },
+      {
+        "ai_category": null,
+        "ai_related": false,
+        "ai_tags": [],
+        "blob_sha1": "6e42b4effc4adea1acf6bd2a29cf705fdda5ca87",
+        "confidence_adjustment": null,
+        "context": "PHP array config (access_token)",
+        "deleted": false,
+        "desc": "PHP config: access_token",
+        "file": "application/libraries/Mandiri_qris.php",
+        "line": 24,
+        "match": "/qrissnapmpm/1.0.11/qr/v2.0/access-token/b2b",
+        "severity": "HIGH",
+        "type": "php_multiline_secret"
+      },
+      {
+        "ai_category": null,
+        "ai_related": false,
+        "ai_tags": [],
+        "blob_sha1": "15cfc2c3b792f7a67a12d056d7041abb4bb05592",
+        "confidence_adjustment": "context: comment only (reduced confidence)",
+        "context": "PHP array config (client_secret)",
+        "deleted": false,
+        "desc": "PHP config: client_secret",
+        "file": "application/config/mandiri_qris.php",
+        "line": 26,
+        "match": "id0g1wo63aZ9vyifeHg4vAPzURoa",
+        "severity": "MEDIUM",
+        "type": "php_multiline_secret"
+      },
+      {
+        "ai_category": null,
+        "ai_related": false,
+        "ai_tags": [],
+        "blob_sha1": "c9871a7daa232299b54ba020d3f8326386d7d8fa",
+        "confidence_adjustment": "context: comment only (reduced confidence)",
+        "context": "$mikrotik_host = '103.105.52.34'; | $mikrotik_user = 'apiuser'; | $mikrotik_pass = '12345678'; | $mikrotik_port = 8925; | $user_session  = $this->ion_auth->user()->row();",
+        "deleted": false,
+        "desc": "Hardcoded Password",
+        "file": "application/controllers/Nas.php",
+        "line": 356,
+        "match": "pass = '12345678'",
+        "severity": "MEDIUM",
+        "type": "hardcoded_pass"
+      }
+    ],
+    "risk_score": 25,
+    "secrets_total": 6,
+    "severity_counts": {
+      "CRITICAL": 0,
+      "HIGH": 1,
+      "LOW": 0,
+      "MEDIUM": 5
+    },
+    "tech_stack": [
+      "PHP"
+    ]
+  },
+  "target": "https://dev.megadata.net.id",
+  "timestamp": "2026-07-25T08:40:01.194963628+00:00",
+  "tool": "GitRecon",
+  "version": "3.2.0"
+}

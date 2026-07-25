@@ -119,9 +119,38 @@ pub fn parse_idx_v2_offsets(idx: &[u8]) -> Option<Vec<(String, u64)>> {
     Some(out)
 }
 
+/// Quick peek at an object's type tag at `offset` without fully parsing or
+/// inflating. Returns the raw type nibble (1=commit, 2=tree, 3=blob, 4=tag,
+/// 6=OFS_DELTA, 7=REF_DELTA) and the byte position right after the variable-
+/// length header.  Used by the two-pass resolver to separate deltas from
+/// undeltified objects before resolving either.
+fn peek_object_type(pack: &[u8], offset: u64) -> Result<(u8, usize), String> {
+    let mut pos = offset as usize;
+    if pos >= pack.len() {
+        return Err(format!("Object offset {offset} past pack end"));
+    }
+    let mut byte = pack[pos];
+    pos += 1;
+    let obj_type = (byte >> 4) & 0b0111;
+    while byte & 0x80 != 0 {
+        if pos >= pack.len() {
+            return Err("Truncated object header in peek".into());
+        }
+        byte = pack[pos];
+        pos += 1;
+    }
+    Ok((obj_type, pos))
+}
+
 /// Read a full pack file into memory and resolve every object it contains,
 /// applying deltas so callers see undeltified `commit`/`tree`/`blob`/`tag`
 /// content indistinguishable from a loose-object fetch.
+///
+/// Uses a two-pass strategy so REF_DELTA entries — which can reference any
+/// SHA1 regardless of offset order — always resolve even when the base
+/// appears later in the pack.  Git sorts REF_DELTA bases before their
+/// dependents inside a single pack, but concatenated or thin packs can
+/// violate that invariant.
 ///
 /// `idx` and `pack` are the raw bytes of `.git/objects/pack/pack-<sha>.idx`
 /// and `.git/objects/pack/pack-<sha>.pack` respectively.
@@ -162,32 +191,80 @@ pub fn read_pack(idx: &[u8], pack: &[u8]) -> Result<Vec<PackObject>, String> {
         .map(|(sha, off)| (*off, sha.clone()))
         .collect();
 
-    // Resolve each object in offset order.
-    for (offset_pos, (_sha1, offset)) in idx_pairs.iter().enumerate() {
-        let obj = read_pack_object(
-            pack,
-            *offset,
-            &by_offset,
-            &by_sha,
-            /*depth=*/ 0,
-        )?;
-        // Confirm SHA1 lines up with what .idx claimed.
-        if let Some(exp) = expected_sha.get(offset) {
-            if &obj.sha1 != exp {
-                return Err(format!(
-                    "SHA1 mismatch at offset {offset}: pack says {}, idx says {exp}",
-                    obj.sha1
-                ));
+    // ── Two-pass resolution ───────────────────────────────────────────
+    // Pass 1: resolve non-delta objects only.  This populates by_offset
+    // and by_sha so deltas can always find their base in pass 2.
+    // Pass 2: resolve deltas (OFS_DELTA + REF_DELTA) with retries so
+    // delta chains (A→B→C where B is also a delta) resolve correctly.
+    let mut pending: Vec<(usize, u64, String)> = Vec::new();
+
+    for (i, (_sha1, offset)) in idx_pairs.iter().enumerate() {
+        let (obj_type, _) = peek_object_type(pack, *offset)?;
+        match obj_type {
+            OBJ_COMMIT | OBJ_TREE | OBJ_BLOB | OBJ_TAG => {
+                let obj = read_pack_object(pack, *offset, &by_offset, &by_sha, 0)?;
+                if let Some(exp) = expected_sha.get(offset) {
+                    if &obj.sha1 != exp {
+                        return Err(format!(
+                            "SHA1 mismatch at offset {offset}: pack says {}, idx says {exp}",
+                            obj.sha1
+                        ));
+                    }
+                }
+                by_offset.insert(*offset, obj.clone());
+                by_sha.insert(obj.sha1.clone(), obj.clone());
+                resolved.push(obj);
+            }
+            OBJ_OFS_DELTA | OBJ_REF_DELTA => {
+                pending.push((i, *offset, _sha1.clone()));
+            }
+            t => return Err(format!("Unknown object type {t} at offset {offset}")),
+        }
+    }
+
+    // Pass 2: retry-up-to-exhaustion delta resolution.  Most packs need
+    // 1-2 rounds; delta chains (A→B→C) may need more.  Cap at 20 rounds
+    // to prevent infinite loops on genuinely corrupt data.
+    const MAX_DELTA_ROUNDS: u32 = 20;
+    let mut round = 0u32;
+    while !pending.is_empty() && round < MAX_DELTA_ROUNDS {
+        round += 1;
+        let mut retry = Vec::new();
+        for (i, offset, sha1) in pending {
+            match read_pack_object(pack, offset, &by_offset, &by_sha, 0) {
+                Ok(obj) => {
+                    if let Some(exp) = expected_sha.get(&offset) {
+                        if &obj.sha1 != exp {
+                            return Err(format!(
+                                "SHA1 mismatch at offset {offset}: pack says {}, idx says {exp}",
+                                obj.sha1
+                            ));
+                        }
+                    }
+                    by_offset.insert(offset, obj.clone());
+                    by_sha.insert(obj.sha1.clone(), obj.clone());
+                    resolved.push(obj);
+                }
+                Err(_) => retry.push((i, offset, sha1)),
             }
         }
-        // Ratchet expectations forward — if a hostile pack orders objects wrong
-        // this catches it.
-        let _ = offset_pos;
-
-        by_offset.insert(*offset, obj.clone());
-        by_sha.insert(obj.sha1.clone(), obj.clone());
-        resolved.push(obj);
+        pending = retry;
     }
+
+    if !pending.is_empty() {
+        return Err(format!(
+            "{} delta object(s) still unresolved after {MAX_DELTA_ROUNDS} rounds — possible corrupt pack",
+            pending.len()
+        ));
+    }
+
+    // Re-order resolved back to .idx order (callers may depend on this).
+    resolved.sort_by_key(|obj| {
+        idx_pairs.iter()
+            .find(|(s, _)| s == &obj.sha1)
+            .map(|(_, o)| *o)
+            .unwrap_or(u64::MAX)
+    });
 
     Ok(resolved)
 }

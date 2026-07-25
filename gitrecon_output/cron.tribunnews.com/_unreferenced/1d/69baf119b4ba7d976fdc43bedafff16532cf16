@@ -1,0 +1,86 @@
+<?php
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+
+$time_start = time();
+
+define("DOC_ROOT","/var/www/html/cron/");
+
+include DOC_ROOT."config/config.php";
+include DOC_ROOT."lib/Opensearch.php";
+include DOC_ROOT."lib/Writelog.php";
+
+$daerah = isset($_GET['daerah'])?$_GET['daerah']:"aceh";
+$date = isset($_GET['date'])?$_GET['date']:"";
+
+$dateStart = isset($_GET['start'])?$_GET['start']:"";
+$dateEnd = isset($_GET['end'])?$_GET['end']:"";
+
+if(empty($dateStart)){	
+	$dateStart = date("Y-m-d", strtotime('-1 days'));
+}
+
+if(empty($dateEnd)){	
+	$dateEnd = date("Y-m-d", strtotime('-1 days'));
+}
+
+echo $daerah."<br>";
+echo $dateStart." - ".$dateEnd."<br>";
+
+
+$condition 	= array (
+				'bool' => 
+				array (
+				  'filter' => 
+				  array (
+					0 => 
+					array (
+					  'range' => 
+					  array (
+						'publish_date' => 
+						array (
+						  'gte' => ''.$dateStart.' 00:00:00',
+						  'lte' => ''.$dateEnd.' 23:59:59',
+						),
+					  ),
+					),
+				  ),
+				),
+			  );	
+
+$index = $daerah.".tribundaerah-articles";
+$opensearch = new Opensearch();
+$opensearch->init(OS_DAERAH_URL,OS_DAERAH_USERNAME,OS_DAERAH_PASSWORD,true);
+$response_os = $opensearch->count_total($index,$condition);
+$totalOs = 0;
+if($response_os['status']){
+	$totalOs = isset($response_os['total'])?$response_os['total']:0;
+} 
+
+//RDS
+$daerahRds = str_replace("aceh","aceh2",$daerah);
+$daerahRds = str_replace("jambi","jambi2",$daerahRds);
+$con = mysqli_connect(RDS_DAERAH_HOST,RDS_DAERAH_USERNAME,RDS_DAERAH_PASSWORD,$daerahRds);
+if (mysqli_connect_errno()) {
+	echo "Failed to connect to MySQL: " . mysqli_connect_error();
+	exit();
+}
+
+
+$arrIDRds = array();
+$sql = "SELECT count(a.id) as total
+		FROM articles a
+		WHERE a.publish_date BETWEEN '".$dateStart." 00:00:00' AND '".$dateEnd." 23:59:59'
+		ORDER BY a.id DESC";
+$result = mysqli_query($con, $sql);
+$rsTotalRds = mysqli_fetch_assoc($result);
+$totalRds = isset($rsTotalRds['total'])?$rsTotalRds['total']:0;
+
+echo "Total OS : ".$totalOs."<br>";
+echo "Total RDS : ".$totalRds."<br>";
+
+unset($opensearch);
+
+
+echo '<br>Execution time in seconds: ' . (microtime(true) - $time_start) . "<br>";
+?>

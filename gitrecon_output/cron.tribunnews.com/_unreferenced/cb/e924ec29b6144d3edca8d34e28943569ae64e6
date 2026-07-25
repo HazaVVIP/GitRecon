@@ -1,0 +1,142 @@
+<?php 
+include_once "/var/www/html/web-cron/config/config_db_booking.php";
+
+class model_transaction{
+
+    private $conn_db;
+    public function __construct()
+    {
+        //get conn db
+        $this->conn_db = new config_db_booking();
+    }
+
+    public function get_invoice_expired($dateNow) {
+        $con = $this->conn_db->conn_to_db_prod();
+        /* $sql = "SELECT id,id_event,id_ticket,jumlah_ticket,kode_invoice,status_paid,transaction_status,custom_field,tgl_transaksi,tgl_expire,JSON_UNQUOTE(JSON_EXTRACT(response, '$.transaction_status')) AS resp_status,
+                transaction_status, status_paid, jersey
+                FROM tbl_transaksi WHERE transaction_status='1' AND DATE(tgl_transaksi) >= '2023-05-03' AND LEFT(user_id,5) !='error'
+                AND JSON_UNQUOTE(JSON_EXTRACT(response, '$.status_code')) IN ('407','202') LIMIT 50"; */
+       	$sql = "SELECT trans.user_id,e.judul, trans.firstname,trans.user_id,trans.nama,trans.id,trans.id_event,trans.phone,trans.id_ticket,trans.jumlah_ticket,trans.kode_invoice,trans.status_paid,trans.transaction_status,trans.custom_field,trans.tgl_transaksi,trans.tgl_expire, trans.jersey
+        FROM tbl_transaksi trans inner join event e on trans.id_event = e.id WHERE transaction_status='1' AND DATE(tgl_transaksi) >= '2026-05-28' AND tgl_expire < '$dateNow'
+        LIMIT 50";
+        // $sql = "SELECT user_id,id,id_event,id_ticket,jumlah_ticket,kode_invoice,status_paid,transaction_status,custom_field,tgl_transaksi,tgl_expire, transaction_status, status_paid, jersey, transaction_status
+        // FROM tbl_transaksi WHERE kode_invoice='TB477517188984249495808'
+        // LIMIT 50";
+        $result = mysqli_query($con, $sql);	
+		return $result;
+	}
+
+	   public function get_invoice_expired_dev($dateNow) {
+        $con = $this->conn_db->conn_to_db_dev();
+        /* $sql = "SELECT id,id_event,id_ticket,jumlah_ticket,kode_invoice,status_paid,transaction_status,custom_field,tgl_transaksi,tgl_expire,JSON_UNQUOTE(JSON_EXTRACT(response, '$.transaction_status')) AS resp_status,
+                transaction_status, status_paid, jersey
+                FROM tbl_transaksi WHERE transaction_status='1' AND DATE(tgl_transaksi) >= '2023-05-03' AND LEFT(user_id,5) !='error'
+                AND JSON_UNQUOTE(JSON_EXTRACT(response, '$.status_code')) IN ('407','202') LIMIT 50"; */
+        $sql = "SELECT trans.user_id,e.judul, trans.firstname,trans.user_id,trans.id,trans.id_event,trans.phone,trans.id_ticket,trans.jumlah_ticket,trans.kode_invoice,trans.status_paid,trans.transaction_status,trans.custom_field,trans.tgl_transaksi,trans.tgl_expire, trans.jersey
+        FROM tbl_transaksi trans inner join event e on trans.id_event = e.id WHERE transaction_status='1' AND DATE(tgl_transaksi) >= '2026-05-28' AND tgl_expire < '$dateNow'
+        LIMIT 50";
+       	// $sql = "SELECT user_id,id,id_event,id_ticket,jumlah_ticket,kode_invoice,status_paid,transaction_status,custom_field,tgl_transaksi,tgl_expire, transaction_status, status_paid, jersey, transaction_status
+        // FROM tbl_transaksi WHERE transaction_status='1' AND DATE(tgl_transaksi) >= '2026-06-10' AND tgl_expire < '$dateNow'
+        // LIMIT 50";
+        $result = mysqli_query($con, $sql);	
+		return $result;
+	}
+
+    public function getStockTicket($id){
+        $con = $this->conn_db->conn_to_db_prod();
+		$sql = "SELECT stock from ticket where id=$id";
+		$result = mysqli_query($con, $sql);	
+		return $result;
+	}
+
+    public function get_voucher_expired($dateNow) {
+        $con = $this->conn_db->conn_to_db_prod();
+        $sql = "SELECT * FROM voucher WHERE end_date < '$dateNow' LIMIT 20";
+        $result = mysqli_query($con, $sql);	
+		return $result;
+	}
+
+    public function getStockJersey($id, $type='',$size=''){
+        $con = $this->conn_db->conn_to_db_prod();
+        $sql = "SELECT stock from jersey where id_ticket=$id AND jersey_type='$type' AND `size`='$size' ";
+        $result = mysqli_query($con, $sql);	
+		return $result;
+	}
+	
+	public function getListAllTransaksiTiketPerEvent(){
+		 $con = $this->conn_db->conn_to_db_prod_read();
+		$query = "SELECT k.name as nama_kota,tt.id, tt.kode_pemesanan,ti.kode_pemesanan as no_tiket,tt.kode_invoice,tt.bank_type, e.judul, tt.nama,tt.firstname,tt.lastname,tt.phone,tt.paid_time,ti.tgl_scan, tt.transaction_status, tt.status_paid, tt.tgl_transaksi, tt.total_harga, tt.gender,tt.email,ti.seat_no,tt.nik,te.ticket_name,e.event_type,cat.category_name,ti.no_bib,ti.tgl_bib,ti.status_rpc,ti.penerima_rpc,ti.phone_rpc,ti.pic_rpc,ti.tgl_diambil,e.metode_flag,ti.status as statusTicket,
+				CASE
+					WHEN JSON_VALID(tt.custom_field) AND JSON_UNQUOTE(JSON_EXTRACT(tt.custom_field, '$.referral')) IS NOT NULL
+					THEN JSON_UNQUOTE(JSON_EXTRACT(tt.custom_field, '$.referral'))
+					ELSE 0
+					END AS referral,
+					JSON_UNQUOTE(JSON_EXTRACT(tt.custom_field, '$.nmkondar')) AS nmkondar,
+					JSON_UNQUOTE(JSON_EXTRACT(tt.custom_field, '$.darurat')) AS nokondar,
+					JSON_UNQUOTE(JSON_EXTRACT(tt.custom_field, '$.nik')) AS nik2,
+					JSON_UNQUOTE(JSON_EXTRACT(tt.custom_field, '$.golongan')) AS golongandarah,
+					JSON_UNQUOTE(JSON_EXTRACT(tt.custom_field, '$.dob')) AS dob,
+					CASE
+					WHEN JSON_VALID(tt.jersey) AND JSON_UNQUOTE(JSON_EXTRACT(tt.jersey, '$.jersey_racer')) IS NOT NULL
+					THEN JSON_UNQUOTE(JSON_EXTRACT(tt.jersey, '$.jersey_racer'))
+					ELSE 0
+					END AS jersey_racer, CASE WHEN JSON_VALID(tt.jersey) AND JSON_UNQUOTE(JSON_EXTRACT(tt.jersey, '$.jersey_finisher')) IS NOT NULL
+					THEN JSON_UNQUOTE(JSON_EXTRACT(tt.jersey, '$.jersey_finisher'))
+					ELSE 0
+					END AS jersey_finisher
+					FROM tbl_transaksi tt 
+					INNER JOIN `event` e ON tt.id_event=e.id
+					INNER JOIN tbl_ticket_transaksi ti ON tt.id = ti.id_transaksi
+					LEFT JOIN master_kota k on JSON_UNQUOTE(JSON_EXTRACT(tt.custom_field, '$.id_kota')) = k.id
+					INNER JOIN ticket te ON ti.id_ticket = te.id
+					LEFT JOIN tbl_ticket_category cat on te.id_category = cat.id where tt.status_paid = 'paid' AND tt.custom_field IS NOT NULL AND JSON_VALID(tt.custom_field) and tt.id_event = 477 ORDER BY tt.id ASC LIMIT 2,1";
+		$result = mysqli_query($con, $query);	
+		return $result;
+		
+	}
+
+	public function get_trash_event() {
+        $con = $this->conn_db->conn_to_db_prod();
+        $sql = "SELECT * FROM `event` where `status`='4' LIMIT 50";
+        $result = mysqli_query($con, $sql);	
+		return $result;
+	}
+
+	 public function get_invoice_reminder_expired($dateNow){
+        $con = $this->conn_db->conn_to_db_prod();
+        $sql = "SELECT trans.user_id, e.judul, trans.firstname, trans.nama,trans.id,trans.id_event,trans.phone,trans.id_ticket, trans.jumlah_ticket, trans.kode_invoice,trans.status_paid, trans.transaction_status, trans.custom_field, trans.tgl_transaksi, trans.tgl_expire, trans.bank_type, trans.total_harga, trans.biaya_layanan, trans.voucher_amount,trans.biaya_admin,trans.bank_type, trans.payment_type, trans.wa_reminder_sent FROM tbl_transaksi trans
+				INNER JOIN event e ON trans.id_event = e.id
+				WHERE trans.transaction_status = '1'
+				 AND (
+						(
+							trans.bank_type IN ('bca','bni','mandiri','bri','permata')
+							AND TIMESTAMPDIFF(MINUTE, '{$dateNow}', trans.tgl_expire) BETWEEN 9 AND 10
+						)
+						OR
+						(
+							trans.bank_type IN ('qris','gopay')
+							AND TIMESTAMPDIFF(MINUTE, '{$dateNow}', trans.tgl_expire) BETWEEN 4 AND 5
+						)
+						OR
+						(
+							trans.bank_type = 'e-wallet'
+							AND TIMESTAMPDIFF(MINUTE, '{$dateNow}', trans.tgl_expire) BETWEEN 4 AND 5
+						)
+						OR
+						(
+							trans.bank_type = 'gerai'
+							AND TIMESTAMPDIFF(MINUTE, '{$dateNow}', trans.tgl_expire) BETWEEN 59 AND 60
+						)
+						OR
+						(
+							trans.bank_type = 'credit_card'
+							AND TIMESTAMPDIFF(MINUTE, '{$dateNow}', trans.tgl_expire) BETWEEN 9 AND 10
+						)
+					)
+					LIMIT 50
+					";
+        $result = mysqli_query($con, $sql);	
+		return $result;
+	}
+}
+?>

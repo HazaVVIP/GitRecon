@@ -1,0 +1,191 @@
+<?php
+/* ini_set('display_errors',1);
+error_reporting(E_ALL); */
+error_reporting(0);
+
+$time_start = time();
+
+define("DOC_ROOT","/var/www/html/web-cron/");
+
+include DOC_ROOT."config/config.php";
+include DOC_ROOT."lib/simple_html_dom.php";
+include DOC_ROOT."lib/Opensearch.php";
+
+/* 
+Running in command
+- sudo -u www-data /usr/bin/php7.4 /var/www/html/web-cron/tribunnews/klasemen_bola_bolasport.php champion
+*/
+
+$liga = isset($_SERVER["argv"][1])?$_SERVER["argv"][1]:"";
+if(isset($_GET['liga'])){
+	$liga = $_GET['liga'];
+}	
+$totalUpdate = 0;
+
+if (!empty($liga)) {
+	if($liga != "bundesliga" && $liga != "piala-aff"){
+		$path_liga = "liga-".$liga;
+	} else {
+		$path_liga = $liga;
+	}	
+	
+	if($path_liga == "liga-champions"){
+		$html = file_get_html('https://www.bolasport.com/klasemen/'.$path_liga, false, null, 0);
+		if($html != false){
+			$dom = new DOMDocument('1.0', 'UTF-8');
+			$internalErrors = libxml_use_internal_errors(true);
+			$dom->loadHTML($html);
+
+			$xpath = new DOMXPath($dom);
+
+			$div = $xpath->query('//div[@class="standing-league"]');
+			$div = $div->item(0);
+
+			$xml_string = $dom->saveXML($div);
+
+			$xml = simplexml_load_string($xml_string);
+
+			$json = json_encode($xml);
+			$array = json_decode($json,TRUE);
+
+			$datadiv = $array['div'];
+
+			$opensearchTest = new Opensearch();
+			$opensearchTest->init(ES_TEST_URL,"","",false);
+			
+			$opensearchTBO = new Opensearch();
+			$opensearchTBO->init(OS_TBO_URL,OS_TBO_USERNAME,OS_TBO_PASSWORD,true);
+			
+			for ($i=0; $i < count($datadiv); $i++) {
+				if ($liga == 'champions' || $liga == '2-indonesia' || $liga == 'piala-aff'){
+					$groupName = trim(strtolower($datadiv[$i]['div'][0]));
+					$bodyData = isset($datadiv[$i]['div'][1]['div'][1]['div'])?$datadiv[$i]['div'][1]['div'][1]['div']:array();
+				}else{
+					$groupName = '';
+					$bodyData = isset($datadiv[$i]['div'][1]['div'])?$datadiv[$i]['div'][1]['div']:array();
+				}
+
+				$datagroup = array();
+				if(count($bodyData) > 0){
+					for ($j=0; $j < count($bodyData); $j++) {
+						$datagroup[$j] = array();
+						
+						$klub = $bodyData[$j]['div'][1]['div'];
+						
+						if ($klub == 'Mönchengladbach') $klub = 'Monchengladbach';
+						if ($klub == 'Köln') $klub = 'Koln';
+						if ($klub == 'Atlético Madrid') $klub = 'Atletico Madrid';
+						if ($klub == 'Almería') $klub = 'Almería';
+						if ($klub == 'Cádiz') $klub = 'Cadiz';
+						if ($klub == 'Viktoria Plzeň') $klub = 'Viktoria Plzen';
+						if ($klub == 'Crvena zvezda') $klub = 'Crvena Zvezda';
+						
+						$klub_alias = str_replace(" ","-",strtolower($klub));
+
+						if ($klub == 'Mönchengladbach') $klub = 'Monchengladbach';
+						if ($klub == 'Köln') $klub = 'Koln';
+						if ($klub == 'Atlético Madrid') $klub = 'Atletico Madrid';
+						if ($klub == 'Almería') $klub = 'Almería';
+						if ($klub == 'Cádiz') $klub = 'Cadiz';
+						if ($klub == 'Viktoria Plzeň') $klub = 'Viktoria Plzen';
+						
+						$datagroup[$j]['group'] = $groupName;
+						$datagroup[$j]['urutan'] = $bodyData[$j]['div'][0];
+						$datagroup[$j]['klub'] = $klub;
+						$datagroup[$j]['image_klub_link'] = "https://asset-1.tstatic.net/img/klubimageasset/".$liga."/".$klub_alias.".png";
+						$datagroup[$j]['score_D'] = $bodyData[$j]['div'][2];
+						$datagroup[$j]['score_M'] = $bodyData[$j]['div'][3];
+						$datagroup[$j]['score_S'] = $bodyData[$j]['div'][4];
+						$datagroup[$j]['score_K'] = $bodyData[$j]['div'][5];
+						$datagroup[$j]['score_GM'] = $bodyData[$j]['div'][6];
+						$datagroup[$j]['score_GK'] = $bodyData[$j]['div'][7];
+						$datagroup[$j]['score_min_plus'] = $bodyData[$j]['div'][8];
+						$datagroup[$j]['score_P'] = $bodyData[$j]['div'][9];
+						$arrlimaskor = array();
+						$datalimaklub = $bodyData[$j]['div'][10]['ul']['li'];
+						for ($k=0; $k < count($datalimaklub); $k++) {
+							if ($datalimaklub[$k]['@attributes']['class'] == 'standing-result-b -loss'){
+								$arrlimaskor[] = 'loss';
+							}else if ($datalimaklub[$k]['@attributes']['class'] == 'standing-result-b -draw'){
+								$arrlimaskor[] = 'draw';
+							}else if ($datalimaklub[$k]['@attributes']['class'] == 'standing-result-b -win'){
+								$arrlimaskor[] = 'win';
+							}
+						}
+						$datagroup[$j]['lima_hasil_terakhir'] = json_encode($arrlimaskor);
+					}	
+					
+					if (count($datagroup) > 0){
+						foreach($datagroup as $arrGroup){
+							$klub = isset($arrGroup['klub'])?$arrGroup['klub']:"";
+							
+							if(!empty($klub)){
+								$index = "klasemen_liga_".$liga;
+								
+								$condition = array("match_phrase" => array("klub" => $klub));
+								$fields = array("id");
+								$response = $opensearchTBO->findOne($index,$condition,$fields);
+								
+								if($response['status']){
+									$id = isset($response['data']['_source']['id'])?$response['data']['_source']['id']:0;
+									
+									$urutan = isset($arrGroup['urutan'])?intval($arrGroup['urutan']):0;
+									$group = isset($arrGroup['group'])?$arrGroup['group']:"";
+									$image_klub_link = isset($arrGroup['image_klub_link'])?$arrGroup['image_klub_link']:"";
+									$score_D = isset($arrGroup['score_D'])?intval($arrGroup['score_D']):0;
+									$score_M = isset($arrGroup['score_M'])?intval($arrGroup['score_M']):0;
+									$score_S = isset($arrGroup['score_S'])?intval($arrGroup['score_S']):0;
+									$score_K = isset($arrGroup['score_K'])?intval($arrGroup['score_K']):0;
+									$score_GM = isset($arrGroup['score_GM'])?intval($arrGroup['score_GM']):0;
+									$score_GK = isset($arrGroup['score_GK'])?intval($arrGroup['score_GK']):0;
+									$score_min_plus = isset($arrGroup['score_min_plus'])?intval($arrGroup['score_min_plus']):0;
+									$score_P = isset($arrGroup['score_P'])?intval($arrGroup['score_P']):0;
+									$lima_hasil_terakhir = isset($arrGroup['lima_hasil_terakhir'])?$arrGroup['lima_hasil_terakhir']:"[]";
+									
+									$arrUpdate = array();
+									$arrUpdate['klub'] = $klub;
+									$arrUpdate['urutan'] = $urutan;;
+									$arrUpdate['group'] = $group;
+									$arrUpdate['image_klub_link'] = $image_klub_link;
+									$arrUpdate['score_D'] = $score_D;
+									$arrUpdate['score_M'] = $score_M;
+									$arrUpdate['score_S'] = $score_S;
+									$arrUpdate['score_K'] = $score_K;
+									$arrUpdate['score_GM'] = $score_GM;
+									$arrUpdate['score_GK'] = $score_GK;
+									$arrUpdate['score_min_plus'] = $score_min_plus;
+									$arrUpdate['score_P'] = $score_P;
+									$arrUpdate['lima_hasil_terakhir'] = $lima_hasil_terakhir;
+									
+									//$responseUpdate = $opensearchTest->updateOne($index, $id, $arrUpdate);
+									$responseUpdate = $opensearchTBO->updateOne($index, $id, $arrUpdate);
+									
+									/* echo $id."<br>";
+									echo "<pre>";
+									print_r($responseUpdate);
+									print_r($arrUpdate);
+									echo "</pre>"; */
+									
+									if($responseUpdate['status']){
+										$totalUpdate++; 
+									}
+								}
+							}	
+						}
+					}	
+				}	
+		  }
+		  
+		  echo "Total Update Liga ".$liga." = ".$totalUpdate."\n";
+		  file_get_contents('https://api.tribunnews.com/tcache/update_custom_memcache/dataKlasemenBola'.$liga, false);
+		} else {
+			echo "Gagal scrap\n";
+		}
+	}
+} else {
+	echo "Silakan masukan parameter 1\n";
+}	
+
+
+echo "\nExecution time in seconds: ". (microtime(true) - $time_start) . "\n";
+?>

@@ -1,0 +1,86 @@
+<?php
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+//error_reporting(0);
+
+$time_start = time();
+
+define("DOC_ROOT","/var/www/html/web-cron/");
+
+require_once "vendor_new/autoload.php";
+include DOC_ROOT."config/config.php";
+include DOC_ROOT."lib/Opensearch.php";
+include DOC_ROOT."lib/Google_analytic4.php";
+
+define("AUTH_CREDENTIAL_PROD", DOC_ROOT."google_analytic/tribunnews-17d8f@appspot.gserviceaccount.json");
+define("AUTH_CREDENTIAL_STAG", DOC_ROOT."google_analytic/google-analytic-dev@stone-goal-266105.iam.gserviceaccount.json");
+define("AUTH_CREDENTIAL_DEV", DOC_ROOT."google_analytic/google-analytic@angular-cosmos-220903.iam.gserviceaccount");
+
+$section = isset($_SERVER["argv"][1])?$_SERVER["argv"][1]:"";
+if(isset($_GET['section'])){
+	$section = $_GET['section'];
+}	
+
+$google_analytic = new Google_analytic4(AUTH_CREDENTIAL_PROD);
+
+$propertyId = '325197751'; //tribunnews video
+$google_analytic->initializeAnalytics($propertyId);
+$analytics = $google_analytic->getReportTopVideoTribunnews($section);
+
+$dataPopuler = array();
+$total = 0;
+
+if($analytics['status']){
+	$dataPopuler = isset($analytics['data'])?$analytics['data']:array();
+
+	if(count($dataPopuler) > 0){
+		$opensearch = new Opensearch();
+		$opensearch->init(OS_URL,OS_USERNAME,OS_PASSWORD,true);
+		//$opensearch->init(OS_DEV_URL,OS_DEV_USERNAME,OS_DEV_PASSWORD,true);
+		
+		foreach($dataPopuler as $val){
+			$id = intval($val['id']);
+			$pageviews = intval($val['pageviews']);
+			
+			$query = array("match" => array("id" => $id));
+			$fields = array("title", "update_date", "views_count");
+			$response = $opensearch->findOne("tribunnews-video", $query, $fields);
+			
+			if($response['status']){
+				$value = isset($response['data'])?$response['data']:array();
+				
+				$arrUpdate = array();
+				$arrUpdate['views_count'] = $pageviews;
+				
+				$responseUpdate = $opensearch->updateOne("tribunnews-video", $id, $arrUpdate);
+
+				echo $id."<br>";
+				echo "<pre>";
+				print_r($arrUpdate);
+				print_r($responseUpdate);
+				echo "</pre>"; 
+				
+				if($responseUpdate['status']){
+					$total++;
+				}
+			}	
+		}
+		
+		unset($opensearch);
+	}	
+} else {
+	echo $analytics['message'];
+}
+
+$urlHit = "https://video.tribunnews.com/tcache/clhome";
+$ch = curl_init();
+curl_setopt($ch, CURLOPT_URL, $urlHit);
+curl_setopt($ch, CURLOPT_RETURNTRANSFER, 0);
+curl_setopt($ch, CURLOPT_TIMEOUT, 3);
+$result = curl_exec($ch);
+curl_close($ch);
+
+echo "Total : ".$total."\n";
+
+echo "\nExecution time in seconds: ". (microtime(true) - $time_start) . "\n";
+?>

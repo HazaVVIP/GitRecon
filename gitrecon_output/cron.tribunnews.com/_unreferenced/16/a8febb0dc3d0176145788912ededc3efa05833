@@ -1,0 +1,111 @@
+<?php
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+//error_reporting(0);
+
+$time_start = time();
+
+define("DOC_ROOT","/var/www/html/web-cron/");
+
+require_once "vendor_new/autoload.php";
+include DOC_ROOT."config/config.php";
+include DOC_ROOT."config/other_config.php";
+include DOC_ROOT."lib/Opensearch.php";
+include DOC_ROOT."lib/Google_analytic4.php";
+
+define("AUTH_CREDENTIAL_PROD", DOC_ROOT."google_analytic/tribunnews-17d8f@appspot.gserviceaccount.json");
+define("AUTH_CREDENTIAL_STAG", DOC_ROOT."google_analytic/google-analytic-dev@stone-goal-266105.iam.gserviceaccount.json");
+
+/* 
+Running in command
+- sudo -u cron /usr/bin/php7.4 /var/www/html/web-cron/google_analytic/insert_tag_tribunnewswiki.php > /home/cron/log_cron/insert_ga_tag_tribunnewswiki.txt
+*/
+
+$google_analytic = new Google_analytic4(AUTH_CREDENTIAL_PROD);
+
+$propertyId = '280294341'; //tribunnews all network
+$google_analytic->initializeAnalytics($propertyId);
+$analytics = $google_analytic->getReportTopTagTribunnewsWiki();
+
+$dataPopuler = array();
+$total = 0;
+$totalall = 0;
+
+if($analytics['status']){
+	$dataPopuler = isset($analytics['data'])?$analytics['data']:array();
+	
+	if(count($dataPopuler) > 0){
+		echo "<pre>";
+		print_r($dataPopuler);
+		echo "</pre>";
+		
+		$opensearchTest = new Opensearch();
+		$opensearchTest->init(OS_DEV_URL,OS_DEV_USERNAME,OS_DEV_PASSWORD,true);
+		
+		$opensearchWiki = new Opensearch();
+		$opensearchWiki->init(OS_TNEWSWIKI_URL,OS_TNEWSWIKI_USERNAME,OS_TNEWSWIKI_PASSWORD,true);
+		
+		//Delete
+		$condition = array("match_phrase" => array("mode" => "tag"));
+		//$response1 = $opensearchWiki->deleteMany("tribunnewswiki-populer-ga-tagtopic",$condition);
+		$response1 = $opensearchTest->deleteMany("tribunnewswiki-populer-ga-tagtopic",$condition);
+		
+		$dataTagPopuler = array();
+		$dataTagPopuler['tag'] = isset($dataPopuler)?$dataPopuler:array();
+		
+		if(count($dataTagPopuler) > 0){
+			//Insert
+			$arrTags = isset($dataTagPopuler['tag'])?$dataTagPopuler['tag']:array();				
+			foreach($arrTags as $idx => $tagSection){
+				$section = isset($tagSection['section'])?$tagSection['section']:"";
+				$arrTag = isset($tagSection['tag'])?$tagSection['tag']:"";
+				
+				if(count($arrTag) > 0 && !empty($section)){
+					$total = 0;
+					$rank = 1;
+
+					foreach($arrTag as $title){
+						if(!empty($title)){
+							if($section != "home"){
+								$alias = "tag-".$google_analytic->url_title($title);
+							} else {
+								$alias = "tag-".$section."-".$google_analytic->url_title($title);
+							}
+						
+							$arrPopuler = array();
+							$arrPopuler['id'] = $alias;
+							$arrPopuler['title'] = $title;
+							$arrPopuler['mode'] = "tag";
+							$arrPopuler['rank'] = $rank;
+							$arrPopuler['section'] = $section;
+							
+							//$responseInsert = $opensearchWiki->insert("tribunnewswiki-populer-ga-tagtopic", $arrPopuler);
+							$responseInsert = $opensearchTest->insert("tribunnewswiki-populer-ga-tagtopic", $arrPopuler);
+							
+							echo "<pre>";
+							print_r($responseInsert);
+							print_r($arrPopuler);
+							echo "</pre>";
+							
+							if($responseInsert['status']){
+								$total++;
+								$totalall++;
+								$rank++;
+							} else {
+								$error_reason = isset($responseInsert['error_reason'])?$responseInsert['error_reason']:"";
+							} 
+						}
+					}
+				}
+			}
+		}
+		
+		unset($opensearchWiki);
+		unset($opensearchTest);
+	}
+}	
+
+echo "Total : ".$totalall."\n";
+
+echo "\nExecution time in seconds: ". (microtime(true) - $time_start) . "\n";
+?>

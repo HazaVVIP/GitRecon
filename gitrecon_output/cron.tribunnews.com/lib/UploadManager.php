@@ -1,0 +1,115 @@
+<?php
+class UploadManager
+{
+    private $storage;
+
+    private $logger;
+
+    private $batchSize;
+
+    private $maxRetry;
+
+    private $retryDelayMs;
+
+    private $queue = [];
+
+    private $bodies = [];
+
+    private $errors = [];
+
+    private $successCount = 0;
+
+    private $failCount = 0;
+
+    public function __construct(
+        Storage $storage,
+        Logger  $logger,
+        int     $batchSize    = UPLOAD_BATCH_SIZE,
+        int     $maxRetry     = UPLOAD_MAX_RETRY,
+        int     $retryDelayMs = UPLOAD_RETRY_DELAY_MS
+    ) {
+        $this->storage      = $storage;
+        $this->logger       = $logger;
+        $this->batchSize    = max(1, $batchSize);
+        $this->maxRetry     = $maxRetry;
+        $this->retryDelayMs = $retryDelayMs;
+    }
+
+    public function add(string $key, string $body): void
+    {
+        $this->bodies[$key] = $body;
+        $this->queue[$key]  = $this->storage->uploadAsync($key, $body);
+    }
+
+    public function flushAll(): void
+    {
+        if (empty($this->queue)) {
+            return;
+        }
+
+        $keys = array_keys($this->queue);
+
+        foreach ($keys as $key) {
+            $promise = $this->queue[$key];
+            $this->resolveWithRetry($key, $promise);
+            unset($this->queue[$key], $this->bodies[$key]);
+        }
+    }
+
+    public function getErrors(): array     { return $this->errors; }
+    public function getSuccessCount(): int { return $this->successCount; }
+    public function getFailCount(): int    { return $this->failCount; }
+
+    public function writeErrorReport(string $logDir): void
+    {
+        if (empty($this->errors)) {
+            return;
+        }
+
+        $file = rtrim($logDir, '/') . '/upload_errors_' . date('Y-m-d_His') . '.csv';
+        $fh   = fopen($file, 'w');
+        fputcsv($fh, ['key', 'error', 'time']);
+        foreach ($this->errors as $err) {
+            fputcsv($fh, [$err['key'], $err['error'], $err['time']]);
+        }
+        fclose($fh);
+        $this->logger->warning("Error report: {$file}");
+    }
+
+    private function resolveWithRetry(string $key, $initialPromise): void
+    {
+        $attempt = 0;
+        $delay   = $this->retryDelayMs;
+        $promise = $initialPromise;
+
+        while (true) {
+            try {
+                $promise->wait();
+                $this->successCount++;
+                $this->logger->debug("Upload OK [{$key}]");
+                return;
+
+            } catch (\Throwable $e) {
+                if ($attempt >= $this->maxRetry) {
+                    $this->failCount++;
+                    $this->errors[] = [
+                        'key'   => $key,
+                        'error' => $e->getMessage(),
+                        'time'  => date('Y-m-d H:i:s'),
+                    ];
+                    $this->logger->error("Upload GAGAL [{$key}]", ['error' => $e->getMessage()]);
+                    return;
+                }
+
+                $attempt++;
+                $jitter = rand(0, (int)($delay * 0.2));
+                $this->logger->warning("Retry #{$attempt} [{$key}]", ['error' => $e->getMessage()]);
+                usleep(($delay + $jitter) * 1000);
+                $delay *= 2;
+				
+                $body    = $this->bodies[$key] ?? '';
+                $promise = $this->storage->uploadAsync($key, $body);
+            }
+        }
+    }
+}

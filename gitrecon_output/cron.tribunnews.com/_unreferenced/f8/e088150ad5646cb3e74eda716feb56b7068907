@@ -1,0 +1,107 @@
+<?php
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+
+$time_start = time();
+
+define("DOC_ROOT","/var/www/html/web-cron/");
+//define("DOC_ROOT",$_SERVER["DOCUMENT_ROOT"]."/");
+
+include DOC_ROOT."config/config.php";
+
+$api_key = 'AIzaSyC3KtwEDGp4AY9oUW9hZpWWBL6OiujTwsk';
+$channelId = 'UCmxAIW7RDDC88EPk4ry16Kg'; /* Check if video from channel tribunnews */
+$playlistId = 'PLRUmxnvpvtssZBq-dXvmV8h93FfiirhdL'; /* Playlist Tnews */
+
+//RDS
+$con = mysqli_connect(RDS_HOST_MASTER,RDS_USERNAME_MASTER,RDS_PASSWORD_MASTER,"tribunnews");
+if (mysqli_connect_errno()) {
+	echo "Failed to connect to MySQL: " . mysqli_connect_error();
+	exit();
+}
+
+$max = 7;
+$apierror = 'Not found';
+$videolist2 = array();
+$total = 0;
+
+try{
+	$apiUrl = 'https://www.googleapis.com/youtube/v3/playlistItems?part=snippet&channelId='.$channelId.'&key='.$api_key.'&order=date&maxResults='.$max.'&playlistId='.$playlistId;
+	$opts = array(
+			'http'=>array(
+				'method'=>"GET",
+				'timeout' => 5,
+				'header'=>"Accept-language: en\r\n"
+			),
+			'ssl'  => array (
+				'verify_peer'      => false,
+				'verify_peer_name' => false,
+			  )
+			);
+	$context = stream_context_create($opts);
+	$apiData = @file_get_contents($apiUrl, false, $context);
+
+	if($apiData === FALSE) {	
+	
+	} else {
+		$videolist = json_decode($apiData);
+	}
+}catch(Exception $e){
+	$apierror = $e->getMessage();
+}
+
+$sqlVideo = "SELECT url
+		FROM frontpage_publish
+		WHERE type = 'video-short'
+	    ORDER BY id DESC";
+$resultVideo = mysqli_query($con, $sqlVideo);
+$totalVideo = mysqli_num_rows($resultVideo);
+
+$arrYoutubeID = array();
+if($totalVideo > 0){
+	while($youtube_embed = mysqli_fetch_assoc($resultVideo))
+	{
+		preg_match('%(?:youtube(?:-nocookie)?\.com/(?:[^/]+/.+/|(?:v|e(?:mbed)?)/|.*[?&]v=)|youtu\.be/)([^"&?/ ]{11})%i', $youtube_embed['url'], $match);
+		$youtube_video_id = isset($match[1])?$match[1]:"";
+			
+		if(!empty($youtube_video_id)) array_push($arrYoutubeID, $youtube_video_id);
+	}	
+}
+
+
+if(isset($videolist->items) && count($videolist->items) > 0){
+	foreach($videolist->items as $i => $row){
+		$youtube_id = $row->snippet->resourceId->videoId;
+		
+		if(!in_array($youtube_id, $arrYoutubeID)){
+			$url_short = "https://www.youtube.com/watch?v=".$youtube_id;
+			$title_short = isset($row->snippet->title)?str_replace(array("'"),"",utf8_encode($row->snippet->title)):"";
+			
+			if(!empty($title_short)){
+				if($title_short != 'Private video' && $title_short != 'Deleted video'){
+					$sql = "INSERT into frontpage_publish SET 
+								type = 'video-short',
+								article_id = 0,
+								order_by = 0,
+								url = '".$url_short."', 
+								url_title = '".$title_short."'";
+					
+					if (!mysqli_query($con, $sql)) {
+						printf("Error message: %s\n", mysqli_error($con));
+					} else {
+						$id = mysqli_insert_id($con);
+
+						$total++; 
+					}
+				}
+			}
+		} 
+	}
+}
+
+echo "Total : ".$total."<br>";
+
+mysqli_close($con);
+
+echo '<br>Execution time in seconds: ' . (microtime(true) - $time_start) . "<br>";
+?>

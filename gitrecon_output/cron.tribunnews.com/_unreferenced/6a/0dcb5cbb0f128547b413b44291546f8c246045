@@ -1,0 +1,28 @@
+<?php
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+//error_reporting(0);
+
+$time_start = time();
+
+define("DOC_ROOT","/var/www/html/web-cron/");
+
+require_once "vendor_new/autoload.php";
+include DOC_ROOT."config/config.php";
+
+define("AUTH_CREDENTIAL_PROD", DOC_ROOT."google_analytic/tribunnews-17d8f@appspot.gserviceaccount.json");
+define("AUTH_CREDENTIAL_STAG", DOC_ROOT."google_analytic/google-analytic-dev@stone-goal-266105.iam.gserviceaccount.json");
+define("AUTH_CREDENTIAL_DEV", DOC_ROOT."google_analytic/google-analytic@angular-cosmos-220903.iam.gserviceaccount");
+
+use Google_Client;
+
+$client = new Google_Client();
+$client->setApplicationName("XXXXX");
+$client->setAuthConfig(AUTH_CREDENTIAL_PROD);
+
+$endpoint = "https://indexing.googleapis.com/v3/urlNotifications:publish";
+
+echo $endpoint."<br>";
+
+echo "\nExecution time in seconds: ". (microtime(true) - $time_start) . "\n";
+?>

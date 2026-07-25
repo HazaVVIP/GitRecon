@@ -1,0 +1,103 @@
+<?php
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+
+$time_start = time();
+
+define("DOC_ROOT","/var/www/html/web-cron/");
+
+include DOC_ROOT."config/config.php";
+include DOC_ROOT."lib/Opensearch.php";
+
+$daerah = isset($_GET['daerah'])?$_GET['daerah']:"aceh";
+
+if(!empty($daerah)){
+	echo $daerah."<br>";
+
+	$condition = array("term" =>
+							array(
+								"editor.keyword" => array("value" => "", "boost" => 1.0)
+							)
+					);
+	$fields = array('id','editor_by','editor','editor_fullname','written_date');
+	$sort = array("written_date" => "asc");
+	$start = 0;
+	$limit = 1000;
+		
+	//OS
+	$opensearch = new Opensearch();
+	$index = $daerah.".tribundaerah-articles";
+	$opensearch->init(OS_DAERAH_URL,OS_DAERAH_USERNAME,OS_DAERAH_PASSWORD,true);
+	$response_os = $opensearch->find($index,$condition,$fields,$sort,$start,$limit);
+	$totalOs = 0;
+	$arrIDOs = array();
+	if($response_os['status']){
+		$totalOs = isset($response_os['total_row'])?$response_os['total_row']:0;
+		$dataOs = isset($response_os['data'])?$response_os['data']:array();
+		
+		if(count($dataOs) > 0){
+			foreach($dataOs as $rowos){
+				array_push($arrIDOs, intval($rowos['_source']['id']));
+			}
+		}
+	}
+	
+	
+	//RDS
+	$daerah = str_replace("aceh","aceh2",$daerah);
+	$daerah = str_replace("jambi","jambi2",$daerah);
+	$con = mysqli_connect(RDS_DAERAH_HOST,RDS_DAERAH_USERNAME,RDS_DAERAH_PASSWORD,$daerah);
+	if (mysqli_connect_errno()) {
+		echo "Failed to connect to MySQL: " . mysqli_connect_error();
+		exit();
+	}
+	
+	$totalUpdateOs = 0;
+	if(count($arrIDOs) > 0){
+		foreach($arrIDOs as $id){
+			$sqlRow = "SELECT a.id, a.title, a.editor_by, 
+			b.username as editor, b.fullname as editor_fullname
+			FROM articles a
+			LEFT JOIN users b ON a.editor_by = b.id
+			WHERE a.id = ".$id;
+			$resultRow = mysqli_query($con, $sqlRow);
+			$post = mysqli_fetch_array($resultRow, MYSQLI_ASSOC);
+			
+			$id = isset($post['id'])?intval($post['id']):0;
+			
+			if(!empty($id)){
+				$editor 					= isset($post['editor'])?$post['editor']:"";
+				$editor_fullname 			= isset($post['editor_fullname'])?$post['editor_fullname']:"";
+				
+				/* echo "<pre>";
+				print_r($post);
+				echo "</pre>"; */
+				
+				$arrUpdate = array();
+				$arrUpdate['editor'] = $editor;
+				$arrUpdate['editor_fullname'] = $editor_fullname;
+				
+				$responseUpdate = $opensearch->updateOne($index, $id, $arrUpdate);
+				
+				echo $id;
+				echo "<pre>";
+				print_r($responseUpdate);
+				print_r($arrUpdate);
+				echo "</pre>";
+				
+				if($responseUpdate['status']){
+					$totalUpdateOs++;
+				}
+			}	
+		}
+	}	
+	
+	echo "Total Update : ".$totalUpdateOs."<br>";
+	
+	mysqli_free_result($result);
+	mysqli_close($con);
+	unset($opensearch);
+}	
+
+echo '<br>Execution time in seconds: ' . (microtime(true) - $time_start) . "<br>";
+?>

@@ -1,0 +1,3307 @@
+<?php
+
+class Google_analytic{
+	private $ga_credential_file;
+	private $ga_credential_file_staging;
+	private $ga_memcached_expired = 86400; 
+	private $ga_memcached_short_expired = 1200;
+	private $ga_memcached_long_expired = 2592000;
+	
+	private $applicationName;
+	private $viewId;
+	private $website;
+	private $type;
+	private $period;
+	private $analytics = array();
+	
+	public function __construct($ga_credential_file){
+		$this->ga_credential_file = $ga_credential_file;
+	}
+	
+	public function initializeAnalytics($applicationName,$viewId,$website="",$type="",$period=""){
+		if (!function_exists('curl_reset')){
+			function curl_reset(&$ch){
+				$ch = curl_init();
+			}
+		}
+
+		$this->applicationName = $applicationName;
+		$this->viewId = $viewId;
+		$this->website = $website;
+		$this->type = $type;
+		$this->period = $period;
+
+		$client = new Google_Client();
+		$client->setApplicationName($this->applicationName);
+		$client->setAuthConfig($this->ga_credential_file);
+		$client->setScopes(['https://www.googleapis.com/auth/analytics.readonly']);
+		$this->analytics = new Google_Service_AnalyticsReporting($client);
+
+		return $this->analytics;
+	}
+	
+	public function expiredMemcached(){
+		$expiredMemcached = $this->ga_memcached_short_expired;
+		if($this->type == "date"){
+			$timeNow = strtotime(date("Y-m-d"));
+			$timePeriod = strtotime($this->period);
+			
+			if($timePeriod < $timeNow){
+				$expiredMemcached = $this->ga_memcached_expired;
+			}
+		} else if($this->type == "month"){
+			$timeNow = strtotime(date("Y-m"));
+			$timePeriod = strtotime($this->period);
+			
+			if($timePeriod < $timeNow){
+				$expiredMemcached = $this->ga_memcached_long_expired;
+			}
+		} else if($this->type == "month"){
+			$timeNow = strtotime(date("Y"));
+			$timePeriod = strtotime($this->period);
+			
+			if($timePeriod < $timeNow){
+				$expiredMemcached = $this->ga_memcached_long_expired;
+			}
+		}
+		
+		return $expiredMemcached;
+	}
+	
+	public function getReportTopArticleAdditional($strSection="") {
+		$analytic = array();
+		$todayDate = date("Y-m-d");
+		$yesteddayDate = strtotime('-1 day', strtotime($todayDate));
+		$yesteddayDate = date('Y-m-d', $yesteddayDate);
+		$beforeYesterdayDate = strtotime('-2 day', strtotime($todayDate));
+		$beforeYesterdayDate = date('Y-m-d', $beforeYesterdayDate);
+		$beforeThreeDayAgoDate = strtotime('-3 day', strtotime($todayDate));
+		$beforeThreeDayAgoDate = date('Y-m-d', $beforeThreeDayAgoDate);
+		$beforeFourDayAgoDate = strtotime('-4 day', strtotime($todayDate));
+		$beforeFourDayAgoDate = date('Y-m-d', $beforeFourDayAgoDate);
+		
+		try {
+			$dateRange = new Google_Service_AnalyticsReporting_DateRange();
+			
+			$arrPeriod = explode("_",$this->period);
+			$periodStart = isset($arrPeriod[0])?$arrPeriod[0]:date("Y-m-d");
+			$periodEnd = isset($arrPeriod[1])?$arrPeriod[1]:date("Y-m-d");
+			
+			if($this->type != "today"){
+				if(!empty($this->period)){
+					$timestamp    	= strtotime($this->period);
+					
+					if($this->type == "year"){
+						$timestamp    	= strtotime($this->period."-01-01");
+						$start_period 	= date(''.$this->period.'-01-01', $timestamp);
+						$end_period  	= date(''.$this->period.'-12-31', $timestamp);
+					} else if($this->type == "month"){
+						$timestamp    	= strtotime($this->period."-01");
+						$start_period 	= date('Y-m-01', $timestamp);
+						$end_period  	= date('Y-m-t', $timestamp);
+					} else if($this->type == "date"){
+						$start_period 	= date('Y-m-d', strtotime($periodStart));
+						$end_period 	= date('Y-m-d', strtotime($periodStart));
+						if(count($arrPeriod) > 1){
+							$end_period  	= date('Y-m-d', strtotime($periodEnd));
+						}
+					} else {
+						$start_period 	= date('Y-m-d', $timestamp);
+						$end_period  	= date('Y-m-d', $timestamp);
+					}
+
+					$dateRange->setStartDate($start_period);
+					$dateRange->setEndDate($end_period);
+				} else {
+					$dateRange->setStartDate("today");
+					$dateRange->setEndDate("today");
+				}
+			} else {
+				$beforeYesterdayDate = strtotime('-2 day', strtotime($this->period));
+				$beforeYesterdayDate = date('Y-m-d', $beforeYesterdayDate);
+				$yesteddayDate = strtotime('-1 day', strtotime($this->period));
+				$yesteddayDate = date('Y-m-d', $yesteddayDate);
+				$beforeThreeDayAgoDate = strtotime('-3 day', strtotime($todayDate));
+				$beforeThreeDayAgoDate = date('Y-m-d', $beforeThreeDayAgoDate);
+				$beforeFourDayAgoDate = strtotime('-4 day', strtotime($todayDate));
+				$beforeFourDayAgoDate = date('Y-m-d', $beforeFourDayAgoDate);
+		
+				$dateRange->setStartDate($beforeFourDayAgoDate);
+				$dateRange->setEndDate($yesteddayDate);
+			}	
+			
+			$pageviews = new Google_Service_AnalyticsReporting_Metric();
+			$pageviews->setExpression("ga:pageviews");
+			$pageviews->setAlias("Pageviews");
+			
+			// Create the dimension object.
+			$id = new Google_Service_AnalyticsReporting_Dimension();
+			$id->setName("ga:dimension13");
+
+			$title = new Google_Service_AnalyticsReporting_Dimension();
+			$title->setName("ga:dimension6");
+			
+			$editor = new Google_Service_AnalyticsReporting_Dimension();
+			$editor->setName("ga:dimension2");	
+
+			$author = new Google_Service_AnalyticsReporting_Dimension();
+			$author->setName("ga:dimension3");
+			
+			$datePublish = new Google_Service_AnalyticsReporting_Dimension();
+			$datePublish->setName("ga:dimension4");
+			
+			$section = new Google_Service_AnalyticsReporting_Dimension();
+			$section->setName("ga:dimension7");
+			
+			$domain = new Google_Service_AnalyticsReporting_Dimension();
+			$domain->setName("ga:dimension5");
+			
+			$arrDimensionsFilterClauses = array();
+			
+			if($this->viewId != "90636734"){
+				$dimensionFilter = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+				$dimensionFilter->setDimensionName("ga:dimension5");
+				$dimensionFilter->setOperator("EXACT");
+				$dimensionFilter->setExpressions(array("$this->website"));
+				$dimensionFilterClause = new Google_Service_AnalyticsReporting_DimensionFilterClause();
+				$dimensionFilterClause->setFilters(array($dimensionFilter));
+				array_push($arrDimensionsFilterClauses, $dimensionFilterClause);
+			}
+			
+			$dimensionFilterTitle = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+			$dimensionFilterTitle->setDimensionName("ga:dimension6");
+			$dimensionFilterTitle->setOperator("REGEXP");
+			$dimensionFilterTitle->setExpressions(array(".*[?!halaman|?!topik|?!page]$"));	
+			$dimensionFilterClauseTitle= new Google_Service_AnalyticsReporting_DimensionFilterClause();
+			$dimensionFilterClauseTitle->setFilters(array($dimensionFilterTitle));
+			array_push($arrDimensionsFilterClauses, $dimensionFilterClauseTitle);
+			
+			if(!empty($strSection)){
+				$dimensionFilterSection = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+				$dimensionFilterSection->setDimensionName("ga:dimension7");
+				$dimensionFilterSection->setOperator("EXACT");
+				$dimensionFilterSection->setExpressions(array("$strSection"));
+				$dimensionFilterClauseSection = new Google_Service_AnalyticsReporting_DimensionFilterClause();
+				$dimensionFilterClauseSection->setFilters(array($dimensionFilterSection));
+				array_push($arrDimensionsFilterClauses, $dimensionFilterClauseSection);
+			}
+			
+			$arrExpressions = array();
+			$arrExpressionsBeforeYesterday = array();
+			$arrExpressionsThereDayAgo = array();
+			$arrExpressionsFourDayAgo = array();
+			if($this->type == "year"){
+				$timestamp    	= strtotime($this->period."-01-01");
+				$todayDate 		= date('Y', $timestamp);
+				array_push($arrExpressions, array("^".$todayDate.""));
+			} else if($this->type == "month"){
+				$timestamp    	= strtotime($this->period."-01");
+				$todayDate 		= date('Y-m', $timestamp);
+				array_push($arrExpressions, array("^".$todayDate.""));
+			} else if($this->type == "date"){
+				if(count($arrPeriod) > 1){
+					$begin = new DateTime( $periodStart );
+					$end = new DateTime( $periodEnd );
+					$end = $end->modify( '+1 day' );
+
+					$interval = new DateInterval('P1D');
+					$daterange = new DatePeriod($begin, $interval ,$end);
+
+					foreach($daterange as $date){
+						array_push($arrExpressions, array("^".$date->format("Y-m-d").""));
+					}
+				} else {
+					$timestamp    	= strtotime($this->period);
+					$todayDate 		= date('Y-m-d', $timestamp);
+					array_push($arrExpressions, array("^".$todayDate.""));
+				}	
+			} else {
+				array_push($arrExpressions, array("^".$yesteddayDate.""));
+				array_push($arrExpressionsBeforeYesterday, array("^".$beforeYesterdayDate.""));
+				array_push($arrExpressionsThereDayAgo, array("^".$beforeThreeDayAgoDate.""));
+				array_push($arrExpressionsFourDayAgo, array("^".$beforeFourDayAgoDate.""));
+			} 
+			
+			$dimensionFilterDate = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+			$dimensionFilterDate->setDimensionName("ga:dimension4");
+			$dimensionFilterDate->setOperator("REGEXP");
+			$dimensionFilterDate->setExpressions($arrExpressions);
+			
+			$dimensionFilterClauseDate = new Google_Service_AnalyticsReporting_DimensionFilterClause();
+			if(count($arrExpressionsBeforeYesterday) > 0){
+				$dimensionFilterDateBeforeYesterday = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+				$dimensionFilterDateBeforeYesterday->setDimensionName("ga:dimension4");
+				$dimensionFilterDateBeforeYesterday->setOperator("REGEXP");
+				$dimensionFilterDateBeforeYesterday->setExpressions($arrExpressionsBeforeYesterday);
+				
+				if(count($arrExpressionsThereDayAgo) > 0){
+					$dimensionFilterDateThereDayAgo = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+					$dimensionFilterDateThereDayAgo->setDimensionName("ga:dimension4");
+					$dimensionFilterDateThereDayAgo->setOperator("REGEXP");
+					$dimensionFilterDateThereDayAgo->setExpressions($arrExpressionsThereDayAgo);
+					
+					if(count($arrExpressionsFourDayAgo) > 0){
+						$dimensionFilterDateFourDayAgo = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+						$dimensionFilterDateFourDayAgo->setDimensionName("ga:dimension4");
+						$dimensionFilterDateFourDayAgo->setOperator("REGEXP");
+						$dimensionFilterDateFourDayAgo->setExpressions($arrExpressionsFourDayAgo);
+						
+						$dimensionFilterClauseDate->setFilters([$dimensionFilterDate, $dimensionFilterDateBeforeYesterday, $dimensionFilterDateThereDayAgo, $dimensionFilterDateFourDayAgo]);
+						$dimensionFilterClauseDate->setOperator( 'or' );
+					} else {
+						$dimensionFilterClauseDate->setFilters([$dimensionFilterDate, $dimensionFilterDateBeforeYesterday, $dimensionFilterDateThereDayAgo]);
+						$dimensionFilterClauseDate->setOperator( 'or' );
+					}	
+				} else {
+					$dimensionFilterClauseDate->setFilters([$dimensionFilterDate, $dimensionFilterDateBeforeYesterday]);
+					$dimensionFilterClauseDate->setOperator( 'or' ); 
+				}	
+			} else {
+				$dimensionFilterClauseDate->setFilters(array($dimensionFilterDate));
+			}
+			
+			
+			array_push($arrDimensionsFilterClauses, $dimensionFilterClauseDate);
+			
+			$ordering = new Google_Service_AnalyticsReporting_OrderBy();
+			$ordering->setFieldName("ga:pageviews");
+			$ordering->setOrderType("VALUE");   
+			$ordering->setSortOrder("DESCENDING");
+
+			// Create the ReportRequest object.
+			$request = new Google_Service_AnalyticsReporting_ReportRequest();
+			$request->setViewId($this->viewId);
+			$request->setDateRanges($dateRange);
+			$request->setPageSize(10); 
+			$request->setDimensions(array($id,$title,$editor,$author,$datePublish,$section,$domain));
+			$request->setMetrics(array($pageviews));
+			$request->setDimensionFilterClauses($arrDimensionsFilterClauses);
+			$request->setOrderBys($ordering);
+
+			$body = new Google_Service_AnalyticsReporting_GetReportsRequest();
+			$body->setReportRequests( array( $request) );
+			$analytic = $this->analytics->reports->batchGet( $body );
+			$analytic['status'] = 1;
+		} catch (Exception $e) {
+			$errRespond = json_decode($e->getMessage(),TRUE);
+			$analytic['code'] = isset($errRespond['error']['code'])?$errRespond['error']['code']:"";
+			$analytic['message'] = isset($errRespond['error']['message'])?$errRespond['error']['message']:"";			
+			$analytic['status'] = 0;			
+		}
+		
+		return $analytic;
+	}
+	
+	public function printResultTopArticle($reports,$limit=10) {
+		$arrArticle = array();
+		
+		if(count($reports) > 0){
+			$idx = 0;
+
+			if($limit > 100){
+				$limit = 100;
+			}
+			
+			foreach($reports as $k_report => $report){
+				$rows = $report->getData()->getRows();
+				
+				foreach($rows as $k_row => $row){
+					$id = isset($row->dimensions[0])?$row->dimensions[0]:"";
+					$title = isset($row->dimensions[1])?$row->dimensions[1]:"";
+					$editor = isset($row->dimensions[2])?$row->dimensions[2]:"";
+					$author = isset($row->dimensions[3])?$row->dimensions[3]:"";
+					$date = isset($row->dimensions[4])?$row->dimensions[4]:"";
+					$section = isset($row->dimensions[5])?$row->dimensions[5]:"";
+					$domain = isset($row->dimensions[6])?$row->dimensions[6]:"";
+					
+					$datePublish = "";
+					if(!empty($date)){
+						$datePublish = substr(str_replace("-","/",$date),0,10);;
+					}
+
+					$metrics = $row->getMetrics();
+					$pageviews = isset($metrics[0]['values'][0])?$metrics[0]['values'][0]:0;
+					
+					if($this->type == "today"){
+						$arrArticle[$idx]['site'] = $this->website;
+						if($this->viewId != "182427400"){
+							$arrArticle[$idx]['site'] = $domain;
+						}	
+						$arrArticle[$idx]['id'] = $id;
+						$arrArticle[$idx]['title'] = $title;
+						$arrArticle[$idx]['editor'] = $editor; 
+						$arrArticle[$idx]['author'] = $author; 
+						$arrArticle[$idx]['section'] = $section; 
+						$arrArticle[$idx]['date'] = $date; 
+						if($this->viewId == "182427400"){
+							$arrArticle[$idx]['url'] = 'https://www.tribunnews.com/'.$datePublish."/".$this->url_title($title,'dash',TRUE); 
+						} else {
+							$arrArticle[$idx]['url'] = 'https://'.$domain.'.tribunnews.com/'.$datePublish."/".$this->url_title($title,'dash',TRUE); 
+						}
+						$arrArticle[$idx]['pageviews'] = $pageviews;
+						$idx++;
+					} else {
+						$arrArticle[$idx]['site'] = $this->website;
+						if($this->viewId != "182427400"){
+							$arrArticle[$idx]['site'] = $domain;
+						}
+						$arrArticle[$idx]['id'] = $id;
+						$arrArticle[$idx]['title'] = $title;
+						$arrArticle[$idx]['editor'] = $editor; 
+						$arrArticle[$idx]['author'] = $author; 
+						$arrArticle[$idx]['section'] = $section; 
+						$arrArticle[$idx]['date'] = $date; 
+						if($this->viewId == "182427400"){
+							$arrArticle[$idx]['url'] = 'https://www.tribunnews.com/'.$datePublish."/".$this->url_title($title,'dash',TRUE); 
+						} else {
+							$arrArticle[$idx]['url'] = 'https://'.$domain.'.tribunnews.com/'.$datePublish."/".$this->url_title($title,'dash',TRUE); 
+						}  
+						$arrArticle[$idx]['pageviews'] = $pageviews;
+						$idx++;
+					}
+					
+					if($idx == $limit) break;
+				}
+			}
+		}
+		
+		return $arrArticle;
+	}
+	
+	public function getReportTopTag($strSection="") {
+		$analytic = array();
+		$todayDate = date("Y-m-d");
+		
+		try {
+			$dateRange = new Google_Service_AnalyticsReporting_DateRange();
+			
+			$arrPeriod = explode("_",$this->period);
+			$periodStart = isset($arrPeriod[0])?$arrPeriod[0]:date("Y-m-d");
+			$periodEnd = isset($arrPeriod[1])?$arrPeriod[1]:date("Y-m-d");
+			
+			if($this->type != "today"){
+				if(!empty($this->period)){
+					$timestamp    	= strtotime($this->period);
+					
+					if($this->type == "year"){
+						$timestamp    	= strtotime($this->period."-01-01");
+						$start_period 	= date(''.$this->period.'-01-01', $timestamp);
+						$end_period  	= date(''.$this->period.'-12-31', $timestamp);
+					} else if($this->type == "month"){
+						$timestamp    	= strtotime($this->period."-01");
+						$start_period 	= date('Y-m-01', $timestamp);
+						$end_period  	= date('Y-m-t', $timestamp);
+					} else if($this->type == "date"){
+						$start_period 	= date('Y-m-d', strtotime($periodStart));
+						$end_period 	= date('Y-m-d', strtotime($periodStart));
+						if(count($arrPeriod) > 1){
+							$end_period  	= date('Y-m-d', strtotime($periodEnd));
+						}
+					} else {
+						$start_period 	= date('Y-m-d', $timestamp);
+						$end_period  	= date('Y-m-d', $timestamp);
+					}
+
+					$dateRange->setStartDate($start_period);
+					$dateRange->setEndDate($end_period);
+				} else {
+					$dateRange->setStartDate("today");
+					$dateRange->setEndDate("today");
+				}
+			} else {
+				$dateRange->setStartDate("today");
+				$dateRange->setEndDate("today");
+			}	
+			
+			$pageviews = new Google_Service_AnalyticsReporting_Metric();
+			$pageviews->setExpression("ga:pageviews");
+			$pageviews->setAlias("Pageviews");
+			
+			// Create the dimension object.
+			$contenttag = new Google_Service_AnalyticsReporting_Dimension();
+			$contenttag->setName("ga:dimension15");
+			
+			$domain = new Google_Service_AnalyticsReporting_Dimension();
+			$domain->setName("ga:dimension5");
+			
+			$arrDimensionsFilterClauses = array();
+			
+			if($this->viewId != "90636734"){
+				$dimensionFilter = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+				$dimensionFilter->setDimensionName("ga:dimension5");
+				$dimensionFilter->setOperator("EXACT");
+				$dimensionFilter->setExpressions(array("$this->website"));
+				$dimensionFilterClause = new Google_Service_AnalyticsReporting_DimensionFilterClause();
+				$dimensionFilterClause->setFilters(array($dimensionFilter));
+				array_push($arrDimensionsFilterClauses, $dimensionFilterClause);
+			}
+			
+			$dimensionFilterTitle = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+			$dimensionFilterTitle->setDimensionName("ga:dimension6");
+			$dimensionFilterTitle->setOperator("REGEXP");
+			$dimensionFilterTitle->setExpressions(array(".*[?!halaman|?!topik|?!page|?!page]$"));
+			$dimensionFilterClauseTitle= new Google_Service_AnalyticsReporting_DimensionFilterClause();
+			$dimensionFilterClauseTitle->setFilters(array($dimensionFilterTitle));
+			array_push($arrDimensionsFilterClauses, $dimensionFilterClauseTitle);
+			
+			if(!empty($strSection)){
+				$dimensionFilterSection = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+				$dimensionFilterSection->setDimensionName("ga:dimension7");
+				$dimensionFilterSection->setOperator("EXACT");
+				$dimensionFilterSection->setExpressions(array("$strSection"));
+				$dimensionFilterClauseSection = new Google_Service_AnalyticsReporting_DimensionFilterClause();
+				$dimensionFilterClauseSection->setFilters(array($dimensionFilterSection));
+				array_push($arrDimensionsFilterClauses, $dimensionFilterClauseSection);
+			}
+			
+			$todayDate = date("Y-m-d");
+			$arrExpressions = array();
+			if($this->type == "year"){
+				$timestamp    	= strtotime($this->period."-01-01");
+				$todayDate 		= date('Y', $timestamp);
+				array_push($arrExpressions, array("^".$todayDate.""));
+			} else if($this->type == "month"){
+				$timestamp    	= strtotime($this->period."-01");
+				$todayDate 		= date('Y-m', $timestamp);
+				array_push($arrExpressions, array("^".$todayDate.""));
+			} else if($this->type == "date"){
+				if(count($arrPeriod) > 1){
+					$begin = new DateTime( $periodStart );
+					$end = new DateTime( $periodEnd );
+					$end = $end->modify( '+1 day' );
+
+					$interval = new DateInterval('P1D');
+					$daterange = new DatePeriod($begin, $interval ,$end);
+
+					foreach($daterange as $date){
+						array_push($arrExpressions, array("^".$date->format("Y-m-d").""));
+					}
+				} else {
+					$timestamp    	= strtotime($this->period);
+					$todayDate 		= date('Y-m-d', $timestamp);
+					array_push($arrExpressions, array("^".$todayDate.""));
+				}	
+			} else {
+				array_push($arrExpressions, array("^".$todayDate.""));
+			} 
+			
+			$dimensionFilterDate = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+			$dimensionFilterDate->setDimensionName("ga:dimension4");
+			$dimensionFilterDate->setOperator("REGEXP");
+			$dimensionFilterDate->setExpressions($arrExpressions);
+			$dimensionFilterClauseDate = new Google_Service_AnalyticsReporting_DimensionFilterClause();
+			$dimensionFilterClauseDate->setFilters(array($dimensionFilterDate));
+			array_push($arrDimensionsFilterClauses, $dimensionFilterClauseDate);
+			
+			$ordering = new Google_Service_AnalyticsReporting_OrderBy();
+			$ordering->setFieldName("ga:pageviews");
+			$ordering->setOrderType("VALUE");   
+			$ordering->setSortOrder("DESCENDING");
+
+			// Create the ReportRequest object.
+			$request = new Google_Service_AnalyticsReporting_ReportRequest();
+			$request->setViewId($this->viewId);
+			$request->setDateRanges($dateRange);
+			$request->setPageSize(20); 
+			$request->setDimensions(array($contenttag,$domain));
+			$request->setMetrics(array($pageviews));
+			$request->setDimensionFilterClauses($arrDimensionsFilterClauses);
+			$request->setOrderBys($ordering);
+
+			$body = new Google_Service_AnalyticsReporting_GetReportsRequest();
+			$body->setReportRequests( array( $request) );
+			$analytic = $this->analytics->reports->batchGet( $body );
+			$analytic['status'] = 1;
+		} catch (Exception $e) {
+			$errRespond = json_decode($e->getMessage(),TRUE);
+			$analytic['code'] = isset($errRespond['error']['code'])?$errRespond['error']['code']:"";
+			$analytic['message'] = isset($errRespond['error']['message'])?$errRespond['error']['message']:"";			
+			$analytic['status'] = 0;			
+		}
+		
+		return $analytic;
+	}
+	
+	public function printResultTopTag($reports, $limit=10) {
+		$arrTag = array();
+		$arrTagDetail = array();
+		$arrTagUnique = array();
+		
+		if(count($reports) > 0){
+			$site = "";
+			foreach($reports as $k_report => $report){
+				$rows = $report->getData()->getRows();
+				
+				foreach($rows as $k_row => $row){
+					$contenttag = isset($row->dimensions[0])?$row->dimensions[0]:"";
+					$domain = isset($row->dimensions[1])?$row->dimensions[1]:"";
+					
+					$arrContentTag = explode(",",$contenttag);
+					if(count($arrContentTag) > 0){
+						foreach($arrContentTag as $tag){
+							$tag = trim($tag);
+							array_push($arrTagDetail,$tag);
+						}
+					}
+					
+					$site = $this->website;
+					if($this->viewId != "90636734"){
+						$site = $domain;
+					}
+				}
+				
+				$arrTagFilter = array();
+				if(count($arrTagDetail) > 0){
+					$arrTagDetail = array_count_values($arrTagDetail);
+					arsort($arrTagDetail);
+					
+					foreach($arrTagDetail as $tag => $total){
+						array_push($arrTagFilter,$tag);
+					}
+				}
+				
+				if(count($arrTagFilter) > 0){
+					$arrResultTag = array_unique($arrTagFilter);
+					foreach($arrResultTag as $tag){
+						array_push($arrTagUnique,$tag);
+					}
+					$arrTagUnique = array_slice($arrTagUnique, 0, $limit);
+				}
+			}
+			
+			
+			
+			$arrTag['site'] = $site;
+			$arrTag['tag'] = $arrTagUnique;
+		}
+		
+		return $arrTag;
+	}
+	
+	public function getReportRecapEditor($field="editor",$strSection="") {
+		$analytic = array();
+		
+		try {
+			$dateRange = new Google_Service_AnalyticsReporting_DateRange();
+			
+			$arrPeriod = explode("_",$this->period);
+			$periodStart = isset($arrPeriod[0])?$arrPeriod[0]:date("Y-m-d");
+			$periodEnd = isset($arrPeriod[1])?$arrPeriod[1]:date("Y-m-d");
+			
+			if($this->type != "today"){
+				if(!empty($this->period)){
+					$timestamp    	= strtotime($this->period);
+					
+					if($this->type == "year"){
+						$timestamp    	= strtotime($this->period."-01-01");
+						$start_period 	= date(''.$this->period.'-01-01', $timestamp);
+						$end_period  	= date(''.$this->period.'-12-31', $timestamp);
+					} else if($this->type == "month"){
+						$timestamp    	= strtotime($this->period."-01");
+						$start_period 	= date('Y-m-01', $timestamp);
+						$end_period  	= date('Y-m-t', $timestamp);
+					} else if($this->type == "date"){
+						$start_period 	= date('Y-m-d', strtotime($periodStart));
+						$end_period 	= date('Y-m-d', strtotime($periodStart));
+						if(count($arrPeriod) > 1){
+							$end_period  	= date('Y-m-d', strtotime($periodEnd));
+						}
+					} else {
+						$start_period 	= date('Y-m-d', $timestamp);
+						$end_period  	= date('Y-m-d', $timestamp);
+					}
+
+					$dateRange->setStartDate($start_period);
+					$dateRange->setEndDate($end_period);
+				} else {
+					$dateRange->setStartDate("today");
+					$dateRange->setEndDate("today");
+				}
+			} else {
+				$dateRange->setStartDate("today");
+				$dateRange->setEndDate("today");
+			}
+			
+			$users = new Google_Service_AnalyticsReporting_Metric();
+			$users->setExpression("ga:users");
+			$users->setAlias("Users");
+			
+			$sessions = new Google_Service_AnalyticsReporting_Metric();
+			$sessions->setExpression("ga:sessions");
+			$sessions->setAlias("Sessions");
+			
+			$pageviews = new Google_Service_AnalyticsReporting_Metric();
+			$pageviews->setExpression("ga:pageviews");
+			$pageviews->setAlias("Pageviews");
+			
+			if($field == "editor"){
+				$fieldDimension = new Google_Service_AnalyticsReporting_Dimension();
+				$fieldDimension->setName("ga:dimension2");
+			} else {
+				$fieldDimension = new Google_Service_AnalyticsReporting_Dimension();
+				$fieldDimension->setName("ga:dimension3");
+			}
+			
+			$arrDimensionsFilterClauses = array();
+			
+			if($this->viewId != "90636734"){
+				$dimensionFilter = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+				$dimensionFilter->setDimensionName("ga:dimension5");
+				$dimensionFilter->setOperator("EXACT");
+				$dimensionFilter->setExpressions(array("$this->website"));
+				$dimensionFilterClause = new Google_Service_AnalyticsReporting_DimensionFilterClause();
+				$dimensionFilterClause->setFilters(array($dimensionFilter));
+				array_push($arrDimensionsFilterClauses, $dimensionFilterClause);
+			}
+			
+			if($this->type == "today" || $this->type == "date"){
+				$todayDate = date("Y-m-d");
+				
+				if($this->type == "date"){
+					$timestamp    	= strtotime($this->period);
+					$todayDate 		= date('Y-m-d', $timestamp);
+				} 
+				
+				$dimensionFilterDate = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+				$dimensionFilterDate->setDimensionName("ga:dimension4");
+				$dimensionFilterDate->setOperator("REGEXP");
+				$dimensionFilterDate->setExpressions(array("^".$todayDate.""));
+				$dimensionFilterClauseDate = new Google_Service_AnalyticsReporting_DimensionFilterClause();
+				$dimensionFilterClauseDate->setFilters(array($dimensionFilterDate));
+				array_push($arrDimensionsFilterClauses, $dimensionFilterClauseDate);
+			} else if($this->type == "date"){
+				$yearDate 		= date('Y', strtotime($periodEnd));
+				$monthDate 		= date('m', strtotime($periodStart));
+				
+				$dimensionFilterYearDate = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+				$dimensionFilterYearDate->setDimensionName("ga:dimension17");
+				$dimensionFilterYearDate->setOperator("EXACT");
+				$dimensionFilterYearDate->setExpressions(array("".$yearDate.""));
+				$dimensionFilterClauseYearDate = new Google_Service_AnalyticsReporting_DimensionFilterClause();
+				$dimensionFilterClauseYearDate->setFilters(array($dimensionFilterYearDate));
+				array_push($arrDimensionsFilterClauses, $dimensionFilterClauseYearDate);
+				
+				$dimensionFilterMonthDate = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+				$dimensionFilterMonthDate->setDimensionName("ga:dimension16");
+				$dimensionFilterMonthDate->setOperator("EXACT");
+				$dimensionFilterMonthDate->setExpressions(array("".intval($monthDate).""));
+				$dimensionFilterClauseMonthDate = new Google_Service_AnalyticsReporting_DimensionFilterClause();
+				$dimensionFilterClauseMonthDate->setFilters(array($dimensionFilterMonthDate));
+				array_push($arrDimensionsFilterClauses, $dimensionFilterClauseMonthDate);
+			} else if($this->type == "month"){
+				$timestamp    	= strtotime($this->period."-01");
+				$yearDate 		= date('Y', $timestamp);
+				$monthDate 		= intval(date('m', $timestamp)); // convert 01 to 1
+				
+				$dimensionFilterYearDate = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+				$dimensionFilterYearDate->setDimensionName("ga:dimension17");
+				$dimensionFilterYearDate->setOperator("EXACT");
+				$dimensionFilterYearDate->setExpressions(array("".$yearDate.""));
+				$dimensionFilterClauseYearDate = new Google_Service_AnalyticsReporting_DimensionFilterClause();
+				$dimensionFilterClauseYearDate->setFilters(array($dimensionFilterYearDate));
+				array_push($arrDimensionsFilterClauses, $dimensionFilterClauseYearDate);
+				
+				$dimensionFilterMonthDate = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+				$dimensionFilterMonthDate->setDimensionName("ga:dimension16");
+				$dimensionFilterMonthDate->setOperator("EXACT");
+				$dimensionFilterMonthDate->setExpressions(array("".$monthDate.""));
+				$dimensionFilterClauseMonthDate = new Google_Service_AnalyticsReporting_DimensionFilterClause();
+				$dimensionFilterClauseMonthDate->setFilters(array($dimensionFilterMonthDate));
+				array_push($arrDimensionsFilterClauses, $dimensionFilterClauseMonthDate);
+			} else if($this->type == "year"){
+				$timestamp    	= strtotime($this->period."-01-01");
+				$yearDate 		= date('Y', $timestamp);
+				
+				$dimensionFilterYearDate = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+				$dimensionFilterYearDate->setDimensionName("ga:dimension17");
+				$dimensionFilterYearDate->setOperator("EXACT");
+				$dimensionFilterYearDate->setExpressions(array("".$yearDate.""));
+				$dimensionFilterClauseYearDate = new Google_Service_AnalyticsReporting_DimensionFilterClause();
+				$dimensionFilterClauseYearDate->setFilters(array($dimensionFilterYearDate));
+				array_push($arrDimensionsFilterClauses, $dimensionFilterClauseYearDate);
+			} 
+			
+			if(!empty($strSection)){
+				$dimensionFilterSection = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+				$dimensionFilterSection->setDimensionName("ga:dimension7");
+				$dimensionFilterSection->setOperator("EXACT");
+				$dimensionFilterSection->setExpressions(array("$strSection"));
+				$dimensionFilterClauseSection = new Google_Service_AnalyticsReporting_DimensionFilterClause();
+				$dimensionFilterClauseSection->setFilters(array($dimensionFilterSection));
+				array_push($arrDimensionsFilterClauses, $dimensionFilterClauseSection);
+			}
+			
+			$ordering = new Google_Service_AnalyticsReporting_OrderBy();
+			$ordering->setFieldName("ga:pageviews");
+			$ordering->setOrderType("VALUE");   
+			$ordering->setSortOrder("DESCENDING");
+			
+			// Create the ReportRequest object.
+			$request = new Google_Service_AnalyticsReporting_ReportRequest();
+			$request->setViewId($this->viewId);
+			$request->setDateRanges($dateRange);
+			$request->setDimensions(array($fieldDimension));
+			$request->setMetrics(array($users,$sessions,$pageviews));	
+			$request->setDimensionFilterClauses($arrDimensionsFilterClauses);	
+			$request->setOrderBys($ordering);
+
+			$body = new Google_Service_AnalyticsReporting_GetReportsRequest();
+			$body->setReportRequests( array( $request) );
+			$analytic = $this->analytics->reports->batchGet( $body );
+			$analytic['status'] = 1;
+		} catch (Exception $e) {
+			$errRespond = json_decode($e->getMessage(),TRUE);
+			$analytic['code'] = isset($errRespond['error']['code'])?$errRespond['error']['code']:"";
+			$analytic['message'] = isset($errRespond['error']['message'])?$errRespond['error']['message']:"";			
+			$analytic['status'] = 0;			
+		}
+		
+		return $analytic;
+	}
+	
+	public function printResultRecapEditor($reports,$field,$limit=0) {
+		$arrEditor = array();
+		
+		if(count($reports) > 0){
+			$idx = 0;
+			$limit = intval($limit);
+
+			foreach($reports as $k_report => $report){
+				$rows = $report->getData()->getRows();
+				
+				foreach($rows as $k_row => $row){
+					$value = isset($row->dimensions[0])?ucwords(strtolower($row->dimensions[0])):"";
+
+					$metrics = $row->getMetrics();
+					$users = isset($metrics[0]['values'][0])?$metrics[0]['values'][0]:0;
+					$sessions = isset($metrics[0]['values'][1])?$metrics[0]['values'][1]:0;
+					$pageviews = isset($metrics[0]['values'][2])?$metrics[0]['values'][2]:0;
+					
+					$arrEditor[$idx]['site'] = $this->website;
+					if($field == "editor"){
+						$arrEditor[$idx]['editor'] = $value; 
+					} else {
+						$arrEditor[$idx]['author'] = $value;
+					}	
+					$arrEditor[$idx]['users'] = $users; 
+					$arrEditor[$idx]['sessions'] = $sessions; 
+					$arrEditor[$idx]['pageviews'] = $pageviews; 
+					$idx++;
+					
+					if($limit > 0 && $idx == $limit) break;
+				} 
+			}
+		}
+		
+		return $arrEditor;
+	}
+	
+	public function getSearchKeyword($keyword="",$strSection="") {
+		$analytic = array();
+		
+		if(!empty($keyword)) {
+			try {
+				$dateRange = new Google_Service_AnalyticsReporting_DateRange();
+				
+				if($this->type != "today"){
+					if(!empty($this->period)){
+						$timestamp    	= strtotime($this->period);
+						
+						if($this->type == "year"){
+							$timestamp    	= strtotime($this->period."-01-01");
+							$start_period 	= date(''.$this->period.'-01-01', $timestamp);
+							$end_period  	= date(''.$this->period.'-12-31', $timestamp);
+						} else if($this->type == "month"){
+							$timestamp    	= strtotime($this->period."-01");
+							$start_period 	= date('Y-m-01', $timestamp);
+							$end_period  	= date('Y-m-t', $timestamp);
+						} else {
+							$start_period 	= date('Y-m-d', $timestamp);
+							$end_period  	= date('Y-m-d', $timestamp);
+						}
+
+						$dateRange->setStartDate($start_period);
+						$dateRange->setEndDate($end_period);
+					} else {
+						$dateRange->setStartDate("today");
+						$dateRange->setEndDate("today");
+					}
+				} else {
+					//$dateRange->setStartDate("today");
+					$dateRange->setStartDate("90daysAgo");
+					$dateRange->setEndDate("today");
+				}
+				
+				$pageviews = new Google_Service_AnalyticsReporting_Metric();
+				$pageviews->setExpression("ga:pageviews");
+				$pageviews->setAlias("Pageviews");
+				
+				 // Create the dimension object.
+				$id = new Google_Service_AnalyticsReporting_Dimension();
+				$id->setName("ga:dimension13");
+		  
+				$title = new Google_Service_AnalyticsReporting_Dimension();
+				$title->setName("ga:dimension6");
+				
+				$section = new Google_Service_AnalyticsReporting_Dimension();
+				$section->setName("ga:dimension7");
+				
+				$source = new Google_Service_AnalyticsReporting_Dimension();
+				$source->setName("ga:dimension8");
+				
+				$datePublish = new Google_Service_AnalyticsReporting_Dimension();
+				$datePublish->setName("ga:dimension4");
+				
+				$domain = new Google_Service_AnalyticsReporting_Dimension();
+				$domain->setName("ga:dimension5");
+				
+				$arrDimensionsFilterClauses = array();
+				
+				if($this->viewId != "90636734"){
+					$dimensionFilter = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+					$dimensionFilter->setDimensionName("ga:dimension5");
+					$dimensionFilter->setOperator("EXACT");
+					$dimensionFilter->setExpressions(array("$this->website"));
+					$dimensionFilterClause = new Google_Service_AnalyticsReporting_DimensionFilterClause();
+					$dimensionFilterClause->setFilters(array($dimensionFilter));
+					array_push($arrDimensionsFilterClauses, $dimensionFilterClause);
+				}
+
+				$dimensionFilterTitle = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+				$dimensionFilterTitle->setDimensionName("ga:dimension6");
+				$dimensionFilterTitle->setOperator("REGEXP");
+				$dimensionFilterTitle->setExpressions(array("$keyword"));	
+				$dimensionFilterClauseTitle = new Google_Service_AnalyticsReporting_DimensionFilterClause();
+				$dimensionFilterClauseTitle->setFilters(array($dimensionFilterTitle));
+				array_push($arrDimensionsFilterClauses, $dimensionFilterClauseTitle);
+				
+				if(!empty($strSection)){
+					$dimensionFilterSection = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+					$dimensionFilterSection->setDimensionName("ga:dimension7");
+					$dimensionFilterSection->setOperator("EXACT");
+					$dimensionFilterSection->setExpressions(array("$strSection"));
+					$dimensionFilterClauseSection = new Google_Service_AnalyticsReporting_DimensionFilterClause();
+					$dimensionFilterClauseSection->setFilters(array($dimensionFilterSection));
+					array_push($arrDimensionsFilterClauses, $dimensionFilterClauseSection);
+				}
+				
+				$ordering = new Google_Service_AnalyticsReporting_OrderBy();
+				$ordering->setFieldName("ga:dimension4");
+				$ordering->setOrderType("VALUE");   
+				$ordering->setSortOrder("DESCENDING");
+				
+				// Create the ReportRequest object.
+				$request = new Google_Service_AnalyticsReporting_ReportRequest();
+				$request->setViewId($this->viewId);
+				$request->setDateRanges($dateRange);
+				$request->setDimensions(array($id,$title,$section,$source,$datePublish,$domain));
+				$request->setMetrics(array($pageviews));	
+				$request->setDimensionFilterClauses($arrDimensionsFilterClauses);	
+				$request->setOrderBys($ordering);
+
+				$body = new Google_Service_AnalyticsReporting_GetReportsRequest();
+				$body->setReportRequests( array( $request) );
+				$analytic =  $this->analytics->reports->batchGet( $body );
+
+				$analytic['status'] = 1;
+			} catch (Exception $e) {
+				$errRespond = json_decode($e->getMessage(),TRUE);
+				$analytic['code'] = isset($errRespond['error']['code'])?$errRespond['error']['code']:"";
+				$analytic['message'] = isset($errRespond['error']['message'])?$errRespond['error']['message']:"";			
+				$analytic['status'] = 0;			
+			}
+		} else {
+			$analytic['code'] = "403";
+			$analytic['message'] = "Keyword is required";			
+			$analytic['status'] = 0;
+		} 
+		
+		return $analytic;
+	}
+	
+	public function printResultSearchKeyword($reports,$limit=0) {
+		$arrSearch = array();
+		
+		if(count($reports) > 0){
+			$idx = 0;
+			
+			if(!empty($limit)){
+				$limit = intval($limit);
+			}
+
+			foreach($reports as $k_report => $report){
+				$rows = $report->getData()->getRows();
+				
+				foreach($rows as $k_row => $row){
+					$id = isset($row->dimensions[0])?$row->dimensions[0]:0;
+					$title = isset($row->dimensions[1])?$row->dimensions[1]:"";
+					$section = isset($row->dimensions[2])?$row->dimensions[2]:"";
+					$source = isset($row->dimensions[3])?$row->dimensions[3]:"";
+					$date = isset($row->dimensions[4])?$row->dimensions[4]:"";
+					$domain = isset($row->dimensions[5])?$row->dimensions[5]:"";
+					
+					$arrSearch[$idx]['site'] = $this->website;
+					if($this->viewId != "90636734"){
+						$arrArticle[$idx]['site'] = $domain;
+					}
+					$arrSearch[$idx]['id'] = $id;
+					$arrSearch[$idx]['title'] = $title;
+					$arrSearch[$idx]['section'] = $section; 
+					$arrSearch[$idx]['source'] = $source; 
+					$arrSearch[$idx]['date'] = $date; 
+					$idx++;
+					
+					if($limit > 0 && $idx == $limit) break;
+				} 
+			}
+		}
+		
+		return $arrSearch;
+	}
+	
+	public function getReportAudience() {
+		$analytic = array();
+		
+		try {
+			$dateRange = new Google_Service_AnalyticsReporting_DateRange();
+			
+			$arrPeriod = explode("_",$this->period);
+			$periodStart = isset($arrPeriod[0])?$arrPeriod[0]:date("Y-m-d");
+			$periodEnd = isset($arrPeriod[1])?$arrPeriod[1]:$periodStart;
+			
+			if($this->type != "today"){
+				if(!empty($this->period)){
+					$timestamp    	= strtotime($this->period);
+					
+					if($this->type == "year"){
+						$timestamp    	= strtotime($this->period."-01-01");
+						$start_period 	= date(''.$this->period.'-01-01', $timestamp);
+						$end_period  	= date(''.$this->period.'-12-31', $timestamp);
+					} else if($this->type == "month"){
+						$timestamp    	= strtotime($this->period."-01");
+						$start_period 	= date('Y-m-01', $timestamp);
+						$end_period  	= date('Y-m-t', $timestamp);
+					} else if($this->type == "date"){
+						$start_period 	= date('Y-m-d', strtotime($periodStart));
+						$end_period 	= date('Y-m-d', strtotime($periodStart));
+						if(count($arrPeriod) > 1){
+							$end_period  	= date('Y-m-d', strtotime($periodEnd));
+						}
+					} else {
+						$start_period 	= date('Y-m-d', $timestamp);
+						$end_period  	= date('Y-m-d', $timestamp);
+					}
+					$dateRange->setStartDate($start_period);
+					$dateRange->setEndDate($end_period);
+				} else {
+					$dateRange->setStartDate("today");
+					$dateRange->setEndDate("today");
+				}
+			} else {
+				$dateRange->setStartDate("today");
+				$dateRange->setEndDate("today");
+			}
+
+			$pageviews = new Google_Service_AnalyticsReporting_Metric();
+			$pageviews->setExpression("ga:pageviews");
+			$pageviews->setAlias("Pageviews");
+			
+			$uniquePageviews = new Google_Service_AnalyticsReporting_Metric();
+			$uniquePageviews->setExpression("ga:uniquePageviews");
+			$uniquePageviews->setAlias("Unique Pageviews");
+			
+			$users = new Google_Service_AnalyticsReporting_Metric();
+			$users->setExpression("ga:users");
+			$users->setAlias("Users");
+			
+			$newUsers = new Google_Service_AnalyticsReporting_Metric();
+			$newUsers->setExpression("ga:newUsers");
+			$newUsers->setAlias("New Users");
+			
+			$avgSessionDuration = new Google_Service_AnalyticsReporting_Metric();
+			$avgSessionDuration->setExpression("ga:avgSessionDuration");
+			$avgSessionDuration->setAlias("Average Session Duration");
+			
+			$bounceRate = new Google_Service_AnalyticsReporting_Metric();
+			$bounceRate->setExpression("ga:bounceRate");
+			$bounceRate->setAlias("Bounce Rate");
+			
+			$sessions = new Google_Service_AnalyticsReporting_Metric();
+			$sessions->setExpression("ga:sessions");
+			$sessions->setAlias("Sessions");
+			
+			$sessionsPerUser = new Google_Service_AnalyticsReporting_Metric();
+			$sessionsPerUser->setExpression("ga:sessionsPerUser");
+			$sessionsPerUser->setAlias("Number of Sessions per User");
+			
+			// Create the dimension object.
+			$date = new Google_Service_AnalyticsReporting_Dimension();
+			$date->setName("ga:date");
+			
+			$ordering = new Google_Service_AnalyticsReporting_OrderBy();
+			$ordering->setFieldName("ga:date");
+			$ordering->setOrderType("VALUE");   
+			$ordering->setSortOrder("ASCENDING");
+
+			// Create the ReportRequest object.
+			$request = new Google_Service_AnalyticsReporting_ReportRequest();
+			$request->setViewId($this->viewId);
+			$request->setDateRanges($dateRange);
+			$request->setDimensions(array($date));
+			$request->setMetrics(array($pageviews, $uniquePageviews, $users, $newUsers, $avgSessionDuration, $bounceRate, $sessions, $sessionsPerUser));
+			$request->setOrderBys($ordering);
+
+			$body = new Google_Service_AnalyticsReporting_GetReportsRequest();
+			$body->setReportRequests( array( $request) );
+			$analytic = $this->analytics->reports->batchGet( $body );
+			$analytic['status'] = 1;
+		} catch (Exception $e) {
+			$errRespond = json_decode($e->getMessage(),TRUE);
+			$analytic['code'] = isset($errRespond['error']['code'])?$errRespond['error']['code']:"";
+			$analytic['message'] = isset($errRespond['error']['message'])?$errRespond['error']['message']:"";			
+			$analytic['status'] = 0;			
+		}
+		
+		return $analytic;
+	}
+	
+	public function printResultAudience($reports) {
+		$arrAudience = array();
+		
+		if(count($reports) > 0){
+			$idx = 0;
+			
+			foreach($reports as $k_report => $report){
+				$rows = $report->getData()->getRows();
+				
+				foreach($rows as $k_row => $row){
+					$date = isset($row->dimensions[0])?date('Y-m-d',strtotime($row->dimensions[0])):"";
+					
+					$metrics = $row->getMetrics();
+					$pageviews = isset($metrics[0]['values'][0])?$metrics[0]['values'][0]:0;
+					$uniquePageviews = isset($metrics[0]['values'][1])?$metrics[0]['values'][1]:0;
+					$users = isset($metrics[0]['values'][2])?$metrics[0]['values'][2]:0;
+					$newUsers = isset($metrics[0]['values'][3])?$metrics[0]['values'][3]:0;
+					$avgSessionDuration = isset($metrics[0]['values'][4])?$metrics[0]['values'][4]:0;
+					
+					$arrAudience[$idx]['date'] = $date; 
+					$arrAudience[$idx]['pageviews'] = $pageviews;
+					$arrAudience[$idx]['uniquePageviews'] = $uniquePageviews;
+					$arrAudience[$idx]['users'] = $users;
+					$arrAudience[$idx]['newUsers'] = $newUsers;
+					$arrAudience[$idx]['avgSessionDuration'] = $avgSessionDuration;
+					
+					$idx++;
+				}
+			}
+		}
+		
+		return $arrAudience;
+	}
+	
+	public function getReportAudienceCity() {
+		$analytic = array();
+		
+		try {
+			$dateRange = new Google_Service_AnalyticsReporting_DateRange();
+			
+			$arrPeriod = explode("_",$this->period);
+			$periodStart = isset($arrPeriod[0])?$arrPeriod[0]:date("Y-m-d");
+			$periodEnd = isset($arrPeriod[1])?$arrPeriod[1]:$periodStart;
+			
+			if($this->type != "today"){
+				if(!empty($this->period)){
+					$timestamp    	= strtotime($this->period);
+					
+					if($this->type == "year"){
+						$timestamp    	= strtotime($this->period."-01-01");
+						$start_period 	= date(''.$this->period.'-01-01', $timestamp);
+						$end_period  	= date(''.$this->period.'-12-31', $timestamp);
+					} else if($this->type == "month"){
+						$timestamp    	= strtotime($this->period."-01");
+						$start_period 	= date('Y-m-01', $timestamp);
+						$end_period  	= date('Y-m-t', $timestamp);
+					} else if($this->type == "date"){
+						$start_period 	= date('Y-m-d', strtotime($periodStart));
+						$end_period 	= date('Y-m-d', strtotime($periodStart));
+						if(count($arrPeriod) > 1){
+							$end_period  	= date('Y-m-d', strtotime($periodEnd));
+						}
+					} else {
+						$start_period 	= date('Y-m-d', $timestamp);
+						$end_period  	= date('Y-m-d', $timestamp);
+					}
+					$dateRange->setStartDate($start_period);
+					$dateRange->setEndDate($end_period);
+				} else {
+					$dateRange->setStartDate("today");
+					$dateRange->setEndDate("today");
+				}
+			} else {
+				$dateRange->setStartDate("today");
+				$dateRange->setEndDate("today");
+			}
+
+			$pageviews = new Google_Service_AnalyticsReporting_Metric();
+			$pageviews->setExpression("ga:pageviews");
+			$pageviews->setAlias("Pageviews");
+			
+			$users = new Google_Service_AnalyticsReporting_Metric();
+			$users->setExpression("ga:users");
+			$users->setAlias("Users");
+			
+			// Create the dimension object.
+			$city = new Google_Service_AnalyticsReporting_Dimension();
+			$city->setName("ga:city");
+			
+			$ordering = new Google_Service_AnalyticsReporting_OrderBy();
+			$ordering->setFieldName("ga:users");
+			$ordering->setOrderType("VALUE");   
+			$ordering->setSortOrder("DESCENDING");
+
+			// Create the ReportRequest object.
+			$request = new Google_Service_AnalyticsReporting_ReportRequest();
+			$request->setViewId($this->viewId);
+			$request->setDateRanges($dateRange);
+			$request->setPageSize(100); 
+			$request->setDimensions(array($city));
+			$request->setMetrics(array($pageviews, $users));
+			$request->setOrderBys($ordering);
+
+			$body = new Google_Service_AnalyticsReporting_GetReportsRequest();
+			$body->setReportRequests( array( $request) );
+			$analytic = $this->analytics->reports->batchGet( $body );
+			$analytic['status'] = 1;
+		} catch (Exception $e) {
+			$errRespond = json_decode($e->getMessage(),TRUE);
+			$analytic['code'] = isset($errRespond['error']['code'])?$errRespond['error']['code']:"";
+			$analytic['message'] = isset($errRespond['error']['message'])?$errRespond['error']['message']:"";			
+			$analytic['status'] = 0;			
+		}
+		
+		return $analytic;
+	}
+	
+	public function printResultAudienceCity($reports) {
+		$arrAudience = array();
+		
+		if(count($reports) > 0){
+			$idx = 0;
+			
+			foreach($reports as $k_report => $report){
+				$rows = $report->getData()->getRows();
+				
+				foreach($rows as $k_row => $row){
+					$city = isset($row->dimensions[0])?$row->dimensions[0]:""; 
+					
+					$metrics = $row->getMetrics();
+					$pageviews = isset($metrics[0]['values'][0])?$metrics[0]['values'][0]:0;
+					$users = isset($metrics[0]['values'][1])?$metrics[0]['values'][1]:0;
+					
+					$arrAudience[$idx]['city'] = $city; 
+					$arrAudience[$idx]['pageviews'] = $pageviews;
+					$arrAudience[$idx]['users'] = $users;
+					
+					$idx++;
+				}
+			}
+		}
+		
+		return $arrAudience;
+	}
+	
+	public function getReportAudienceGender() {
+		$analytic = array();
+		
+		try {
+			$dateRange = new Google_Service_AnalyticsReporting_DateRange();
+			
+			$arrPeriod = explode("_",$this->period);
+			$periodStart = isset($arrPeriod[0])?$arrPeriod[0]:date("Y-m-d");
+			$periodEnd = isset($arrPeriod[1])?$arrPeriod[1]:$periodStart;
+			
+			if($this->type != "today"){
+				if(!empty($this->period)){
+					$timestamp    	= strtotime($this->period);
+					
+					if($this->type == "year"){
+						$timestamp    	= strtotime($this->period."-01-01");
+						$start_period 	= date(''.$this->period.'-01-01', $timestamp);
+						$end_period  	= date(''.$this->period.'-12-31', $timestamp);
+					} else if($this->type == "month"){
+						$timestamp    	= strtotime($this->period."-01");
+						$start_period 	= date('Y-m-01', $timestamp);
+						$end_period  	= date('Y-m-t', $timestamp);
+					} else if($this->type == "date"){
+						$start_period 	= date('Y-m-d', strtotime($periodStart));
+						$end_period 	= date('Y-m-d', strtotime($periodStart));
+						if(count($arrPeriod) > 1){
+							$end_period  	= date('Y-m-d', strtotime($periodEnd));
+						}
+					} else {
+						$start_period 	= date('Y-m-d', $timestamp);
+						$end_period  	= date('Y-m-d', $timestamp);
+					}
+					$dateRange->setStartDate($start_period);
+					$dateRange->setEndDate($end_period);
+				} else {
+					$dateRange->setStartDate("today");
+					$dateRange->setEndDate("today");
+				}
+			} else {
+				$dateRange->setStartDate("today");
+				$dateRange->setEndDate("today");
+			}
+
+			$users = new Google_Service_AnalyticsReporting_Metric();
+			$users->setExpression("ga:users");
+			$users->setAlias("Users");
+			
+			// Create the dimension object.
+			$userGender = new Google_Service_AnalyticsReporting_Dimension();
+			$userGender->setName("ga:userGender");
+			
+			$ordering = new Google_Service_AnalyticsReporting_OrderBy();
+			$ordering->setFieldName("ga:users");
+			$ordering->setOrderType("VALUE");   
+			$ordering->setSortOrder("DESCENDING");
+
+			// Create the ReportRequest object.
+			$request = new Google_Service_AnalyticsReporting_ReportRequest();
+			$request->setViewId($this->viewId);
+			$request->setDateRanges($dateRange);
+			$request->setDimensions(array($userGender));
+			$request->setMetrics(array($users));
+			$request->setOrderBys($ordering);
+
+			$body = new Google_Service_AnalyticsReporting_GetReportsRequest();
+			$body->setReportRequests( array( $request) );
+			$analytic = $this->analytics->reports->batchGet( $body );
+			$analytic['status'] = 1;
+		} catch (Exception $e) {
+			$errRespond = json_decode($e->getMessage(),TRUE);
+			$analytic['code'] = isset($errRespond['error']['code'])?$errRespond['error']['code']:"";
+			$analytic['message'] = isset($errRespond['error']['message'])?$errRespond['error']['message']:"";			
+			$analytic['status'] = 0;			
+		}
+		
+		return $analytic;
+	}
+	
+	public function printResultAudienceGender($reports) {
+		$arrAudience = array();
+		
+		if(count($reports) > 0){
+			$idx = 0;
+			
+			foreach($reports as $k_report => $report){
+				$rows = $report->getData()->getRows();
+				
+				foreach($rows as $k_row => $row){
+					$gender = isset($row->dimensions[0])?$row->dimensions[0]:""; 
+					
+					$metrics = $row->getMetrics();
+					$users = isset($metrics[0]['values'][0])?$metrics[0]['values'][0]:0;
+					
+					$arrAudience[$idx]['gender'] = $gender; 
+					$arrAudience[$idx]['users'] = $users;
+					
+					$idx++;
+				}
+			}
+		}
+		
+		return $arrAudience;
+	}
+	
+	public function getReportMobile($field="brand") {
+		$analytic = array();
+		
+		try {
+			$dateRange = new Google_Service_AnalyticsReporting_DateRange();
+			
+			$arrPeriod = explode("_",$this->period);
+			$periodStart = isset($arrPeriod[0])?$arrPeriod[0]:date("Y-m-d");
+			$periodEnd = isset($arrPeriod[1])?$arrPeriod[1]:$periodStart;
+			
+			if($this->type != "today"){
+				if(!empty($this->period)){
+					$timestamp    	= strtotime($this->period);
+					
+					if($this->type == "year"){
+						$timestamp    	= strtotime($this->period."-01-01");
+						$start_period 	= date(''.$this->period.'-01-01', $timestamp);
+						$end_period  	= date(''.$this->period.'-12-31', $timestamp);
+					} else if($this->type == "month"){
+						$timestamp    	= strtotime($this->period."-01");
+						$start_period 	= date('Y-m-01', $timestamp);
+						$end_period  	= date('Y-m-t', $timestamp);
+					} else if($this->type == "date"){
+						$start_period 	= date('Y-m-d', strtotime($periodStart));
+						$end_period 	= date('Y-m-d', strtotime($periodStart));
+						if(count($arrPeriod) > 1){
+							$end_period  	= date('Y-m-d', strtotime($periodEnd));
+						}
+					} else {
+						$start_period 	= date('Y-m-d', $timestamp);
+						$end_period  	= date('Y-m-d', $timestamp);
+					}
+					$dateRange->setStartDate($start_period);
+					$dateRange->setEndDate($end_period);
+				} else {
+					$dateRange->setStartDate("today");
+					$dateRange->setEndDate("today");
+				}
+			} else {
+				$dateRange->setStartDate("today");
+				$dateRange->setEndDate("today");
+			}
+			
+			$users = new Google_Service_AnalyticsReporting_Metric();
+			$users->setExpression("ga:users");
+			$users->setAlias("Users");
+			
+			$newUsers = new Google_Service_AnalyticsReporting_Metric();
+			$newUsers->setExpression("ga:newUsers");
+			$newUsers->setAlias("New Users");
+			
+			$avgSessionDuration = new Google_Service_AnalyticsReporting_Metric();
+			$avgSessionDuration->setExpression("ga:avgSessionDuration");
+			$avgSessionDuration->setAlias("Average Session Duration");
+			
+			$sessions = new Google_Service_AnalyticsReporting_Metric();
+			$sessions->setExpression("ga:sessions");
+			$sessions->setAlias("Sessions");
+			
+			// Create the dimension object.
+			if($field == "brand"){
+				$mobile = new Google_Service_AnalyticsReporting_Dimension();
+				$mobile->setName("ga:mobileDeviceBranding");
+			} else {
+				$mobile = new Google_Service_AnalyticsReporting_Dimension();
+				$mobile->setName("ga:mobileDeviceInfo");
+			}
+			
+			$ordering = new Google_Service_AnalyticsReporting_OrderBy();
+			$ordering->setFieldName("ga:users");
+			$ordering->setOrderType("VALUE");   
+			$ordering->setSortOrder("DESCENDING");
+
+			// Create the ReportRequest object.
+			$request = new Google_Service_AnalyticsReporting_ReportRequest();
+			$request->setViewId($this->viewId);
+			$request->setDateRanges($dateRange);
+			$request->setDimensions(array($mobile));
+			$request->setPageSize(100); 
+			$request->setMetrics(array($users, $newUsers, $avgSessionDuration, $sessions));
+			$request->setOrderBys($ordering);
+
+			$body = new Google_Service_AnalyticsReporting_GetReportsRequest();
+			$body->setReportRequests( array( $request) );
+			$analytic = $this->analytics->reports->batchGet( $body );
+			$analytic['status'] = 1;
+		} catch (Exception $e) {
+			$errRespond = json_decode($e->getMessage(),TRUE);
+			$analytic['code'] = isset($errRespond['error']['code'])?$errRespond['error']['code']:"";
+			$analytic['message'] = isset($errRespond['error']['message'])?$errRespond['error']['message']:"";			
+			$analytic['status'] = 0;			
+		}
+		
+		return $analytic;
+	}
+	
+	public function printResultMobile($field="brand", $reports) {
+		$arrAudience = array();
+		
+		if(count($reports) > 0){
+			$idx = 0;
+			
+			foreach($reports as $k_report => $report){
+				$rows = $report->getData()->getRows();
+				
+				foreach($rows as $k_row => $row){
+					$mobile = isset($row->dimensions[0])?$row->dimensions[0]:"";
+					
+					$metrics = $row->getMetrics();
+					$users = isset($metrics[0]['values'][0])?$metrics[0]['values'][0]:0;
+					$newUsers = isset($metrics[0]['values'][1])?$metrics[0]['values'][1]:0;
+					$avgSessionDuration = isset($metrics[0]['values'][2])?$metrics[0]['values'][2]:0;
+					$sessions = isset($metrics[0]['values'][3])?$metrics[0]['values'][3]:0;   
+					
+					if($field == "brand"){
+						$arrAudience[$idx]['brand'] = $mobile; 
+					} else {
+						$arrAudience[$idx]['device'] = $mobile; 
+					}
+					$arrAudience[$idx]['users'] = $users;
+					$arrAudience[$idx]['newUsers'] = $newUsers;
+					$arrAudience[$idx]['avgSessionDuration'] = $avgSessionDuration;
+					$arrAudience[$idx]['sessions'] = $sessions;
+					
+					$idx++;
+				}
+			}
+		}
+		
+		return $arrAudience;
+	}
+	
+	public function getTopArticleTribunnews($strSection="") {
+		$analytic = array();
+		$todayDate = date("Y-m-d");
+		$hoursNow = date('G');
+		
+		try {
+			$dateRange = new Google_Service_AnalyticsReporting_DateRange();
+			$dateRange->setStartDate("today");
+			$dateRange->setEndDate("today");	
+			
+			$pageviews = new Google_Service_AnalyticsReporting_Metric();
+			$pageviews->setExpression("ga:pageviews");
+			$pageviews->setAlias("Pageviews");
+			
+			// Create the dimension object.
+			$id = new Google_Service_AnalyticsReporting_Dimension();
+			$id->setName("ga:dimension13");
+			
+			$tag = new Google_Service_AnalyticsReporting_Dimension();
+			$tag->setName("ga:dimension15");
+			
+			$arrDimensionsFilterClauses = array();
+			
+			$dimensionFilterTitle = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+			$dimensionFilterTitle->setDimensionName("ga:dimension6");
+			$dimensionFilterTitle->setOperator("REGEXP");
+			$dimensionFilterTitle->setExpressions(array(".*[?!halaman|?!halaman|?!topik|?!page|?!page]$"));
+			$dimensionFilterClauseTitle= new Google_Service_AnalyticsReporting_DimensionFilterClause();
+			$dimensionFilterClauseTitle->setFilters(array($dimensionFilterTitle));
+			array_push($arrDimensionsFilterClauses, $dimensionFilterClauseTitle);
+			
+			$dimensionFilterDomain = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+			$dimensionFilterDomain->setDimensionName("ga:dimension5");
+			$dimensionFilterDomain->setOperator("EXACT");
+			$dimensionFilterDomain->setExpressions(array("tribunnews"));
+			$dimensionFilterClauseDomain = new Google_Service_AnalyticsReporting_DimensionFilterClause();
+			$dimensionFilterClauseDomain->setFilters(array($dimensionFilterDomain));
+			array_push($arrDimensionsFilterClauses, $dimensionFilterClauseDomain);
+			
+			if(!empty($strSection)){
+				$dimensionFilterSection = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+				$dimensionFilterSection->setDimensionName("ga:dimension7");
+				$dimensionFilterSection->setOperator("EXACT");
+				$dimensionFilterSection->setExpressions(array("$strSection"));
+				$dimensionFilterClauseSection = new Google_Service_AnalyticsReporting_DimensionFilterClause();
+				$dimensionFilterClauseSection->setFilters(array($dimensionFilterSection));
+				array_push($arrDimensionsFilterClauses, $dimensionFilterClauseSection);
+			}
+			
+			//filter publish date
+			$todayDate = date("Y-m-d");
+			$arrExpressions = array();
+			array_push($arrExpressions, array("^".$todayDate.""));
+			$dimensionFilterDate = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+			$dimensionFilterDate->setDimensionName("ga:dimension4");
+			$dimensionFilterDate->setOperator("REGEXP");
+			$dimensionFilterDate->setExpressions($arrExpressions);
+			$dimensionFilterClauseDate = new Google_Service_AnalyticsReporting_DimensionFilterClause();
+			$dimensionFilterClauseDate->setFilters(array($dimensionFilterDate));
+			array_push($arrDimensionsFilterClauses, $dimensionFilterClauseDate);
+			
+			$ordering = new Google_Service_AnalyticsReporting_OrderBy();
+			$ordering->setFieldName("ga:pageviews");
+			$ordering->setOrderType("VALUE");   
+			$ordering->setSortOrder("DESCENDING");
+			
+			// Create the ReportRequest object.
+			$request = new Google_Service_AnalyticsReporting_ReportRequest();
+			$request->setViewId($this->viewId);
+			$request->setDateRanges($dateRange);
+			if($hoursNow < 13){
+				$request->setPageSize(165);
+			} else if($hoursNow < 19 && $hoursNow >= 13){
+				$request->setPageSize(160);
+			} else if($hoursNow < 22 && $hoursNow >= 19){
+				$request->setPageSize(150);
+			} else {
+				$request->setPageSize(175);
+			}		
+			$request->setDimensions(array($id,$tag));
+			$request->setMetrics(array($pageviews));
+			$request->setDimensionFilterClauses($arrDimensionsFilterClauses);
+			$request->setOrderBys($ordering);
+
+			$body = new Google_Service_AnalyticsReporting_GetReportsRequest();
+			$body->setReportRequests( array( $request) );
+			$analytic = $this->analytics->reports->batchGet( $body );
+			$analytic['status'] = 1;
+		} catch (Exception $e) {
+			$errRespond = json_decode($e->getMessage(),TRUE);
+			$analytic['code'] = isset($errRespond['error']['code'])?$errRespond['error']['code']:"";
+			$analytic['message'] = isset($errRespond['error']['message'])?$errRespond['error']['message']:"";			
+			$analytic['status'] = 0;			
+		}
+		
+		return $analytic;
+	}
+	
+	public function getResultTopArticleTribunnews($reports) {
+		$arrArticle = array();
+		$arrIdArticle = array();
+		
+		if(count($reports) > 0){
+			foreach($reports as $k_report => $report){
+				$rows = $report->getData()->getRows();
+				
+				$idx = 0;
+				foreach($rows as $k_row => $row){
+					$id = isset($row->dimensions[0])?(int) $row->dimensions[0]:"";
+					$tag = isset($row->dimensions[1])?$row->dimensions[1]:"";
+					
+					$metrics = $row->getMetrics();
+					$pageviews = isset($metrics[0]['values'][0])?$metrics[0]['values'][0]:0;
+					
+					if(!in_array($arrIdArticle,$id)){
+						$arrArticle[$idx]['id'] = $id;
+						$arrArticle[$idx]['tag'] = $tag;
+						$arrArticle[$idx]['pageviews'] = $pageviews;
+						array_push($arrIdArticle,$id);
+						$idx++;
+					}
+					
+				} 
+			}
+		}
+		
+		return $arrArticle;
+		//return $arrIdArticle;
+	}
+	
+	public function getReportTopTagTribunnews() {
+		$analytic = array();
+		$todayDate = date("Y-m-d");
+		$yesteddayDate = strtotime('-1 day', strtotime($todayDate));
+		
+		try {
+			$dateRange = new Google_Service_AnalyticsReporting_DateRange();
+			$hoursNow = date('G');
+			if($hoursNow > 12){
+				$dateRange->setStartDate("today");
+			} else {
+				$dateRange->setStartDate("1daysAgo");
+			}		
+			$dateRange->setEndDate("today");
+			
+			$pageviews = new Google_Service_AnalyticsReporting_Metric();
+			$pageviews->setExpression("ga:pageviews");
+			$pageviews->setAlias("Pageviews");
+			
+			// Create the dimension object.
+			$contenttag = new Google_Service_AnalyticsReporting_Dimension();
+			$contenttag->setName("ga:dimension15");
+			
+			$contenttopic = new Google_Service_AnalyticsReporting_Dimension();
+			$contenttopic->setName("ga:dimension22");
+			
+			$arrDimensionsFilterClauses = array();
+			
+			$dimensionFilterTitle = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+			$dimensionFilterTitle->setDimensionName("ga:dimension6");
+			$dimensionFilterTitle->setOperator("REGEXP");
+			$dimensionFilterTitle->setExpressions(array(".*[?!halaman|?!topik|?!page|?!page]$"));
+			$dimensionFilterClauseTitle= new Google_Service_AnalyticsReporting_DimensionFilterClause();
+			$dimensionFilterClauseTitle->setFilters(array($dimensionFilterTitle));
+			array_push($arrDimensionsFilterClauses, $dimensionFilterClauseTitle);
+			
+			$dimensionFilterDomain = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+			$dimensionFilterDomain->setDimensionName("ga:dimension5");
+			$dimensionFilterDomain->setOperator("EXACT");
+			$dimensionFilterDomain->setExpressions(array("tribunnews"));
+			$dimensionFilterClauseDomain = new Google_Service_AnalyticsReporting_DimensionFilterClause();
+			$dimensionFilterClauseDomain->setFilters(array($dimensionFilterDomain));
+			array_push($arrDimensionsFilterClauses, $dimensionFilterClauseDomain);
+			
+			if($hoursNow > 11){
+				//filter publish date
+				$todayDate = date("Y-m-d");
+				$arrExpressions = array();
+				array_push($arrExpressions, array("^".$todayDate.""));
+				$dimensionFilterDate = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+				$dimensionFilterDate->setDimensionName("ga:dimension4");
+				$dimensionFilterDate->setOperator("REGEXP");
+				$dimensionFilterDate->setExpressions($arrExpressions);
+				$dimensionFilterClauseDate = new Google_Service_AnalyticsReporting_DimensionFilterClause();
+				$dimensionFilterClauseDate->setFilters(array($dimensionFilterDate));
+				array_push($arrDimensionsFilterClauses, $dimensionFilterClauseDate);
+			}
+			
+			$ordering = new Google_Service_AnalyticsReporting_OrderBy();
+			$ordering->setFieldName("ga:pageviews");
+			$ordering->setOrderType("VALUE");   
+			$ordering->setSortOrder("DESCENDING");
+
+			// Create the ReportRequest object.
+			$request = new Google_Service_AnalyticsReporting_ReportRequest();
+			$request->setViewId($this->viewId);
+			$request->setDateRanges($dateRange);
+			$request->setPageSize(150); 
+			$request->setDimensions(array($contenttag,$contenttopic));
+			$request->setMetrics(array($pageviews));
+			$request->setDimensionFilterClauses($arrDimensionsFilterClauses);
+			$request->setOrderBys($ordering);
+
+			$body = new Google_Service_AnalyticsReporting_GetReportsRequest();
+			$body->setReportRequests( array( $request) );
+			$analytic = $this->analytics->reports->batchGet( $body );
+			$analytic['status'] = 1;
+		} catch (Exception $e) {
+			$errRespond = json_decode($e->getMessage(),TRUE);
+			$analytic['code'] = isset($errRespond['error']['code'])?$errRespond['error']['code']:"";
+			$analytic['message'] = isset($errRespond['error']['message'])?$errRespond['error']['message']:"";			
+			$analytic['status'] = 0;			
+		}
+		
+		return $analytic;
+	}
+	
+	private function array_search_key_exists($value='',$key='', $haystack=array(), $isindex=false){
+		foreach ($haystack as $idx => $item) {
+			if ($item[$key]===$value) {
+				if($isindex){
+					return $idx;
+				} else {
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+	
+	public function printResultTopTagTribunnews($reports) {
+		$arrTag = array();
+		$arrTagDetail = array();
+		$arrTagUnique = array();
+		$arrTagBlock = array("chord gitar","Download MP3","Download Lagu MP3","Download MP3 Lagu","Chord gitar lagu");
+		
+		$arrTagSection = array();
+		
+		if(count($reports) > 0){
+			foreach($reports as $k_report => $report){
+				$rows = $report->getData()->getRows();
+				
+				foreach($rows as $k_row => $row){
+					$contenttag = isset($row->dimensions[0])?$row->dimensions[0]:"";
+					$contenttopic = isset($row->dimensions[1])?$row->dimensions[1]:"";
+					
+					$arrContentTag = explode(",",$contenttag);
+					
+					$section_ga = $this->url_title(end($arrContentTag));
+					
+					//Taketout Subcategory & category in Tag
+					if(count($arrContentTag) > 0){
+						array_splice($arrContentTag, (count($arrContentTag)-2), 2);
+
+						//Taketout Content Topic in Tag
+						if(!empty($contenttopic)){ 
+							array_splice($arrContentTag, 0, 1);
+						}
+						
+						$arrTaDetailSection = array();
+						foreach($arrContentTag as $key => $tag){
+							//echo $section_ga." - ".$key." = ".$tag."<br>";
+							$tag = trim($tag);
+							$lengthtag = strlen($tag);
+							$tag_alias = $this->url_title($tag);
+							if(!empty($tag) && $lengthtag < 40&& !in_array($tag,$arrTagBlock)){
+								array_push($arrTagDetail,$tag);
+								array_push($arrTaDetailSection,$tag);
+							}
+						}
+						
+						$stat = $this->array_search_key_exists($section_ga, 'section', $arrTagSection);
+						if(!$stat){
+							$arrTagSection[$k_row]['section'] = $section_ga;
+							$arrTagSection[$k_row]['tag'] = $arrTaDetailSection;
+						} else {
+							$found_idx = $this->array_search_key_exists($section_ga, 'section', $arrTagSection, true);
+							$arrTagDetailSectionOld = $arrTagSection[$found_idx]['tag'];
+							$arrTagDetailSectionCombine = array_merge($arrTagDetailSectionOld, $arrTaDetailSection);
+							$arrTagSection[$found_idx]['tag'] = $arrTagDetailSectionCombine;
+						}
+					} 
+				}
+				
+
+				$arrTagFilter = array();
+				if(count($arrTagDetail) > 0){
+					$arrTagDetail = array_count_values($arrTagDetail);
+					arsort($arrTagDetail);
+					
+					foreach($arrTagDetail as $tag => $total){
+						array_push($arrTagFilter,$tag);
+					}
+				}
+				
+				if(count($arrTagFilter) > 0){
+					$arrResultTag = array_unique($arrTagFilter);
+					foreach($arrResultTag as $tag){
+						array_push($arrTagUnique,$tag);
+					}
+					$arrTagUnique = array_slice($arrTagUnique, 0, 40);
+				}
+
+				if(count($arrTagSection) > 0){
+					foreach($arrTagSection as $idx => $arrSection){
+						$arrTagDetailSection = isset($arrSection['tag'])?$arrSection['tag']:array();
+						
+						$arrTagFilterSection = array();
+						if(count($arrTagDetailSection) > 0){
+							$arrTagDetailSection = array_count_values($arrTagDetailSection);
+							arsort($arrTagDetailSection);
+							
+							foreach($arrTagDetailSection as $tag => $total){
+								array_push($arrTagFilterSection,$tag);
+							}
+						}
+						
+						$arrTagUniqueSection = array();
+						if(count($arrTagFilterSection) > 0){
+							$arrResultTag = array_unique($arrTagFilterSection);
+							foreach($arrResultTag as $tag){
+								array_push($arrTagUniqueSection,$tag);
+							}
+							$arrTagUniqueSection = array_slice($arrTagUniqueSection, 0, 10);
+						}
+						
+						if(count($arrTagUniqueSection) > 0){
+							$arrTagSection[$idx]['tag'] = $arrTagUniqueSection;
+						}
+					}
+					
+					$arrTagSection = array_values($arrTagSection);
+				}
+		
+			} 
+
+			$arrTag['tag'] = $arrTagUnique;
+			$arrTag['section'] = 'home';
+		}
+		
+		if(count($arrTagSection) > 0 && count($arrTag) > 0){
+			array_unshift($arrTagSection,$arrTag);
+		}
+		
+		return $arrTagSection;
+	}
+	
+	public function getReportTopTopicTribunnews() {
+		$analytic = array();
+		$todayDate = date("Y-m-d");
+		$yesteddayDate = strtotime('-1 day', strtotime($todayDate));
+		$yesteddayDate = date('Y-m-d', $yesteddayDate);
+		$beforeYesterdayDate = strtotime('-2 day', strtotime($todayDate));
+		$beforeYesterdayDate = date('Y-m-d', $beforeYesterdayDate);
+		
+		try {
+			$dateRange = new Google_Service_AnalyticsReporting_DateRange();	
+			$hoursNow = date('G');
+			if($hoursNow > 5){
+				$dateRange->setStartDate("today");
+			} else {
+				$dateRange->setStartDate("1daysAgo");
+			}
+			$dateRange->setEndDate("today");
+			
+			$pageviews = new Google_Service_AnalyticsReporting_Metric();
+			$pageviews->setExpression("ga:pageviews");
+			$pageviews->setAlias("Pageviews");
+			
+			// Create the dimension object.
+			$contenttopic = new Google_Service_AnalyticsReporting_Dimension();
+			$contenttopic->setName("ga:dimension22");
+
+			$arrDimensionsFilterClauses = array();
+			
+			$dimensionFilterTitle = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+			$dimensionFilterTitle->setDimensionName("ga:dimension6");
+			$dimensionFilterTitle->setOperator("REGEXP");
+			$dimensionFilterTitle->setExpressions(array(".*[?!halaman|?!topik|?!page|?!page]$"));
+			$dimensionFilterClauseTitle= new Google_Service_AnalyticsReporting_DimensionFilterClause();
+			$dimensionFilterClauseTitle->setFilters(array($dimensionFilterTitle));
+			array_push($arrDimensionsFilterClauses, $dimensionFilterClauseTitle);
+			
+			$dimensionFilterDomain = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+			$dimensionFilterDomain->setDimensionName("ga:dimension5");
+			$dimensionFilterDomain->setOperator("EXACT");
+			$dimensionFilterDomain->setExpressions(array("tribunnews"));
+			$dimensionFilterClauseDomain = new Google_Service_AnalyticsReporting_DimensionFilterClause();
+			$dimensionFilterClauseDomain->setFilters(array($dimensionFilterDomain));
+			array_push($arrDimensionsFilterClauses, $dimensionFilterClauseDomain);
+			
+			if($hoursNow > 9){
+				//filter publish date
+				$todayDate = date("Y-m-d");
+				$arrExpressions = array();
+				array_push($arrExpressions, array("^".$todayDate.""));
+				$dimensionFilterDate = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+				$dimensionFilterDate->setDimensionName("ga:dimension4");
+				$dimensionFilterDate->setOperator("REGEXP");
+				$dimensionFilterDate->setExpressions($arrExpressions);
+				$dimensionFilterClauseDate = new Google_Service_AnalyticsReporting_DimensionFilterClause();
+				$dimensionFilterClauseDate->setFilters(array($dimensionFilterDate));
+				array_push($arrDimensionsFilterClauses, $dimensionFilterClauseDate);
+			}
+			
+			$ordering = new Google_Service_AnalyticsReporting_OrderBy();
+			$ordering->setFieldName("ga:pageviews");
+			$ordering->setOrderType("VALUE");   
+			$ordering->setSortOrder("DESCENDING");
+
+			// Create the ReportRequest object.
+			$request = new Google_Service_AnalyticsReporting_ReportRequest();
+			$request->setViewId($this->viewId);
+			$request->setDateRanges($dateRange);
+			$request->setPageSize(150); 
+			$request->setDimensions(array($contenttopic));
+			$request->setMetrics(array($pageviews));
+			$request->setDimensionFilterClauses($arrDimensionsFilterClauses);
+			$request->setOrderBys($ordering);
+
+			$body = new Google_Service_AnalyticsReporting_GetReportsRequest();
+			$body->setReportRequests( array( $request) );
+			$analytic = $this->analytics->reports->batchGet( $body );
+			$analytic['status'] = 1;
+		} catch (Exception $e) {
+			$errRespond = json_decode($e->getMessage(),TRUE);
+			$analytic['code'] = isset($errRespond['error']['code'])?$errRespond['error']['code']:"";
+			$analytic['message'] = isset($errRespond['error']['message'])?$errRespond['error']['message']:"";			
+			$analytic['status'] = 0;			
+		}
+		
+		return $analytic;
+	}
+	
+	public function printResultTopTopicTribunnews($reports) {
+		$arrTopic = array();
+		$arrBlockTopic = array("Chord Gitar","Download MP3","Ramadan 2020");
+		
+		if(count($reports) > 0){
+			foreach($reports as $k_report => $report){
+				$rows = $report->getData()->getRows();
+				
+				foreach($rows as $k_row => $row){
+					$contentopic = isset($row->dimensions[0])?$row->dimensions[0]:"";
+					
+					if(!empty($contentopic) && !in_array($contentopic, $arrBlockTopic)){
+						array_push($arrTopic,$contentopic);
+					}
+				}
+				
+				if(count($arrTopic) > 0){
+					$arrTopic = array_slice($arrTopic, 0, 30);
+				}
+			}
+
+			$arrTag['topic'] = $arrTopic;
+		}
+		
+		return $arrTag;
+	}
+	
+	public function getTopArticleTribunnewsWiki() {
+		$analytic = array();
+		$todayDate = date("Y-m-d");
+		$hoursNow = date('G');
+		
+		try {
+			$dateRange = new Google_Service_AnalyticsReporting_DateRange();
+			$hoursNow = date('G');
+			if($hoursNow > 10){
+				$dateRange->setStartDate("today");
+			} else {
+				$dateRange->setStartDate("1daysAgo");
+			}
+			$dateRange->setEndDate("today");	
+			
+			$pageviews = new Google_Service_AnalyticsReporting_Metric();
+			$pageviews->setExpression("ga:pageviews");
+			$pageviews->setAlias("Pageviews");
+			
+			// Create the dimension object.
+			$id = new Google_Service_AnalyticsReporting_Dimension();
+			$id->setName("ga:dimension13");
+			
+			$arrDimensionsFilterClauses = array();
+			
+			$dimensionFilterTitle = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+			$dimensionFilterTitle->setDimensionName("ga:dimension6");
+			$dimensionFilterTitle->setOperator("REGEXP");
+			$dimensionFilterTitle->setExpressions(array(".*[?!halaman|?!halaman|?!topik|?!page|?!page]$"));
+			$dimensionFilterClauseTitle= new Google_Service_AnalyticsReporting_DimensionFilterClause();
+			$dimensionFilterClauseTitle->setFilters(array($dimensionFilterTitle));
+			array_push($arrDimensionsFilterClauses, $dimensionFilterClauseTitle);
+			
+			//filter publish date
+			if($hoursNow > 10){
+				$arrExpressions = array();
+				array_push($arrExpressions, array("^".$todayDate.""));
+				$dimensionFilterDate = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+				$dimensionFilterDate->setDimensionName("ga:dimension4");
+				$dimensionFilterDate->setOperator("REGEXP");
+				$dimensionFilterDate->setExpressions($arrExpressions);
+				$dimensionFilterClauseDate = new Google_Service_AnalyticsReporting_DimensionFilterClause();
+				$dimensionFilterClauseDate->setFilters(array($dimensionFilterDate));
+				array_push($arrDimensionsFilterClauses, $dimensionFilterClauseDate);
+			} else {
+				$yesterdayDate = date("Y-m-d", strtotime("-1 day"));
+				$arrExpressionsYestedday = array();
+				array_push($arrExpressionsYestedday, array("^".$yesterdayDate.""));
+				$dimensionFilterYesterdayDate = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+				$dimensionFilterYesterdayDate->setDimensionName("ga:dimension4");
+				$dimensionFilterYesterdayDate->setOperator("REGEXP");
+				$dimensionFilterYesterdayDate->setExpressions($arrExpressionsYestedday);
+				$dimensionFilterClauseYesterdayDate = new Google_Service_AnalyticsReporting_DimensionFilterClause();
+				$dimensionFilterClauseYesterdayDate->setFilters(array($dimensionFilterYesterdayDate));
+				
+				$arrExpressions = array();
+				array_push($arrExpressions, array("^".$todayDate.""));
+				$dimensionFilterDate = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+				$dimensionFilterDate->setDimensionName("ga:dimension4");
+				$dimensionFilterDate->setOperator("REGEXP");
+				$dimensionFilterDate->setExpressions($arrExpressions);
+				$dimensionFilterClauseDate = new Google_Service_AnalyticsReporting_DimensionFilterClause();
+				$dimensionFilterClauseDate->setFilters([$dimensionFilterYesterdayDate, $dimensionFilterDate]);
+				$dimensionFilterClauseDate->setOperator( 'or' );
+				array_push($arrDimensionsFilterClauses, $dimensionFilterClauseDate);
+			}	
+			
+			$ordering = new Google_Service_AnalyticsReporting_OrderBy();
+			$ordering->setFieldName("ga:pageviews");
+			$ordering->setOrderType("VALUE");   
+			$ordering->setSortOrder("DESCENDING");
+			
+			// Create the ReportRequest object.
+			$request = new Google_Service_AnalyticsReporting_ReportRequest();
+			$request->setViewId($this->viewId);
+			$request->setDateRanges($dateRange);
+			$request->setPageSize(100);
+			$request->setDimensions(array($id));
+			$request->setMetrics(array($pageviews));
+			$request->setDimensionFilterClauses($arrDimensionsFilterClauses);
+			$request->setOrderBys($ordering);
+
+			$body = new Google_Service_AnalyticsReporting_GetReportsRequest();
+			$body->setReportRequests( array( $request) );
+			$analytic = $this->analytics->reports->batchGet( $body );
+			$analytic['status'] = 1;
+		} catch (Exception $e) {
+			$errRespond = json_decode($e->getMessage(),TRUE);
+			$analytic['code'] = isset($errRespond['error']['code'])?$errRespond['error']['code']:"";
+			$analytic['message'] = isset($errRespond['error']['message'])?$errRespond['error']['message']:"";			
+			$analytic['status'] = 0;			
+		}
+		
+		return $analytic;
+	}
+	
+	public function getResultTopArticleTribunnewsWiki($reports) {
+		$arrArticle = array();
+		$arrIdArticle = array();
+		
+		if(count($reports) > 0){
+			foreach($reports as $k_report => $report){
+				$rows = $report->getData()->getRows();
+				
+				$idx = 0;
+				foreach($rows as $k_row => $row){
+					$id = isset($row->dimensions[0])?(int) $row->dimensions[0]:"";
+					
+					$metrics = $row->getMetrics();
+					$pageviews = isset($metrics[0]['values'][0])?$metrics[0]['values'][0]:0;
+					
+					if(@!in_array($arrIdArticle,$id)){
+						$arrArticle[$idx]['id'] = $id;
+						$arrArticle[$idx]['pageviews'] = $pageviews;
+						array_push($arrIdArticle,$id);
+						$idx++;
+					}
+					
+				} 
+			}
+		}
+		
+		return $arrArticle;
+		//return $arrIdArticle;
+	}
+	
+	public function getReportTopTagTribunnewsWiki() {
+		$analytic = array();
+		$todayDate = date("Y-m-d");
+		$yesteddayDate = strtotime('-1 day', strtotime($todayDate));
+		
+		try {
+			$dateRange = new Google_Service_AnalyticsReporting_DateRange();
+			$hoursNow = date('G');
+			if($hoursNow > 10){
+				$dateRange->setStartDate("today");
+			} else {
+				$dateRange->setStartDate("1daysAgo");
+			}		
+			$dateRange->setEndDate("today");
+			
+			$pageviews = new Google_Service_AnalyticsReporting_Metric();
+			$pageviews->setExpression("ga:pageviews");
+			$pageviews->setAlias("Pageviews");
+			
+			// Create the dimension object.
+			$contenttag = new Google_Service_AnalyticsReporting_Dimension();
+			$contenttag->setName("ga:dimension15");
+			
+			$contentsection = new Google_Service_AnalyticsReporting_Dimension();
+			$contentsection->setName("ga:dimension7");
+			
+			$arrDimensionsFilterClauses = array();
+			
+			$dimensionFilterTitle = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+			$dimensionFilterTitle->setDimensionName("ga:dimension6");
+			$dimensionFilterTitle->setOperator("REGEXP");
+			$dimensionFilterTitle->setExpressions(array(".*[?!halaman|?!topik|?!page|?!page]$"));
+			$dimensionFilterClauseTitle= new Google_Service_AnalyticsReporting_DimensionFilterClause();
+			$dimensionFilterClauseTitle->setFilters(array($dimensionFilterTitle));
+			array_push($arrDimensionsFilterClauses, $dimensionFilterClauseTitle);
+			
+			$dimensionFilterDomain = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+			$dimensionFilterDomain->setDimensionName("ga:dimension5");
+			$dimensionFilterDomain->setOperator("EXACT");
+			$dimensionFilterDomain->setExpressions(array("tribunnewswiki"));
+			$dimensionFilterClauseDomain = new Google_Service_AnalyticsReporting_DimensionFilterClause();
+			$dimensionFilterClauseDomain->setFilters(array($dimensionFilterDomain));
+			array_push($arrDimensionsFilterClauses, $dimensionFilterClauseDomain);
+			
+			//filter publish date
+			if($hoursNow > 10){
+				$arrExpressions = array();
+				array_push($arrExpressions, array("^".$todayDate.""));
+				$dimensionFilterDate = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+				$dimensionFilterDate->setDimensionName("ga:dimension4");
+				$dimensionFilterDate->setOperator("REGEXP");
+				$dimensionFilterDate->setExpressions($arrExpressions);
+				$dimensionFilterClauseDate = new Google_Service_AnalyticsReporting_DimensionFilterClause();
+				$dimensionFilterClauseDate->setFilters(array($dimensionFilterDate));
+				array_push($arrDimensionsFilterClauses, $dimensionFilterClauseDate);
+			} else {
+				$yesterdayDate = date("Y-m-d", strtotime("-1 day"));
+				$arrExpressionsYestedday = array();
+				array_push($arrExpressionsYestedday, array("^".$yesterdayDate.""));
+				$dimensionFilterYesterdayDate = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+				$dimensionFilterYesterdayDate->setDimensionName("ga:dimension4");
+				$dimensionFilterYesterdayDate->setOperator("REGEXP");
+				$dimensionFilterYesterdayDate->setExpressions($arrExpressionsYestedday);
+				$dimensionFilterClauseYesterdayDate = new Google_Service_AnalyticsReporting_DimensionFilterClause();
+				$dimensionFilterClauseYesterdayDate->setFilters(array($dimensionFilterYesterdayDate));
+				
+				$arrExpressions = array();
+				array_push($arrExpressions, array("^".$todayDate.""));
+				$dimensionFilterDate = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+				$dimensionFilterDate->setDimensionName("ga:dimension4");
+				$dimensionFilterDate->setOperator("REGEXP");
+				$dimensionFilterDate->setExpressions($arrExpressions);
+				$dimensionFilterClauseDate = new Google_Service_AnalyticsReporting_DimensionFilterClause();
+				$dimensionFilterClauseDate->setFilters([$dimensionFilterYesterdayDate, $dimensionFilterDate]);
+				$dimensionFilterClauseDate->setOperator( 'or' );
+				array_push($arrDimensionsFilterClauses, $dimensionFilterClauseDate);
+			}
+			
+			$ordering = new Google_Service_AnalyticsReporting_OrderBy();
+			$ordering->setFieldName("ga:pageviews");
+			$ordering->setOrderType("VALUE");   
+			$ordering->setSortOrder("DESCENDING");
+
+			// Create the ReportRequest object.
+			$request = new Google_Service_AnalyticsReporting_ReportRequest();
+			$request->setViewId($this->viewId);
+			$request->setDateRanges($dateRange);
+			$request->setPageSize(100); 
+			$request->setDimensions(array($contenttag,$contentsection));
+			$request->setMetrics(array($pageviews));
+			$request->setDimensionFilterClauses($arrDimensionsFilterClauses);
+			$request->setOrderBys($ordering);
+
+			$body = new Google_Service_AnalyticsReporting_GetReportsRequest();
+			$body->setReportRequests( array( $request) );
+			$analytic = $this->analytics->reports->batchGet( $body );
+			$analytic['status'] = 1;
+		} catch (Exception $e) {
+			$errRespond = json_decode($e->getMessage(),TRUE);
+			$analytic['code'] = isset($errRespond['error']['code'])?$errRespond['error']['code']:"";
+			$analytic['message'] = isset($errRespond['error']['message'])?$errRespond['error']['message']:"";			
+			$analytic['status'] = 0;			
+		}
+		
+		return $analytic;
+	}
+	
+	public function printResultTopTagTribunnewsWiki($reports) {
+		$arrTag = array();
+		$arrTagDetail = array();
+		$arrTagUnique = array();
+		$arrTagBlock = array("Chord kunci gitar","Chord gitar lagu");
+		
+		$arrTagSection = array();
+		
+		if(count($reports) > 0){
+			foreach($reports as $k_report => $report){
+				$rows = $report->getData()->getRows();
+				
+				foreach($rows as $k_row => $row){
+					$contenttag = isset($row->dimensions[0])?$row->dimensions[0]:"";
+					$contentsection = isset($row->dimensions[1])?$row->dimensions[1]:"";
+
+					$arrContentTag = explode(",",$contenttag);
+		
+					$section_ga = $this->url_title(end($arrContentTag));
+					
+					//Taketout Subcategory & category in Tag
+					if(count($arrContentTag) > 0){
+						array_splice($arrContentTag, (count($arrContentTag)-2), 2);
+
+						//Taketout Content Topic in Tag
+						if(!empty($contentsection)){ 
+							array_splice($arrContentTag, 0, 1);
+						}
+
+						$arrTaDetailSection = array();
+						foreach($arrContentTag as $key => $tag){
+							//echo $section_ga." - ".$key." = ".$tag."<br>";
+							$tag = trim($tag);
+							$lengthtag = strlen($tag);
+							$tag_alias = $this->url_title($tag);
+							if(!empty($tag) && $lengthtag < 40 && !in_array($tag,$arrTagBlock)){
+								array_push($arrTagDetail,$tag);
+								array_push($arrTaDetailSection,$tag); 
+							}
+						}
+						
+						if(!empty($section_ga)){ 
+							$stat = $this->array_search_key_exists($section_ga, 'section', $arrTagSection);
+							if(!$stat){
+								$arrTagSection[$k_row]['section'] = $section_ga;
+								$arrTagSection[$k_row]['tag'] = $arrTaDetailSection;
+							} else {
+								$found_idx = $this->array_search_key_exists($section_ga, 'section', $arrTagSection, true);
+								$arrTagDetailSectionOld = $arrTagSection[$found_idx]['tag'];
+								$arrTagDetailSectionCombine = array_merge($arrTagDetailSectionOld, $arrTaDetailSection);
+								$arrTagSection[$found_idx]['tag'] = $arrTagDetailSectionCombine;
+							}
+						}	
+					} 
+				}
+				
+
+				$arrTagFilter = array();
+				if(count($arrTagDetail) > 0){
+					$arrTagDetail = array_count_values($arrTagDetail);
+					arsort($arrTagDetail);
+					
+					foreach($arrTagDetail as $tag => $total){
+						array_push($arrTagFilter,$tag);
+					}
+				}
+				
+				if(count($arrTagFilter) > 0){
+					$arrResultTag = array_unique($arrTagFilter);
+					foreach($arrResultTag as $tag){
+						array_push($arrTagUnique,$tag);
+					}
+					$arrTagUnique = array_slice($arrTagUnique, 0, 40);
+				}
+
+				if(count($arrTagSection) > 0){
+					foreach($arrTagSection as $idx => $arrSection){
+						$arrTagDetailSection = isset($arrSection['tag'])?$arrSection['tag']:array();
+						
+						$arrTagFilterSection = array();
+						if(count($arrTagDetailSection) > 0){
+							$arrTagDetailSection = array_count_values($arrTagDetailSection);
+							arsort($arrTagDetailSection);
+							
+							foreach($arrTagDetailSection as $tag => $total){
+								array_push($arrTagFilterSection,$tag);
+							}
+						}
+						
+						$arrTagUniqueSection = array();
+						if(count($arrTagFilterSection) > 0){
+							$arrResultTag = array_unique($arrTagFilterSection);
+							foreach($arrResultTag as $tag){
+								array_push($arrTagUniqueSection,$tag);
+							}
+							$arrTagUniqueSection = array_slice($arrTagUniqueSection, 0, 10);
+						}
+						
+						if(count($arrTagUniqueSection) > 0){
+							$arrTagSection[$idx]['tag'] = $arrTagUniqueSection;
+						}
+					}
+					
+					$arrTagSection = array_values($arrTagSection);
+				}
+		
+			} 
+
+			$arrTag['tag'] = $arrTagUnique;
+			$arrTag['section'] = 'home';
+		}
+		
+		if(count($arrTagSection) > 0 && count($arrTag) > 0){
+			array_unshift($arrTagSection,$arrTag);
+		}
+		
+		return $arrTagSection;
+	}
+	
+	public function getTopIklanTribunjualbeli() { 
+		$analytic = array();
+		$todayMonth = date("Y-m");
+		$lastMonth = date("Y-m",strtotime("-1 month"));;
+		$hoursNow = date('G');
+		
+		try {
+			$dateRange = new Google_Service_AnalyticsReporting_DateRange();
+			if($hoursNow > 10){
+				$dateRange->setStartDate("1daysAgo");
+				$dateRange->setEndDate("today");
+			} else {
+				$dateRange->setStartDate("2daysAgo");
+				$dateRange->setEndDate("today");
+			}
+			
+			$pageviews = new Google_Service_AnalyticsReporting_Metric();
+			$pageviews->setExpression("ga:pageviews");
+			$pageviews->setAlias("Pageviews");
+			
+			// Create the dimension object.
+			$id = new Google_Service_AnalyticsReporting_Dimension();
+			$id->setName("ga:dimension13");
+			
+			$title = new Google_Service_AnalyticsReporting_Dimension();
+			$title->setName("ga:dimension6");
+			
+			$section = new Google_Service_AnalyticsReporting_Dimension();
+			$section->setName("ga:dimension7");
+			
+			$content_category = new Google_Service_AnalyticsReporting_Dimension();
+			$content_category->setName("ga:dimension14");
+			
+			$content_subcategory = new Google_Service_AnalyticsReporting_Dimension();
+			$content_subcategory->setName("ga:dimension9");
+			
+			$publish_date = new Google_Service_AnalyticsReporting_Dimension();
+			$publish_date->setName("ga:dimension4");
+			
+			$arrDimensionsFilterClauses = array();
+			
+			$dimensionFilter = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+			$dimensionFilter->setDimensionName("ga:dimension5");
+			$dimensionFilter->setOperator("EXACT");
+			$dimensionFilter->setExpressions(array("$this->website"));
+			$dimensionFilterClause = new Google_Service_AnalyticsReporting_DimensionFilterClause();
+			$dimensionFilterClause->setFilters(array($dimensionFilter));
+			array_push($arrDimensionsFilterClauses, $dimensionFilterClause);
+			
+			$arrExpressionsLastMonth = array();
+			array_push($arrExpressionsLastMonth, array("^".$lastMonth.""));
+			$dimensionFilterLastMonth = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+			$dimensionFilterLastMonth->setDimensionName("ga:dimension4");
+			$dimensionFilterLastMonth->setOperator("REGEXP");
+			$dimensionFilterLastMonth->setExpressions($arrExpressionsLastMonth);
+	
+			$arrExpressionsTodayMonth = array();
+			array_push($arrExpressionsTodayMonth, array("^".$todayMonth.""));
+			$dimensionFilterTodayMonth = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+			$dimensionFilterTodayMonth->setDimensionName("ga:dimension4");
+			$dimensionFilterTodayMonth->setOperator("REGEXP");
+			$dimensionFilterTodayMonth->setExpressions($arrExpressionsTodayMonth);
+			$dimensionFilterClauseTodayMonth = new Google_Service_AnalyticsReporting_DimensionFilterClause();
+			$dimensionFilterClauseTodayMonth->setFilters([$dimensionFilterTodayMonth, $dimensionFilterLastMonth]);
+			$dimensionFilterClauseTodayMonth->setOperator( 'or' );
+			array_push($arrDimensionsFilterClauses, $dimensionFilterClauseTodayMonth);
+			
+			$ordering = new Google_Service_AnalyticsReporting_OrderBy();
+			$ordering->setFieldName("ga:pageviews");
+			$ordering->setOrderType("VALUE");   
+			$ordering->setSortOrder("DESCENDING");
+			
+			// Create the ReportRequest object.
+			$request = new Google_Service_AnalyticsReporting_ReportRequest();
+			$request->setViewId($this->viewId);
+			$request->setDateRanges($dateRange);
+			$request->setPageSize(150);
+			$request->setDimensions(array($id,$title,$section,$content_category,$content_subcategory,$publish_date));
+			$request->setMetrics(array($pageviews));
+			$request->setDimensionFilterClauses($arrDimensionsFilterClauses);
+			$request->setOrderBys($ordering);
+
+			$body = new Google_Service_AnalyticsReporting_GetReportsRequest();
+			$body->setReportRequests( array( $request) );
+			$analytic = $this->analytics->reports->batchGet( $body );
+			$analytic['status'] = 1;
+		} catch (Exception $e) {
+			$errRespond = json_decode($e->getMessage(),TRUE);
+			$analytic['code'] = isset($errRespond['error']['code'])?$errRespond['error']['code']:"";
+			$analytic['message'] = isset($errRespond['error']['message'])?$errRespond['error']['message']:"";			
+			$analytic['status'] = 0;			
+		}
+		
+		return $analytic;
+	}
+	
+	
+	public function getResultTopIklanTribunjualbeli($reports) {
+		$arrArticle = array();
+		$arrIdArticle = array();
+		
+		if(count($reports) > 0){
+			foreach($reports as $k_report => $report){
+				$rows = $report->getData()->getRows();
+				
+				$idx = 0;
+				foreach($rows as $k_row => $row){
+					$id = isset($row->dimensions[0])?(int) $row->dimensions[0]:"";
+					$title = isset($row->dimensions[1])? $row->dimensions[1]:"";
+					$province = isset($row->dimensions[2])? $row->dimensions[2]:"";
+					$content_category = isset($row->dimensions[3])? $row->dimensions[3]:"";
+					$content_subcategory = isset($row->dimensions[4])? $row->dimensions[4]:"";
+					$publish_date = isset($row->dimensions[5])? $row->dimensions[5]:"";
+					$url_detail = "https://www.tribunjualbeli.com/".$province."/".$id."/".$this->url_title($title);
+					
+					$metrics = $row->getMetrics();
+					$pageviews = isset($metrics[0]['values'][0])?$metrics[0]['values'][0]:0;
+					
+					if(@!in_array($arrIdArticle,$id)){
+						$arrArticle[$idx]['id'] = $id;
+						$arrArticle[$idx]['title'] = $title;
+						$arrArticle[$idx]['province'] = $province;
+						$arrArticle[$idx]['category'] = $content_category;
+						$arrArticle[$idx]['subcategory'] = $content_subcategory;
+						$arrArticle[$idx]['publish_date'] = $publish_date;
+						$arrArticle[$idx]['url'] = $url_detail;
+						$arrArticle[$idx]['pageviews'] = $pageviews;
+						array_push($arrIdArticle,$id);
+						$idx++;
+					}
+					
+				} 
+			}
+		}
+		
+		return $arrArticle;
+		//return $arrIdArticle;
+	}
+	
+	public function getTopCategoryIklanTribunjualbeli($iscategory=1) { 
+		$analytic = array();
+		$todayMonth = date("Y-m");
+		$lastMonth = date("Y-m",strtotime("-1 month"));;
+		$hoursNow = date('G');
+		
+		try {
+			$dateRange = new Google_Service_AnalyticsReporting_DateRange();
+			if($hoursNow > 10){
+				$dateRange->setStartDate("1daysAgo");
+				$dateRange->setEndDate("today");
+			} else {
+				$dateRange->setStartDate("3daysAgo");
+				$dateRange->setEndDate("today");
+			}
+			
+			$pageviews = new Google_Service_AnalyticsReporting_Metric();
+			$pageviews->setExpression("ga:pageviews");
+			$pageviews->setAlias("Pageviews");
+			
+			// Create the dimension object.
+			if($iscategory == 1){
+				$category = new Google_Service_AnalyticsReporting_Dimension();
+				$category->setName("ga:dimension14");
+			} else {
+				$sub_category = new Google_Service_AnalyticsReporting_Dimension();
+				$sub_category->setName("ga:dimension9");
+			}
+			
+			$arrDimensionsFilterClauses = array();
+			$dimensionFilter = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+			$dimensionFilter->setDimensionName("ga:dimension5");
+			$dimensionFilter->setOperator("EXACT");
+			$dimensionFilter->setExpressions(array("$this->website"));
+			$dimensionFilterClause = new Google_Service_AnalyticsReporting_DimensionFilterClause();
+			$dimensionFilterClause->setFilters(array($dimensionFilter));
+			array_push($arrDimensionsFilterClauses, $dimensionFilterClause);
+			
+			$arrExpressionsLastMonth = array();
+			array_push($arrExpressionsLastMonth, array("^".$lastMonth.""));
+			$dimensionFilterLastMonth = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+			$dimensionFilterLastMonth->setDimensionName("ga:dimension4");
+			$dimensionFilterLastMonth->setOperator("REGEXP");
+			$dimensionFilterLastMonth->setExpressions($arrExpressionsLastMonth);
+	
+			$arrExpressionsTodayMonth = array();
+			array_push($arrExpressionsTodayMonth, array("^".$todayMonth.""));
+			$dimensionFilterTodayMonth = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+			$dimensionFilterTodayMonth->setDimensionName("ga:dimension4");
+			$dimensionFilterTodayMonth->setOperator("REGEXP");
+			$dimensionFilterTodayMonth->setExpressions($arrExpressionsTodayMonth);
+			$dimensionFilterClauseTodayMonth = new Google_Service_AnalyticsReporting_DimensionFilterClause();
+			$dimensionFilterClauseTodayMonth->setFilters([$dimensionFilterTodayMonth, $dimensionFilterLastMonth]);
+			$dimensionFilterClauseTodayMonth->setOperator( 'or' );
+			array_push($arrDimensionsFilterClauses, $dimensionFilterClauseTodayMonth);
+			
+			$ordering = new Google_Service_AnalyticsReporting_OrderBy();
+			$ordering->setFieldName("ga:pageviews");
+			$ordering->setOrderType("VALUE");   
+			$ordering->setSortOrder("DESCENDING");
+			
+			// Create the ReportRequest object.
+			$request = new Google_Service_AnalyticsReporting_ReportRequest();
+			$request->setViewId($this->viewId);
+			$request->setDateRanges($dateRange);
+			$request->setPageSize(50);
+			if($iscategory == 1){
+				$request->setDimensions(array($category));
+			} else {
+				$request->setDimensions(array($sub_category));
+			}
+			$request->setMetrics(array($pageviews));
+			$request->setDimensionFilterClauses($arrDimensionsFilterClauses);
+			$request->setOrderBys($ordering);
+
+			$body = new Google_Service_AnalyticsReporting_GetReportsRequest();
+			$body->setReportRequests( array( $request) );
+			$analytic = $this->analytics->reports->batchGet( $body );
+			$analytic['status'] = 1;
+		} catch (Exception $e) {
+			$errRespond = json_decode($e->getMessage(),TRUE);
+			$analytic['code'] = isset($errRespond['error']['code'])?$errRespond['error']['code']:"";
+			$analytic['message'] = isset($errRespond['error']['message'])?$errRespond['error']['message']:"";			
+			$analytic['status'] = 0;			
+		}
+		
+		return $analytic;
+	}
+	
+	
+	public function getResultTopCategoryIklanTribunjualbeli($reports,$iscategory) {
+		$arrArticle = array();
+
+		if(count($reports) > 0){
+			foreach($reports as $k_report => $report){
+				$rows = $report->getData()->getRows();
+				
+				$idx = 0;
+				foreach($rows as $k_row => $row){
+					$content = isset($row->dimensions[0])? $row->dimensions[0]:"";
+					
+					$metrics = $row->getMetrics();
+					$pageviews = isset($metrics[0]['values'][0])?$metrics[0]['values'][0]:0;
+
+					if(@!in_array($arrIdArticle,$id)){
+						if($iscategory == 1){
+							$arrArticle[$idx]['category'] = $content;
+						} else {
+							$arrArticle[$idx]['sub_category'] = $content;
+						}
+						$arrArticle[$idx]['pageviews'] = $pageviews;;
+						$idx++;
+					}
+					
+				} 
+			}
+		}
+		
+		return $arrArticle;
+	}
+	
+	public function getTopBlogTribunjualbeli() { 
+		$analytic = array();
+		$todayDate = date("Y-m-d");
+		$hoursNow = date('G');
+		
+		try {
+			$dateRange = new Google_Service_AnalyticsReporting_DateRange();
+			$hoursNow = date('G');
+			if($hoursNow > 9){
+				$dateRange->setStartDate("today");
+			} else {
+				$dateRange->setStartDate("1daysAgo");
+			}
+			$dateRange->setEndDate("today");
+			
+			$pageviews = new Google_Service_AnalyticsReporting_Metric();
+			$pageviews->setExpression("ga:pageviews");
+			$pageviews->setAlias("Pageviews");
+			
+			// Create the dimension object.
+			$id = new Google_Service_AnalyticsReporting_Dimension();
+			$id->setName("ga:dimension13");
+			
+			$title = new Google_Service_AnalyticsReporting_Dimension();
+			$title->setName("ga:dimension6");
+			
+			$section = new Google_Service_AnalyticsReporting_Dimension();
+			$section->setName("ga:dimension7");
+			
+			$publish_date = new Google_Service_AnalyticsReporting_Dimension();
+			$publish_date->setName("ga:dimension4");
+			
+			$arrDimensionsFilterClauses = array();
+			
+			$dimensionFilter = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+			$dimensionFilter->setDimensionName("ga:dimension5");
+			$dimensionFilter->setOperator("EXACT");
+			$dimensionFilter->setExpressions(array("$this->website"));
+			$dimensionFilterClause = new Google_Service_AnalyticsReporting_DimensionFilterClause();
+			$dimensionFilterClause->setFilters(array($dimensionFilter));
+			array_push($arrDimensionsFilterClauses, $dimensionFilterClause);
+			
+			/* $dimensionFilterTitle = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+			$dimensionFilterTitle->setDimensionName("ga:dimension6");
+			$dimensionFilterTitle->setOperator("REGEXP");
+			$dimensionFilterTitle->setExpressions(array(".*[?!halaman|?!halaman|?!topik|?!page|?!page]$"));
+			$dimensionFilterClauseTitle= new Google_Service_AnalyticsReporting_DimensionFilterClause();
+			$dimensionFilterClauseTitle->setFilters(array($dimensionFilterTitle));
+			array_push($arrDimensionsFilterClauses, $dimensionFilterClauseTitle); */
+			
+			//filter publish date
+			if($hoursNow > 9){
+				$arrExpressions = array();
+				array_push($arrExpressions, array("^".$todayDate.""));
+				$dimensionFilterDate = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+				$dimensionFilterDate->setDimensionName("ga:dimension4");
+				$dimensionFilterDate->setOperator("REGEXP");
+				$dimensionFilterDate->setExpressions($arrExpressions);
+				$dimensionFilterClauseDate = new Google_Service_AnalyticsReporting_DimensionFilterClause();
+				$dimensionFilterClauseDate->setFilters(array($dimensionFilterDate));
+				array_push($arrDimensionsFilterClauses, $dimensionFilterClauseDate);
+			} else {
+				$yesterdayDate = date("Y-m-d", strtotime("-1 day"));
+				$arrExpressionsYestedday = array();
+				array_push($arrExpressionsYestedday, array("^".$yesterdayDate.""));
+				$dimensionFilterYesterdayDate = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+				$dimensionFilterYesterdayDate->setDimensionName("ga:dimension4");
+				$dimensionFilterYesterdayDate->setOperator("REGEXP");
+				$dimensionFilterYesterdayDate->setExpressions($arrExpressionsYestedday);
+				
+				$arrExpressions = array();
+				array_push($arrExpressions, array("^".$todayDate.""));
+				$dimensionFilterDate = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+				$dimensionFilterDate->setDimensionName("ga:dimension4");
+				$dimensionFilterDate->setOperator("REGEXP");
+				$dimensionFilterDate->setExpressions($arrExpressions);
+				$dimensionFilterClauseDate = new Google_Service_AnalyticsReporting_DimensionFilterClause();
+				$dimensionFilterClauseDate->setFilters([$dimensionFilterYesterdayDate, $dimensionFilterDate]);
+				$dimensionFilterClauseDate->setOperator( 'or' );
+				array_push($arrDimensionsFilterClauses, $dimensionFilterClauseDate);
+			} 	
+			
+			$ordering = new Google_Service_AnalyticsReporting_OrderBy();
+			$ordering->setFieldName("ga:pageviews");
+			$ordering->setOrderType("VALUE");   
+			$ordering->setSortOrder("DESCENDING");
+			
+			// Create the ReportRequest object.
+			$request = new Google_Service_AnalyticsReporting_ReportRequest();
+			$request->setViewId($this->viewId);
+			$request->setDateRanges($dateRange);
+			$request->setPageSize(100);
+			$request->setDimensions(array($id,$title,$section,$publish_date));
+			$request->setMetrics(array($pageviews));
+			$request->setDimensionFilterClauses($arrDimensionsFilterClauses);
+			$request->setOrderBys($ordering);
+
+			$body = new Google_Service_AnalyticsReporting_GetReportsRequest();
+			$body->setReportRequests( array( $request) );
+			$analytic = $this->analytics->reports->batchGet( $body );
+			$analytic['status'] = 1;
+		} catch (Exception $e) {
+			$errRespond = json_decode($e->getMessage(),TRUE);
+			$analytic['code'] = isset($errRespond['error']['code'])?$errRespond['error']['code']:"";
+			$analytic['message'] = isset($errRespond['error']['message'])?$errRespond['error']['message']:"";			
+			$analytic['status'] = 0;			
+		}
+		
+		return $analytic;
+	}
+	
+	public function getResultTopBlogTribunjualbeli($reports) {
+		$arrArticle = array();
+		$arrIdArticle = array();
+		
+		if(count($reports) > 0){
+			foreach($reports as $k_report => $report){
+				$rows = $report->getData()->getRows();
+				
+				$idx = 0;
+				foreach($rows as $k_row => $row){
+					$id = isset($row->dimensions[0])?(int) $row->dimensions[0]:"";
+					$title = isset($row->dimensions[1])? $row->dimensions[1]:"";
+					$section = isset($row->dimensions[2])? $row->dimensions[2]:"";
+					$publish_date = isset($row->dimensions[3])? $row->dimensions[3]:"";
+					$url_detail = "https://blog.tribunjualbeli.com/".$id."/".$this->url_title($title);
+					
+					$metrics = $row->getMetrics();
+					$pageviews = isset($metrics[0]['values'][0])?$metrics[0]['values'][0]:0;
+					
+					if(@!in_array($arrIdArticle,$id)){
+						$arrArticle[$idx]['id'] = $id;
+						$arrArticle[$idx]['title'] = $title;
+						$arrArticle[$idx]['section'] = $section;
+						$arrArticle[$idx]['publish_date'] = $publish_date;
+						$arrArticle[$idx]['url'] = $url_detail;
+						$arrArticle[$idx]['pageviews'] = $pageviews;
+						array_push($arrIdArticle,$id);
+						$idx++;
+					}
+					
+				} 
+			}
+		}
+		
+		return $arrArticle;
+		//return $arrIdArticle;
+	}
+	
+	public function getReportTopTopicArticle($strTopic="MotoGP Mandalika") {
+		$analytic = array();
+		$todayDate = date("Y-m-d");
+		$yesterdayDate = date("Y-m-d", strtotime("-1 day"));
+		$hoursNow = date('G');
+		
+		try {
+			$dateRange = new Google_Service_AnalyticsReporting_DateRange();
+
+			if($hoursNow < 16){
+				$dateRange->setStartDate("yesterday");
+				$dateRange->setEndDate("today");
+			} else {
+				$dateRange->setStartDate("today");
+				$dateRange->setEndDate("today");
+			}
+			
+			$pageviews = new Google_Service_AnalyticsReporting_Metric();
+			$pageviews->setExpression("ga:pageviews");
+			$pageviews->setAlias("Pageviews");
+			
+			// Create the dimension object.
+			$id = new Google_Service_AnalyticsReporting_Dimension();
+			$id->setName("ga:dimension13");
+			
+			$domain = new Google_Service_AnalyticsReporting_Dimension();
+			$domain->setName("ga:dimension5");
+			
+			$arrDimensionsFilterClauses = array();
+			
+			/* if(!empty($this->website) && $this->website != "all"){
+				$dimensionFilter = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+				$dimensionFilter->setDimensionName("ga:dimension5");
+				$dimensionFilter->setOperator("EXACT");
+				$dimensionFilter->setExpressions(array("$this->website"));
+				$dimensionFilterClause = new Google_Service_AnalyticsReporting_DimensionFilterClause();
+				$dimensionFilterClause->setFilters(array($dimensionFilter));
+				array_push($arrDimensionsFilterClauses, $dimensionFilterClause);
+			} */
+			
+			$dimensionFilterTitle = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+			$dimensionFilterTitle->setDimensionName("ga:dimension6");
+			$dimensionFilterTitle->setOperator("REGEXP");
+			$dimensionFilterTitle->setExpressions(array(".*[?!halaman|?!topik|?!page|?!page]$"));
+			$dimensionFilterClauseTitle= new Google_Service_AnalyticsReporting_DimensionFilterClause();
+			$dimensionFilterClauseTitle->setFilters(array($dimensionFilterTitle));
+			array_push($arrDimensionsFilterClauses, $dimensionFilterClauseTitle);
+			
+			if(!empty($strTopic)){
+				$dimensionFilterSection = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+				$dimensionFilterSection->setDimensionName("ga:dimension22");
+				$dimensionFilterSection->setOperator("EXACT");
+				$dimensionFilterSection->setExpressions(array("$strTopic"));
+				$dimensionFilterClauseSection = new Google_Service_AnalyticsReporting_DimensionFilterClause();
+				$dimensionFilterClauseSection->setFilters(array($dimensionFilterSection));
+				array_push($arrDimensionsFilterClauses, $dimensionFilterClauseSection);
+			}
+			
+			//filter publish date
+			/* if($hoursNow < 16){
+				$yesterdayDate = date("Y-m-d", strtotime("-1 day"));
+				$arrExpressionsYestedday = array();
+				array_push($arrExpressionsYestedday, array("^".$yesterdayDate.""));
+				$dimensionFilterYesterdayDate = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+				$dimensionFilterYesterdayDate->setDimensionName("ga:dimension4");
+				$dimensionFilterYesterdayDate->setOperator("REGEXP");
+				$dimensionFilterYesterdayDate->setExpressions($arrExpressionsYestedday);
+				$dimensionFilterClauseYesterdayDate = new Google_Service_AnalyticsReporting_DimensionFilterClause();
+				$dimensionFilterClauseYesterdayDate->setFilters(array($dimensionFilterYesterdayDate));
+				
+				$arrExpressions = array();
+				array_push($arrExpressions, array("^".$todayDate.""));
+				$dimensionFilterDate = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+				$dimensionFilterDate->setDimensionName("ga:dimension4");
+				$dimensionFilterDate->setOperator("REGEXP");
+				$dimensionFilterDate->setExpressions($arrExpressions);
+				$dimensionFilterClauseDate = new Google_Service_AnalyticsReporting_DimensionFilterClause();
+				$dimensionFilterClauseDate->setFilters([$dimensionFilterYesterdayDate, $dimensionFilterDate]);
+				$dimensionFilterClauseDate->setOperator( 'or' );
+				array_push($arrDimensionsFilterClauses, $dimensionFilterClauseDate);
+			} else {	
+				$todayDate = date("Y-m-d");
+				$arrExpressions = array();
+				array_push($arrExpressions, array("^".$todayDate.""));
+				$dimensionFilterDate = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+				$dimensionFilterDate->setDimensionName("ga:dimension4");
+				$dimensionFilterDate->setOperator("REGEXP");
+				$dimensionFilterDate->setExpressions($arrExpressions);
+				$dimensionFilterClauseDate = new Google_Service_AnalyticsReporting_DimensionFilterClause();
+				$dimensionFilterClauseDate->setFilters(array($dimensionFilterDate));
+				array_push($arrDimensionsFilterClauses, $dimensionFilterClauseDate);
+			} */
+			
+			/* $todayDate = date("Y-m-d");
+			$arrExpressions = array();
+			array_push($arrExpressions, array("^".$todayDate.""));
+			$dimensionFilterDate = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+			$dimensionFilterDate->setDimensionName("ga:dimension4");
+			$dimensionFilterDate->setOperator("REGEXP");
+			$dimensionFilterDate->setExpressions($arrExpressions);
+			$dimensionFilterClauseDate = new Google_Service_AnalyticsReporting_DimensionFilterClause();
+			$dimensionFilterClauseDate->setFilters(array($dimensionFilterDate));
+			array_push($arrDimensionsFilterClauses, $dimensionFilterClauseDate); */
+			
+			$ordering = new Google_Service_AnalyticsReporting_OrderBy();
+			$ordering->setFieldName("ga:pageviews");
+			$ordering->setOrderType("VALUE");   
+			$ordering->setSortOrder("DESCENDING");
+
+			// Create the ReportRequest object.
+			$request = new Google_Service_AnalyticsReporting_ReportRequest();
+			$request->setViewId($this->viewId);
+			$request->setDateRanges($dateRange);
+			if($hoursNow < 16){
+				$request->setPageSize(200); 
+			} else {	
+				$request->setPageSize(150); 
+			}
+			$request->setDimensions(array($id,$domain));
+			$request->setMetrics(array($pageviews));
+			$request->setDimensionFilterClauses($arrDimensionsFilterClauses);
+			$request->setOrderBys($ordering);
+
+			$body = new Google_Service_AnalyticsReporting_GetReportsRequest();
+			$body->setReportRequests( array( $request) );
+			$analytic = $this->analytics->reports->batchGet( $body );
+			$analytic['status'] = 1;
+		} catch (Exception $e) {
+			$errRespond = json_decode($e->getMessage(),TRUE);
+			$analytic['code'] = isset($errRespond['error']['code'])?$errRespond['error']['code']:"";
+			$analytic['message'] = isset($errRespond['error']['message'])?$errRespond['error']['message']:"";			
+			$analytic['status'] = 0;			
+		}
+		
+		return $analytic;
+	}
+	
+	public function printResultTopTopicArticle($reports,$limit=10) {
+		$arrArticle = array();
+		
+		if(count($reports) > 0){
+			$idx = 0;
+
+			if($limit > 100){
+				$limit = 100;
+			}
+			
+			foreach($reports as $k_report => $report){
+				$rows = $report->getData()->getRows();
+				
+				foreach($rows as $k_row => $row){
+					$id = isset($row->dimensions[0])?$row->dimensions[0]:"";
+					$domain = isset($row->dimensions[1])?$row->dimensions[1]:"";
+					
+					$metrics = $row->getMetrics();
+					$pageviews = isset($metrics[0]['values'][0])?$metrics[0]['values'][0]:0;
+					
+					if($this->website == "all"){
+						$arrArticle[$idx]['site'] = $domain;
+						$arrArticle[$idx]['id'] = $id;
+						$arrArticle[$idx]['pageviews'] = $pageviews;
+						$idx++;
+						
+						if($idx == $limit) break;
+					} else if($domain == $this->website){
+						$arrArticle[$idx]['site'] = $this->website;
+						$arrArticle[$idx]['id'] = $id;
+						$arrArticle[$idx]['pageviews'] = $pageviews;
+						$idx++;
+						
+						if($idx == $limit) break;
+					}
+				}
+			}
+		}
+		
+		return $arrArticle;
+	}
+	
+	public function getTopVideoTribunnews($strSection="") {
+		$analytic = array();
+		$todayDate = date("Y-m-d");
+		$hoursNow = date('G');
+		
+		try {
+			$dateRange = new Google_Service_AnalyticsReporting_DateRange();
+			$dateRange->setStartDate("today");
+			$dateRange->setEndDate("today");	
+			
+			$pageviews = new Google_Service_AnalyticsReporting_Metric();
+			$pageviews->setExpression("ga:pageviews");
+			$pageviews->setAlias("Pageviews");
+			
+			// Create the dimension object.
+			$id = new Google_Service_AnalyticsReporting_Dimension();
+			$id->setName("ga:dimension13");
+			
+			$arrDimensionsFilterClauses = array();
+			
+			$dimensionFilterTitle = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+			$dimensionFilterTitle->setDimensionName("ga:dimension6");
+			$dimensionFilterTitle->setOperator("REGEXP");
+			$dimensionFilterTitle->setExpressions(array(".*[?!halaman|?!halaman|?!topik|?!page|?!page]$"));
+			$dimensionFilterClauseTitle= new Google_Service_AnalyticsReporting_DimensionFilterClause();
+			$dimensionFilterClauseTitle->setFilters(array($dimensionFilterTitle));
+			array_push($arrDimensionsFilterClauses, $dimensionFilterClauseTitle);
+			
+			$dimensionFilterDomain = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+			$dimensionFilterDomain->setDimensionName("ga:dimension5");
+			$dimensionFilterDomain->setOperator("EXACT");
+			$dimensionFilterDomain->setExpressions(array("video"));
+			$dimensionFilterClauseDomain = new Google_Service_AnalyticsReporting_DimensionFilterClause();
+			$dimensionFilterClauseDomain->setFilters(array($dimensionFilterDomain));
+			array_push($arrDimensionsFilterClauses, $dimensionFilterClauseDomain);
+			
+			if(!empty($strSection)){
+				$dimensionFilterSection = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+				$dimensionFilterSection->setDimensionName("ga:dimension7");
+				$dimensionFilterSection->setOperator("EXACT");
+				$dimensionFilterSection->setExpressions(array("$strSection"));
+				$dimensionFilterClauseSection = new Google_Service_AnalyticsReporting_DimensionFilterClause();
+				$dimensionFilterClauseSection->setFilters(array($dimensionFilterSection));
+				array_push($arrDimensionsFilterClauses, $dimensionFilterClauseSection);
+			}
+			
+			//filter publish date
+			$todayDate = date("Y-m-d");
+			$arrExpressions = array();
+			array_push($arrExpressions, array("^".$todayDate.""));
+			$dimensionFilterDate = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+			$dimensionFilterDate->setDimensionName("ga:dimension4");
+			$dimensionFilterDate->setOperator("REGEXP");
+			$dimensionFilterDate->setExpressions($arrExpressions);
+			$dimensionFilterClauseDate = new Google_Service_AnalyticsReporting_DimensionFilterClause();
+			$dimensionFilterClauseDate->setFilters(array($dimensionFilterDate));
+			array_push($arrDimensionsFilterClauses, $dimensionFilterClauseDate);
+			
+			$ordering = new Google_Service_AnalyticsReporting_OrderBy();
+			$ordering->setFieldName("ga:pageviews");
+			$ordering->setOrderType("VALUE");   
+			$ordering->setSortOrder("DESCENDING");
+			
+			// Create the ReportRequest object.
+			$request = new Google_Service_AnalyticsReporting_ReportRequest();
+			$request->setViewId($this->viewId);
+			$request->setDateRanges($dateRange);
+			if($hoursNow < 13){
+				$request->setPageSize(165);
+			} else if($hoursNow < 19 && $hoursNow >= 13){
+				$request->setPageSize(160);
+			} else if($hoursNow < 22 && $hoursNow >= 19){
+				$request->setPageSize(150);
+			} else {
+				$request->setPageSize(175);
+			}
+
+			$request->setDimensions(array($id));
+			$request->setMetrics(array($pageviews));
+			$request->setDimensionFilterClauses($arrDimensionsFilterClauses);
+			$request->setOrderBys($ordering);
+
+			$body = new Google_Service_AnalyticsReporting_GetReportsRequest();
+			$body->setReportRequests( array( $request) );
+			$analytic = $this->analytics->reports->batchGet( $body );
+			$analytic['status'] = 1;
+		} catch (Exception $e) {
+			$errRespond = json_decode($e->getMessage(),TRUE);
+			$analytic['code'] = isset($errRespond['error']['code'])?$errRespond['error']['code']:"";
+			$analytic['message'] = isset($errRespond['error']['message'])?$errRespond['error']['message']:"";			
+			$analytic['status'] = 0;			
+		}
+		
+		return $analytic;
+	}
+	
+	public function getResultTopVideoTribunnews($reports) {
+		$arrArticle = array();
+		$arrIdArticle = array();
+		
+		if(count($reports) > 0){
+			foreach($reports as $k_report => $report){
+				$rows = $report->getData()->getRows();
+				
+				$idx = 0;
+				foreach($rows as $k_row => $row){
+					$id = isset($row->dimensions[0])?(int) $row->dimensions[0]:"";
+					
+					$metrics = $row->getMetrics();
+					$pageviews = isset($metrics[0]['values'][0])?$metrics[0]['values'][0]:0;
+					
+					if(@!in_array($arrIdArticle,$id)){
+						$arrArticle[$idx]['id'] = $id;
+						$arrArticle[$idx]['pageviews'] = $pageviews;
+						array_push($arrIdArticle,$id);
+						$idx++;
+					}
+					
+				} 
+			}
+		}
+		
+		return $arrArticle;
+		//return $arrIdArticle;
+	}
+	
+	public function getReportTopArticle($strDomain="") {
+		$analytic = array();
+		$todayDate = date("Y-m-d");
+		$hoursNow = date('G');
+		
+		try {
+			$dateRange = new Google_Service_AnalyticsReporting_DateRange();
+			if($hoursNow > 7){
+				$dateRange->setStartDate("today");
+			} else {
+				$dateRange->setStartDate("1daysAgo");
+			}
+			$dateRange->setEndDate("today");
+			
+			$pageviews = new Google_Service_AnalyticsReporting_Metric();
+			$pageviews->setExpression("ga:pageviews");
+			$pageviews->setAlias("Pageviews");
+			
+			// Create the dimension object.
+			$id = new Google_Service_AnalyticsReporting_Dimension();
+			$id->setName("ga:dimension13");
+
+			$title = new Google_Service_AnalyticsReporting_Dimension();
+			$title->setName("ga:dimension6");
+			
+			$editor = new Google_Service_AnalyticsReporting_Dimension();
+			$editor->setName("ga:dimension2");	
+
+			$author = new Google_Service_AnalyticsReporting_Dimension();
+			$author->setName("ga:dimension3");
+			
+			$datePublish = new Google_Service_AnalyticsReporting_Dimension();
+			$datePublish->setName("ga:dimension4");
+			
+			$section = new Google_Service_AnalyticsReporting_Dimension();
+			$section->setName("ga:dimension7");
+			
+			$domain = new Google_Service_AnalyticsReporting_Dimension();
+			$domain->setName("ga:dimension5");
+			
+			$topic = new Google_Service_AnalyticsReporting_Dimension();
+			$topic->setName("ga:dimension22");
+			
+			$tag = new Google_Service_AnalyticsReporting_Dimension();
+			$tag->setName("ga:dimension15");
+			
+			$arrDimensionsFilterClauses = array();
+			
+			$dimensionFilterTitle = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+			$dimensionFilterTitle->setDimensionName("ga:dimension6");
+			$dimensionFilterTitle->setOperator("REGEXP");
+			$dimensionFilterTitle->setExpressions(array(".*[?!halaman|?!halaman|?!topik|?!page|?!page]$"));
+			$dimensionFilterClauseTitle= new Google_Service_AnalyticsReporting_DimensionFilterClause();
+			$dimensionFilterClauseTitle->setFilters(array($dimensionFilterTitle));
+			array_push($arrDimensionsFilterClauses, $dimensionFilterClauseTitle);
+			
+			if(!empty($strDomain)){
+				$strDomain = strtolower($strDomain);
+				$dimensionFilterSection = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+				$dimensionFilterSection->setDimensionName("ga:dimension5");
+				$dimensionFilterSection->setOperator("EXACT");
+				$dimensionFilterSection->setExpressions(array("$strDomain"));
+				$dimensionFilterClauseSection = new Google_Service_AnalyticsReporting_DimensionFilterClause();
+				$dimensionFilterClauseSection->setFilters(array($dimensionFilterSection));
+				array_push($arrDimensionsFilterClauses, $dimensionFilterClauseSection);
+			} else {
+				$isAll = true;
+				if($hoursNow > 3 && $hoursNow < 6){
+					$isAll = false;
+				} else if($hoursNow > 9 && $hoursNow < 12){
+					$isAll = false;
+				} else if($hoursNow > 15 && $hoursNow < 18){
+					$isAll = false;
+				} else if($hoursNow > 21 && $hoursNow < 24){
+					$isAll = false;
+				} 
+				
+				if(!$isAll){
+					$dimensionFilterSection = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+					$dimensionFilterSection->setDimensionName("ga:dimension5");
+					$dimensionFilterSection->setOperator("REGEXP");
+					$dimensionFilterSection->setExpressions(array("[^tribunnews]"));
+					$dimensionFilterClauseSection = new Google_Service_AnalyticsReporting_DimensionFilterClause();
+					$dimensionFilterClauseSection->setFilters(array($dimensionFilterSection));
+					array_push($arrDimensionsFilterClauses, $dimensionFilterClauseSection);
+				}
+			}	
+			
+			//filter publish date
+			$todayDate = date("Y-m-d");
+			$arrExpressions = array();
+			array_push($arrExpressions, array("^".$todayDate.""));
+			$dimensionFilterDate = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+			$dimensionFilterDate->setDimensionName("ga:dimension4");
+			$dimensionFilterDate->setOperator("REGEXP");
+			$dimensionFilterDate->setExpressions($arrExpressions);
+			$dimensionFilterClauseDate = new Google_Service_AnalyticsReporting_DimensionFilterClause();
+			$dimensionFilterClauseDate->setFilters(array($dimensionFilterDate));
+			array_push($arrDimensionsFilterClauses, $dimensionFilterClauseDate);
+			
+			$ordering = new Google_Service_AnalyticsReporting_OrderBy();
+			if($hoursNow > 2 && $hoursNow < 6){
+				$ordering->setFieldName("ga:dimension4");
+			} else if($hoursNow > 6 && $hoursNow < 10){
+				$ordering->setFieldName("ga:pageviews");
+			} else if($hoursNow > 10 && $hoursNow < 14){
+				$ordering->setFieldName("ga:dimension4");
+			} else if($hoursNow > 14 && $hoursNow < 18){
+				$ordering->setFieldName("ga:pageviews");
+			} else if($hoursNow > 18 && $hoursNow < 22){
+				$ordering->setFieldName("ga:dimension4");
+			} else {
+				$ordering->setFieldName("ga:pageviews");
+			}	
+			$ordering->setOrderType("VALUE");   
+			$ordering->setSortOrder("DESCENDING");
+
+			// Create the ReportRequest object.
+			$request = new Google_Service_AnalyticsReporting_ReportRequest();
+			$request->setViewId($this->viewId);
+			$request->setDateRanges($dateRange);
+			$request->setPageSize(625); 
+			$request->setDimensions(array($id,$title,$editor,$author,$datePublish,$section,$domain,$topic,$tag));
+			$request->setMetrics(array($pageviews));
+			$request->setDimensionFilterClauses($arrDimensionsFilterClauses);
+			$request->setOrderBys($ordering);
+
+			$body = new Google_Service_AnalyticsReporting_GetReportsRequest();
+			$body->setReportRequests( array( $request) );
+			$analytic = $this->analytics->reports->batchGet( $body );
+			$analytic['status'] = 1;
+		} catch (Exception $e) {
+			$errRespond = json_decode($e->getMessage(),TRUE);
+			$analytic['code'] = isset($errRespond['error']['code'])?$errRespond['error']['code']:"";
+			$analytic['message'] = isset($errRespond['error']['message'])?$errRespond['error']['message']:"";			
+			$analytic['status'] = 0;			
+		}
+		
+		return $analytic;
+	}
+	
+	public function getReportTopArticleDaerahTBO($strDomain="") {
+		$analytic = array();
+		$todayDate = date("Y-m-d");
+		$hoursNow = date('G');
+		
+		try {
+			$dateRange = new Google_Service_AnalyticsReporting_DateRange();
+			if($hoursNow > 7){
+				$dateRange->setStartDate("today");
+			} else {
+				$dateRange->setStartDate("1daysAgo");
+			}
+			$dateRange->setEndDate("today");
+			
+			$pageviews = new Google_Service_AnalyticsReporting_Metric();
+			$pageviews->setExpression("ga:pageviews");
+			$pageviews->setAlias("Pageviews");
+			
+			// Create the dimension object.
+			$id = new Google_Service_AnalyticsReporting_Dimension();
+			$id->setName("ga:dimension13");
+
+			$title = new Google_Service_AnalyticsReporting_Dimension();
+			$title->setName("ga:dimension6");
+			
+			$editor = new Google_Service_AnalyticsReporting_Dimension();
+			$editor->setName("ga:dimension2");	
+
+			$author = new Google_Service_AnalyticsReporting_Dimension();
+			$author->setName("ga:dimension3");
+			
+			$datePublish = new Google_Service_AnalyticsReporting_Dimension();
+			$datePublish->setName("ga:dimension4");
+			
+			$section = new Google_Service_AnalyticsReporting_Dimension();
+			$section->setName("ga:dimension7");
+			
+			$domain = new Google_Service_AnalyticsReporting_Dimension();
+			$domain->setName("ga:dimension5");
+			
+			$topic = new Google_Service_AnalyticsReporting_Dimension();
+			$topic->setName("ga:dimension22");
+			
+			$tag = new Google_Service_AnalyticsReporting_Dimension();
+			$tag->setName("ga:dimension15");
+			
+			$arrDimensionsFilterClauses = array();
+			
+			$dimensionFilterTitle = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+			$dimensionFilterTitle->setDimensionName("ga:dimension6");
+			$dimensionFilterTitle->setOperator("REGEXP");
+			$dimensionFilterTitle->setExpressions(array(".*[?!halaman|?!halaman|?!topik|?!page|?!page]$"));
+			$dimensionFilterClauseTitle= new Google_Service_AnalyticsReporting_DimensionFilterClause();
+			$dimensionFilterClauseTitle->setFilters(array($dimensionFilterTitle));
+			array_push($arrDimensionsFilterClauses, $dimensionFilterClauseTitle);
+			
+			if(!empty($strDomain)){
+				$strDomain = strtolower($strDomain);
+				$dimensionFilterSection = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+				$dimensionFilterSection->setDimensionName("ga:dimension5");
+				$dimensionFilterSection->setOperator("EXACT");
+				$dimensionFilterSection->setExpressions(array("$strDomain"));
+				$dimensionFilterClauseSection = new Google_Service_AnalyticsReporting_DimensionFilterClause();
+				$dimensionFilterClauseSection->setFilters(array($dimensionFilterSection));
+				array_push($arrDimensionsFilterClauses, $dimensionFilterClauseSection);
+			} else {
+				$isAll = false;
+
+				if(!$isAll){
+					$dimensionFilterSection = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+					$dimensionFilterSection->setDimensionName("ga:dimension5");
+					$dimensionFilterSection->setOperator("REGEXP");
+					$dimensionFilterSection->setExpressions(array("[^tribunnews]"));
+					$dimensionFilterClauseSection = new Google_Service_AnalyticsReporting_DimensionFilterClause();
+					$dimensionFilterClauseSection->setFilters(array($dimensionFilterSection));
+					array_push($arrDimensionsFilterClauses, $dimensionFilterClauseSection);
+				}
+			}	
+			
+			//filter publish date
+			$todayDate = date("Y-m-d");
+			$arrExpressions = array();
+			array_push($arrExpressions, array("^".$todayDate.""));
+			$dimensionFilterDate = new Google_Service_AnalyticsReporting_SegmentDimensionFilter();
+			$dimensionFilterDate->setDimensionName("ga:dimension4");
+			$dimensionFilterDate->setOperator("REGEXP");
+			$dimensionFilterDate->setExpressions($arrExpressions);
+			$dimensionFilterClauseDate = new Google_Service_AnalyticsReporting_DimensionFilterClause();
+			$dimensionFilterClauseDate->setFilters(array($dimensionFilterDate));
+			array_push($arrDimensionsFilterClauses, $dimensionFilterClauseDate);
+			
+			$ordering = new Google_Service_AnalyticsReporting_OrderBy();
+			if($hoursNow > 10 && $hoursNow < 14){
+				$ordering->setFieldName("ga:pageviews");
+			} else if($hoursNow > 16 && $hoursNow < 20){
+				$ordering->setFieldName("ga:pageviews");
+			} else {
+				$ordering->setFieldName("ga:dimension4");
+			}	
+			$ordering->setOrderType("VALUE");   
+			$ordering->setSortOrder("DESCENDING");
+
+			// Create the ReportRequest object.
+			$request = new Google_Service_AnalyticsReporting_ReportRequest();
+			$request->setViewId($this->viewId);
+			$request->setDateRanges($dateRange);
+			if($hoursNow < 13){
+				$request->setPageSize(500); 
+			} else {
+				$request->setPageSize(625); 
+			}
+			$request->setDimensions(array($id,$title,$editor,$author,$datePublish,$section,$domain,$topic,$tag));
+			$request->setMetrics(array($pageviews));
+			$request->setDimensionFilterClauses($arrDimensionsFilterClauses);
+			$request->setOrderBys($ordering);
+
+			$body = new Google_Service_AnalyticsReporting_GetReportsRequest();
+			$body->setReportRequests( array( $request) );
+			$analytic = $this->analytics->reports->batchGet( $body );
+			$analytic['status'] = 1;
+		} catch (Exception $e) {
+			$errRespond = json_decode($e->getMessage(),TRUE);
+			$analytic['code'] = isset($errRespond['error']['code'])?$errRespond['error']['code']:"";
+			$analytic['message'] = isset($errRespond['error']['message'])?$errRespond['error']['message']:"";			
+			$analytic['status'] = 0;			
+		}
+		
+		return $analytic;
+	}
+	
+	public function getResultTopArticle($reports) {
+		$arrArticle = array();
+		
+		if(count($reports) > 0){
+			$idx = 0;
+
+			foreach($reports as $k_report => $report){
+				$rows = $report->getData()->getRows();
+				
+				foreach($rows as $k_row => $row){
+					$id = isset($row->dimensions[0])?$row->dimensions[0]:"";
+					$title = isset($row->dimensions[1])?$row->dimensions[1]:"";
+					$editor = isset($row->dimensions[2])?$row->dimensions[2]:"";
+					$author = isset($row->dimensions[3])?$row->dimensions[3]:"";
+					$date = isset($row->dimensions[4])?$row->dimensions[4]:"";
+					$section = isset($row->dimensions[5])?$row->dimensions[5]:"";
+					$domain = isset($row->dimensions[6])?$row->dimensions[6]:"";
+					$topic = isset($row->dimensions[7])?$row->dimensions[7]:"";
+					$tag = isset($row->dimensions[8])?$row->dimensions[8]:"";
+					
+					$folderAssetDate = "";
+					if(!empty($date)){
+						$folderAssetDate = substr(str_replace("-","/",$date),0,10);;
+					}
+
+					$metrics = $row->getMetrics();
+					$pageviews = isset($metrics[0]['values'][0])?$metrics[0]['values'][0]:0;
+					
+					$alias = $this->url_title($title);
+					
+					$arrArticle[$idx]['site'] = $domain;
+					$arrArticle[$idx]['id'] = $id;
+					$arrArticle[$idx]['title'] = $title;
+					$arrArticle[$idx]['section'] = $section;
+					$arrArticle[$idx]['publish_date'] = $date;
+					$arrArticle[$idx]['editor'] = $editor;
+					$arrArticle[$idx]['author'] = $author;
+					$arrArticle[$idx]['topic'] = $topic;
+					$arrArticle[$idx]['tag'] = $tag;
+					$arrArticle[$idx]['pageviews'] = $pageviews;
+					$idx++;
+				}
+			}
+		}
+		
+		return $arrArticle;
+	}
+	
+	public function url_title($str) {
+		 $title = strtolower(trim($str));
+		 $replacements = ['@'=> "at", '#' => "hash", '$' => "dollar", '%' => "percentage", '&' => "and", '.' => "dot", 
+					'+' => "plus", '-' => "minus", '*' => "multiply", '/' => "devide", '=' => "equal to",
+					'<' => "less than", '<=' => "less than or equal to", '>' => "greater than", '<=' => "greater than or equal to",
+			];
+
+		 $title = strtr($title, $replacements);
+		 return $urlKey = preg_replace('#[^0-9a-z]+#i', '-', $title);
+	}
+}
+
+?>

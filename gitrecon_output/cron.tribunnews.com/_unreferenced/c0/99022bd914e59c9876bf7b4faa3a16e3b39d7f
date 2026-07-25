@@ -1,0 +1,67 @@
+<?php
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+
+define("DOC_ROOT","/var/www/html/web-cron/");
+
+include_once DOC_ROOT."config/config.php";
+include_once DOC_ROOT."lib/Opensearch.php";
+
+$opensearch = new Opensearch();
+$opensearch->init(OS_ALLNETWOORK_URL,OS_ALLNETWOORK_USERNAME,OS_ALLNETWOORK_PASSWORD,true);
+
+$index = 'allnetwork-articles';
+$tables = array(
+		'id' => "integer",
+		'domain_id' => "integer",
+		'domain' => "keyword",
+		'title' => "text",
+		'alias' => "text_keyword",
+		"subtitle" => "keyword", 
+		"subtitle_alias" => "keyword",
+		"foto_type" => "text_keyword",
+		"foto_name" => "text_keyword",
+		"foto_caption" => "text_keyword",
+		"foto_source" => "text_keyword",
+		"foto_cross_domain" => "integer",
+		"introtext" => "text_keyword",
+		"fulltexts" => "text",
+		"section_id" => "integer",
+		"section" => "text_keyword",
+		"s_title" => "text_keyword",
+		"sstatus" => "integer",
+		"category_id" => "integer",
+		"c_alias" => "text_keyword",
+		"c_title" => "text_keyword",
+		"publish" => "integer",
+		"written_by" => "integer",
+		"writter" => "integer",
+		"writter_fullname" => "text_keyword",
+		"writter_username" => "text_keyword",
+		"writter_id" => "integer",
+		"editor_by" => "integer",
+		"editor" => "text_keyword",
+		"editor_fullname" => "text_keyword",
+		"editor_id" => "integer",
+		"written_date" => "date",
+		"publish_date" => "date",
+		"source" => "integer",
+		"name_source" => "text_keyword",
+		"url_source" => "text_keyword",
+		"source_group" => "text_keyword",
+		"youtube" => "text_keyword",
+		"related_id" => "text_keyword",
+		"hit" => "integer",
+		"tagging" => "nested_tagging",
+		"modified_date" => "date_null",
+		"index_year" => "date_only_year"
+	);
+$response = $opensearch->create($index,$tables);
+
+echo "<pre>";
+print_r($tables);
+print_r($response);
+echo "</pre>";
+
+unset($opensearch);
+?>

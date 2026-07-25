@@ -1,0 +1,36 @@
+<?php
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+
+define("DOC_ROOT","/var/www/html/web-cron/");
+
+include DOC_ROOT."config/config.php";
+include DOC_ROOT."lib/Opensearch.php";
+
+$playlist_name = isset($_SERVER["argv"][1])?$_SERVER["argv"][1]:"";
+if(isset($_GET['playlist_name'])){
+	$playlist_name = $_GET['playlist_name'];
+}	
+$playlist_name = "tanya-ustaz";
+
+$arrPlaylist = array(
+				"playlist_name"=> "belajar-baca-alquran", "playlist_id"=> "PLRUmxnvpvtstWC4OdtpLSmIrGdsPzr5Z4",
+				"playlist_name"=> "tanya-ustaz", "playlist_id"=> "PLRUmxnvpvtstndFgKUZ1skGE7bbWwYw4t",
+				);
+				
+
+$arrayKey = searchArrayKeyVal("playlist_name", $playlist_name, $arrPlaylist);
+
+echo "<pre>";
+print_r($arrayKey);
+echo "</pre>";
+
+function searchArrayKeyVal($sKey, $id, $array) {
+   foreach ($array as $key => $val) {
+       if ($val[$sKey] == $id) {
+           return $key;
+       }
+   }
+   return false;
+}
+?>

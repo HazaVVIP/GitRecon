@@ -1,0 +1,194 @@
+<?php
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+//error_reporting(0);
+
+use \MongoDB\BSON\UTCDateTime;
+
+$time_start = time();
+
+define("DOC_ROOT","/var/www/html/web-cron/");
+
+require_once "./../../vendor/autoload.php";
+include DOC_ROOT."config/config.php";
+include DOC_ROOT."config/other_config.php";
+include DOC_ROOT."lib/Mongodb.php";
+include DOC_ROOT."lib/Opensearch.php";
+
+$date = isset($_GET['date'])?$_GET['date']:"";
+
+if(!empty($date)){
+	$dateStart = $date;
+} else {	
+	$dateStart = date("Y-m-d", strtotime('-1 days'));
+}
+
+echo $dateStart."<br><br>";
+
+$dateHistory = date("Ymd", strtotime($dateStart));
+
+//MONGODB
+$mongodb = new Mongodb();
+$mongodb->connect(MONGODB_USER_HOST_READ_PROD,MONGODB_USER_USERNAME_READ_PROD,MONGODB_USER_PASSWORD_READ_PROD,"tribunnews",true);
+
+
+
+$start = new UTCDateTime(strtotime(''.$dateStart.' 00:00:00') * 1000 + MONGO_DATETIME_GMT7);
+$end   = new UTCDateTime(strtotime(''.$dateStart.' 23:59:59') * 1000 + MONGO_DATETIME_GMT7);
+
+
+$query = [
+		'created_at' => [
+			'$gte' => $start,
+			'$lte' => $end
+		],
+		"content_type" => "article"
+	];
+	
+$options = [
+    'group' => [
+        '_id' => null,
+        'unique_users' => ['$addToSet' => '$user_id']
+    ],
+    'project' => [
+        '_id' => 0,
+        'total_unique_users' => ['$size' => '$unique_users']
+    ],
+    'sort' => [
+        'total_unique_users' => 1
+    ]
+];
+
+$resUserUniqueActive = $mongodb->aggregate("users_history", $query, $options);
+$total_unique_users = isset($resUserUniqueActive[0]->total_unique_users)?intval($resUserUniqueActive[0]->total_unique_users):0;
+
+echo "Total Unique Users (Apps, Desktop, Mobile) = ".$total_unique_users."<br>";
+
+
+///
+
+
+$query = [
+		'created_at' => [
+			'$gte' => $start,
+			'$lte' => $end
+		],
+		"content_type" => "article",
+		"channel" => 'apps'
+	];
+	
+$options = [
+    'group' => [
+        '_id' => null,
+        'unique_users' => ['$addToSet' => '$user_id']
+    ],
+    'project' => [
+        '_id' => 0,
+        'total_unique_users' => ['$size' => '$unique_users']
+    ],
+    'sort' => [
+        'total_unique_users' => 1
+    ]
+];
+
+$resUserAppsUniqueActive = $mongodb->aggregate("users_history", $query, $options);
+$total_unique_users_apps = isset($resUserAppsUniqueActive[0]->total_unique_users)?intval($resUserAppsUniqueActive[0]->total_unique_users):0;
+
+echo "Total Unique Users Apps = ".$total_unique_users_apps."<br>";
+
+
+///
+
+
+$query = [
+    'created_at' => [
+			'$gte' => $start,
+			'$lte' => $end
+		],
+	'content_type' => "article",
+    'channel' => [
+        '$in' => ['desktop', 'mobile']
+    ]
+];
+	
+$options = [
+    'group' => [
+        '_id' => null,
+        'unique_users' => ['$addToSet' => '$user_id']
+    ],
+    'project' => [
+        '_id' => 0,
+        'total_unique_users' => ['$size' => '$unique_users']
+    ],
+    'sort' => [
+        'total_unique_users' => 1
+    ]
+];
+
+$resUserDesktopMobileUniqueActive = $mongodb->aggregate("users_history", $query, $options);
+$total_unique_users_desktopmobile = isset($resUserDesktopMobileUniqueActive[0]->total_unique_users)?intval($resUserDesktopMobileUniqueActive[0]->total_unique_users):0;
+
+echo "Total Unique Users Desktop & Mobile = ".$total_unique_users_desktopmobile."<br><hr>";
+
+
+///
+
+
+
+$query = [
+		'created_at' => [
+			'$gte' => $start,
+			'$lte' => $end
+		],
+		'content_type' => "article"
+	]; 
+$total_view = $mongodb->total("users_history", $query);
+
+echo "Total View Article User (Apps, Desktop, Mobile) = ".$total_view."<br>";
+
+
+
+///
+
+
+$query = [
+		'created_at' => [
+			'$gte' => $start,
+			'$lte' => $end
+		],
+		"content_type" => "article",
+		"channel" => 'apps'
+	];
+
+$total_view_apps = $mongodb->total("users_history", $query);
+
+echo "Total View Article User Apps = ".$total_view_apps."<br>";
+
+
+///
+
+
+$query = [
+    'created_at' => [
+			'$gte' => $start,
+			'$lte' => $end
+		],
+	'content_type' => "article",
+    'channel' => [
+        '$in' => ['desktop', 'mobile']
+    ]
+];
+
+$total_view_desktopmobile = $mongodb->total("users_history", $query);
+
+echo "Total View Article User Desktop & Mobile = ".$total_view_desktopmobile."<br>";
+
+
+
+
+$mongodb->close();
+unset($mongodb);
+
+
+echo '<br>Execution time in seconds: ' . (microtime(true) - $time_start) . "<br>";
+?>

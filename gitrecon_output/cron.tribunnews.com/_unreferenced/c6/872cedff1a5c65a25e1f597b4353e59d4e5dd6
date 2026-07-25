@@ -1,0 +1,174 @@
+<?php
+use Aws\S3\S3Client;
+use Aws\Exception\AwsException;
+use GuzzleHttp\Promise\PromiseInterface;
+
+class Storage
+{
+    private const HEADER_MAP = [
+        'Cache-Control'                               => 'CacheControl',
+        'Content-Disposition'                         => 'ContentDisposition',
+        'Content-Encoding'                            => 'ContentEncoding',
+        'Content-Language'                            => 'ContentLanguage',
+        'Expires'                                     => 'Expires',
+        'x-amz-acl'                                   => 'ACL',
+        'x-amz-storage-class'                         => 'StorageClass',
+        'x-amz-tagging'                               => 'Tagging',
+        'x-amz-server-side-encryption'                => 'ServerSideEncryption',
+        'x-amz-server-side-encryption-aws-kms-key-id' => 'SSEKMSKeyId',
+    ];
+
+    /** @var S3Client */
+    private $client;
+
+    /** @var string */
+    private $bucket;
+
+    public function __construct(string $driver = STORAGE_DRIVER, string $bucket = S3_BUCKET)
+    {
+        $this->bucket = $bucket;
+        $this->client = $this->buildClient($driver);
+    }
+
+    public function upload(
+        string $key,
+        string $body,
+        string $contentType = 'application/json',
+        array  $headers     = []
+    ): bool {
+        try {
+            $this->client->putObject(
+                $this->buildParams($key, $body, $contentType, $headers)
+            );
+            return true;
+        } catch (AwsException $e) {
+            throw new RuntimeException("Storage::upload failed [{$key}]: " . $e->getMessage(), 0, $e);
+        }
+    }
+
+    public function uploadAsync(
+        string $key,
+        string $body,
+        string $contentType = 'application/json',
+        array  $headers     = []
+    ): PromiseInterface {
+        return $this->client->putObjectAsync(
+            $this->buildParams($key, $body, $contentType, $headers)
+        );
+    }
+
+    public function delete(string $key): bool
+    {
+        try {
+            $this->client->deleteObject(['Bucket' => $this->bucket, 'Key' => $key]);
+            return true;
+        } catch (AwsException $e) {
+            throw new RuntimeException("Storage::delete failed [{$key}]: " . $e->getMessage(), 0, $e);
+        }
+    }
+
+    public function exists(string $key): bool
+    {
+        try {
+            $this->client->headObject(['Bucket' => $this->bucket, 'Key' => $key]);
+            return true;
+        } catch (AwsException $e) {
+            if ($e->getStatusCode() === 404) {
+                return false;
+            }
+            throw new RuntimeException("Storage::exists failed [{$key}]: " . $e->getMessage(), 0, $e);
+        }
+    }
+
+    public function read(string $key): ?string
+    {
+        try {
+            $result = $this->client->getObject(['Bucket' => $this->bucket, 'Key' => $key]);
+            return (string)$result['Body'];
+        } catch (AwsException $e) {
+            if ($e->getStatusCode() === 404) {
+                return null;
+            }
+            throw new RuntimeException("Storage::read failed [{$key}]: " . $e->getMessage(), 0, $e);
+        }
+    }
+
+    public function getUrl(string $key): string
+    {
+        return $this->client->getObjectUrl($this->bucket, $key);
+    }
+
+    private function buildParams(
+        string $key,
+        string $body,
+        string $contentType,
+        array  $headers
+    ): array {
+        $params = [
+            'Bucket'      => $this->bucket,
+            'Key'         => $key,
+            'Body'        => $body,
+            'ContentType' => $contentType,
+        ];
+
+        $defaults = (defined('UPLOAD_DEFAULT_HEADERS') && is_array(UPLOAD_DEFAULT_HEADERS))
+            ? UPLOAD_DEFAULT_HEADERS
+            : [];
+
+        $merged = array_merge($defaults, $headers);
+
+        foreach ($merged as $headerName => $headerValue) {
+            if ($headerValue === '' || $headerValue === null) {
+                continue;
+            }
+
+            $sdkKey = $this->resolveHeaderKey($headerName);
+            if ($sdkKey !== null) {
+                $params[$sdkKey] = $headerValue;
+            }
+        }
+
+        return $params;
+    }
+
+    private function resolveHeaderKey(string $headerName): ?string
+    {
+        if (isset(self::HEADER_MAP[$headerName])) {
+            return self::HEADER_MAP[$headerName];
+        }
+
+        $lower = strtolower($headerName);
+        foreach (self::HEADER_MAP as $k => $v) {
+            if (strtolower($k) === $lower) {
+                return $v;
+            }
+        }
+
+        return null;
+    }
+
+    private function buildClient(string $driver): S3Client
+    {
+        if ($driver === 'minio') {
+            return new S3Client([
+                'version'                 => 'latest',
+                'region'                  => S3_REGION,
+                'endpoint'                => MINIO_ENDPOINT,
+                'use_path_style_endpoint' => true,
+                'credentials'             => [
+                    'key'    => MINIO_ACCESS_KEY,
+                    'secret' => MINIO_SECRET_KEY,
+                ],
+            ]);
+        }
+
+        return new S3Client([
+            'version'     => 'latest',
+            'region'      => S3_REGION,
+            'credentials' => [
+                'key'    => AWS_ACCESS_KEY,
+                'secret' => AWS_SECRET_KEY,
+            ],
+        ]);
+    }
+}

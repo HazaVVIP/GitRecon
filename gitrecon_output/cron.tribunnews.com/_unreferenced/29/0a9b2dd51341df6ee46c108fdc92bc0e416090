@@ -1,0 +1,287 @@
+<?php
+date_default_timezone_set('Asia/Jakarta');
+set_time_limit(0);
+ini_set('display_errors', 1);
+error_reporting(E_ALL);
+
+define("DOC_ROOT","/var/www/html/web-cron/");
+
+include DOC_ROOT . "config/config.php";
+include DOC_ROOT . "lib/Utils.php";
+include DOC_ROOT . "lib/Opensearch.php";
+
+$opensearchDev = new Opensearch();
+$opensearchDev->init(OS_DEV_URL, OS_DEV_USERNAME, OS_DEV_PASSWORD, true);
+
+$opensearchTBO = new Opensearch();
+$opensearchTBO->init(OS_TBO_URL, OS_TBO_USERNAME, OS_TBO_PASSWORD, true);
+
+$aggs = array(
+    'list_juz' => array(
+        'terms' => array(
+            'field' => 'juz',
+            'size'  => 50,
+            'order' => array('_key' => 'asc')
+        ),
+        'aggs' => array(
+            'first_ayah' => array(
+                'top_hits' => array(
+                    'size' => 1,
+                    '_source' => array(
+                        'includes' => array(
+                            'juz',
+                            'chapter_id',
+                            'chapter_name_latin_id',
+                            'chapter_translation_id',
+                            'surah_name',
+                            'verse_key',
+                            'ayah_text',
+                            'ayah_translation_id'
+                        )
+                    ),
+                    'sort' => array(
+                        array('ayah_id' => array('order' => 'asc'))
+                    )
+                )
+            ),
+            'last_ayah' => array(
+                'top_hits' => array(
+                    'size' => 1,
+                    '_source' => array(
+                        'includes' => array(
+                            'juz',
+                            'chapter_id',
+                            'chapter_name_latin_id',
+                            'chapter_translation_id',
+                            'surah_name',
+                            'verse_key',
+                            'ayah_text',
+                            'ayah_translation_id'
+                        )
+                    ),
+                    'sort' => array(
+                        array('ayah_id' => array('order' => 'desc'))
+                    )
+                )
+            )
+        )
+    )
+);
+
+$response = $opensearchTBO->aggregations('quran', $aggs);
+
+$juzList = array();
+$errorMessage = '';
+
+if (isset($response['status']) && $response['status'] == 1 && isset($response['data']['list_juz']['buckets'])) {
+    foreach ($response['data']['list_juz']['buckets'] as $bucket) {
+        $firstSource = isset($bucket['first_ayah']['hits']['hits'][0]['_source'])
+            ? $bucket['first_ayah']['hits']['hits'][0]['_source']
+            : array();
+
+        $lastSource = isset($bucket['last_ayah']['hits']['hits'][0]['_source'])
+            ? $bucket['last_ayah']['hits']['hits'][0]['_source']
+            : array();
+
+        $juzList[] = array(
+            'juz' => isset($bucket['key']) ? $bucket['key'] : '',
+            'total_doc' => isset($bucket['doc_count']) ? $bucket['doc_count'] : 0,
+
+            'first_chapter_id' => isset($firstSource['chapter_id']) ? $firstSource['chapter_id'] : '',
+            'first_chapter_name_latin_id' => isset($firstSource['chapter_name_latin_id']) ? $firstSource['chapter_name_latin_id'] : '',
+            'first_chapter_translation_id' => isset($firstSource['chapter_translation_id']) ? $firstSource['chapter_translation_id'] : '',
+            'first_verse_key' => isset($firstSource['verse_key']) ? $firstSource['verse_key'] : '',
+
+            'last_chapter_id' => isset($lastSource['chapter_id']) ? $lastSource['chapter_id'] : '',
+            'last_chapter_name_latin_id' => isset($lastSource['chapter_name_latin_id']) ? $lastSource['chapter_name_latin_id'] : '',
+            'last_chapter_translation_id' => isset($lastSource['chapter_translation_id']) ? $lastSource['chapter_translation_id'] : '',
+            'last_verse_key' => isset($lastSource['verse_key']) ? $lastSource['verse_key'] : ''
+        );
+    }
+} else {
+    $errorMessage = isset($response['error_reason']) ? $response['error_reason'] : 'Data juz tidak ditemukan';
+}
+
+unset($opensearchDev);
+unset($opensearchTBO);
+?>
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Daftar Juz - Al-Qur'an Digital</title>
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            padding: 0;
+            background: #f8f9fb;
+            color: #222;
+            font-family: Arial, sans-serif;
+        }
+
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+            padding: 16px;
+        }
+
+        .back-link {
+            display: inline-block;
+            margin-top: 20px;
+            margin-bottom: 20px;
+            text-decoration: none;
+            color: #2563eb;
+            font-size: 14px;
+        }
+
+        .title {
+            font-size: 28px;
+            font-weight: bold;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+
+        .juz-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 12px;
+        }
+
+        .juz-card {
+            display: block;
+            background: #fff;
+            border: 1px solid #e5e7eb;
+            border-radius: 8px;
+            padding: 14px;
+            text-decoration: none;
+            color: inherit;
+            transition: all 0.2s ease;
+        }
+
+        .juz-card:hover {
+            border-color: #cbd5e1;
+            box-shadow: 0 4px 14px rgba(0,0,0,0.06);
+            background: #f8fbff;
+        }
+
+        .juz-top {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 12px;
+        }
+
+        .juz-badge {
+            width: 42px;
+            height: 42px;
+            border-radius: 50%;
+            background: #2563eb;
+            color: #fff;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 15px;
+            font-weight: bold;
+        }
+
+        .juz-title {
+            font-size: 18px;
+            font-weight: bold;
+            margin: 0;
+        }
+
+        .juz-meta {
+            font-size: 13px;
+            color: #666;
+            line-height: 1.7;
+        }
+
+        .juz-section {
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px solid #eef2f7;
+        }
+
+        .juz-label {
+            font-size: 12px;
+            font-weight: bold;
+            color: #2563eb;
+            margin-bottom: 4px;
+        }
+
+        .juz-text {
+            font-size: 13px;
+            color: #374151;
+            line-height: 1.6;
+        }
+
+        .error-box {
+            background: #fff;
+            border: 1px solid #f5c2c7;
+            color: #b42318;
+            border-radius: 8px;
+            padding: 14px;
+        }
+
+        @media (max-width: 768px) {
+            .juz-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .title {
+                font-size: 24px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <a href="quran.php" class="back-link">&larr; Kembali</a>
+
+        <div class="title">Daftar Juz Al-Qur'an</div>
+
+        <?php if (!empty($errorMessage)): ?>
+            <div class="error-box">
+                <?php echo htmlspecialchars($errorMessage); ?>
+            </div>
+        <?php else: ?>
+            <div class="juz-grid">
+                <?php foreach ($juzList as $juz): ?>
+                    <a href="quran_juz_detail.php?juz=<?php echo urlencode($juz['juz']); ?>" class="juz-card">
+                        <div class="juz-top">
+                            <div>
+                                <div class="juz-title">Juz <?php echo htmlspecialchars($juz['juz']); ?></div>
+                                <div class="juz-meta"><?php echo htmlspecialchars($juz['total_doc']); ?> ayat</div>
+                            </div>
+                            <div class="juz-badge"><?php echo htmlspecialchars($juz['juz']); ?></div>
+                        </div>
+
+                        <div class="juz-section">
+                            <div class="juz-label">Awal Juz</div>
+                            <div class="juz-text">
+                                Surah <?php echo htmlspecialchars($juz['first_chapter_name_latin_id']); ?>
+                                (<?php echo htmlspecialchars($juz['first_chapter_id']); ?>)<br>
+                                Ayat <?php echo htmlspecialchars($juz['first_verse_key']); ?>
+                            </div>
+                        </div>
+
+                        <div class="juz-section">
+                            <div class="juz-label">Akhir Juz</div>
+                            <div class="juz-text">
+                                Surah <?php echo htmlspecialchars($juz['last_chapter_name_latin_id']); ?>
+                                (<?php echo htmlspecialchars($juz['last_chapter_id']); ?>)<br>
+                                Ayat <?php echo htmlspecialchars($juz['last_verse_key']); ?>
+                            </div>
+                        </div>
+                    </a>
+                <?php endforeach; ?>
+            </div>
+        <?php endif; ?>
+    </div>
+</body>
+</html>

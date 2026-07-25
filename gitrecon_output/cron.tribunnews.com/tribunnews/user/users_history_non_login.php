@@ -1,0 +1,645 @@
+<?php
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+//error_reporting(0);
+
+use \MongoDB\BSON\UTCDateTime;
+
+$time_start = time();
+
+define("DOC_ROOT","/var/www/html/web-cron/");
+define("DATETIME_GMT7",7*3600);
+
+require_once DOC_ROOT."vendor/autoload.php";
+include DOC_ROOT."config/config.php";
+include DOC_ROOT."lib/Mongodb.php";
+include DOC_ROOT."lib/Opensearch.php";
+
+
+//MONGODB
+$mongodb_options = array(
+					'replicaSet' => 'atlas-105on5-shard-0',
+					'readPreference' => 'secondary',
+					'tls' => true
+				   );
+
+
+$mongodb = new Mongodb();
+$mongodb->connect_replika(MONGODB_USER_HOST_READ_PROD,MONGODB_USER_USERNAME_READ_PROD,MONGODB_USER_PASSWORD_READ_PROD,"tribunnews",true,$mongodb_options);
+
+$ukid = isset($_GET['ukid'])?$_GET['ukid']:"";
+$subdomain = isset($_GET['subdomain'])?$_GET['subdomain']:"tribunnews";
+
+if(!empty($ukid)){
+	//OPENSEARCH
+	$opensearchAllNetwork = new Opensearch();
+	$opensearchAllNetwork->init(OS_ALLNETWOORK_URL,OS_ALLNETWOORK_USERNAME,OS_ALLNETWOORK_PASSWORD,true);
+	
+	$collection = "users_history_not_login";
+	$dateHistory = date("Ymd", strtotime('-1 days'));
+
+	$query = [
+				"ukid" => $ukid,
+				"dt" => ['$gte' => intval($dateHistory)]
+			];
+	$fields = array("domain","article_id","article_alias","sec_alias","channel","created_at","content_type");
+	$sort = array('created_at' => -1);
+	$start = 0;
+	$limit = 100;
+	$rsArticleUserHistory = $mongodb->find($collection,$query,$fields,$sort,$start,$limit);
+	
+	$start = 0;
+	$limit = 20;
+	$isRecommendation = false;
+	$viewAllArticles = [];
+	$topSections   = [];
+	$topSubtitle   = [];
+	$topCategories = [];
+	$topTags       = [];
+	
+	if(count($rsArticleUserHistory) > 0){
+		$viewArticles   = [];
+		if(count($rsArticleUserHistory) > 0){
+			foreach ($rsArticleUserHistory as $row) {
+				$rows = array();
+				$rows['id'] = $row->article_id;
+				$rows['domain'] = $row->domain;
+				$rows['alias'] = $row->article_alias;
+				$rows['channel'] = $row->channel;
+				$rows['section'] = $row->sec_alias;
+				$rows['content_type'] = $row->content_type;
+				$rows['created_at'] = date("Y-m-d H:i:s", ((intval($row->created_at->__toString())) / 1000) - DATETIME_GMT7);
+				array_push($viewArticles,$rows);
+			}
+		}
+
+
+		$query = [
+					"ukid" => $ukid,
+					"dt" => ['$gte' => intval($dateHistory)]
+				];
+				
+		$options = array();
+		$options = [
+			'facet' => [
+				'topSections' => [
+					['$group' => ['_id' => '$sec_alias', 'total' => ['$sum' => 1]]],
+					['$sort' => ['total' => -1]],
+					['$limit' => 5]
+				],
+				'topSubtitle' => [
+					['$group' => ['_id' => '$subtitle', 'total' => ['$sum' => 1]]],
+					['$sort' => ['total' => -1]],
+					['$limit' => 5]
+				],
+				'topCategories' => [
+					['$group' => ['_id' => '$cat_alias', 'total' => ['$sum' => 1]]],
+					['$sort' => ['total' => -1]],
+					['$limit' => 5]
+				],
+				'topTags' => [
+					['$unwind' => '$tag'],
+					['$group' => ['_id' => '$tag.title', 'total' => ['$sum' => 1]]],
+					['$sort' => ['total' => -1]],
+					['$limit' => 5]
+				]
+			]
+		];
+		$options['limit'] = 100;
+		$options['sort'] = ['created_at' => -1];
+		$resUserHistory = $mongodb->aggregate($collection, $query, $options);
+
+		if(count($resUserHistory) > 0){
+			$dataUserHistory = $resUserHistory[0];
+			
+			if (isset($dataUserHistory->topSections)) {
+				foreach ($dataUserHistory->topSections as $row) {
+					$topSections[] = [
+						'name'  => $row->_id,
+						'total' => $row->total
+					];
+				}
+				
+				$grandTotal = array_sum(array_column($topSections, 'total'));
+				
+				foreach ($topSections as &$val) {
+					$val['percent'] = round(($val['total'] / $grandTotal) * 100, 2);
+				}
+			}
+			
+			if (isset($dataUserHistory->topSubtitle)) {
+				foreach ($dataUserHistory->topSubtitle as $row) {
+					if(!empty($row->_id)){
+						$topSubtitle[] = [
+							'name'  => $row->_id,
+							'total' => $row->total
+						];
+					}
+				}
+				
+				$grandTotalSubtitle = array_sum(array_column($topSubtitle, 'total'));
+				
+				foreach ($topSubtitle as &$valSub) {
+					$valSub['percent'] = round(($valSub['total'] / $grandTotalSubtitle) * 100, 2);
+				}
+			}
+			
+			if (isset($dataUserHistory->topCategories)) {
+				foreach ($dataUserHistory->topCategories as $row) {
+					if(!empty($row->_id)){
+						$topCategories[] = [
+							'name'  => $row->_id,
+							'total' => $row->total
+						];
+					}
+				}
+				
+				$grandTotalCategories = array_sum(array_column($topCategories, 'total'));
+				
+				foreach ($topCategories as &$valCat) {
+					$valCat['percent'] = round(($valCat['total'] / $grandTotalCategories) * 100, 2);
+				}
+			}
+
+			if (isset($dataUserHistory->topTags)) {
+				foreach ($dataUserHistory->topTags as $row) {
+					$topTags[] = [
+						'name'  => $row->_id,
+						'total' => $row->total
+					];
+				}
+				
+				$grandTotalTags = array_sum(array_column($topTags, 'total'));
+				
+				foreach ($topTags as &$valTag) {
+					$valTag['percent'] = round(($valTag['total'] / $grandTotalTags) * 100, 2);
+				}
+			}
+		}
+		
+		$viewAllArticles = $viewArticles;
+		if(count($viewArticles) > 20) $viewArticles = array_slice($viewArticles, 0, 20); 
+		echo "<pre>";
+		print_r([
+			//'articles'   => $viewArticles,
+			'sections'   => $topSections,
+			'subtitle'   => $topSubtitle,
+			//'categories' => $topCategories,
+			'tags'       => $topTags,
+		]);
+		echo "</pre>";
+		
+
+
+		$arrMust = array();
+		$arrShould = array();
+		$arrMustNot = array();
+		$isMinShouldMatch = true;
+		
+		$timeNow = strtotime("now");
+		$endDate = date('Y-m-d H:i:s', $timeNow);
+		$arrMust[] = array(
+			"range" => array(
+				"publish_date" => array("lte" =>$endDate)
+			)
+		);
+		
+		$arrMust[] = array(
+								"match_phrase" => array(
+									"domain" => $subdomain
+								)
+							);
+
+		if (!empty($topSections)) {
+			$arrMustSection = array();
+			$isMustAbsolute = false;
+			$boostSection = 1;
+			foreach($topSections as $key_sec => $sections){
+				if(isset($sections['percent'])){
+					if($sections['percent'] == 100){
+						if($sections['total'] > 1){
+							$arrMust[] = array(
+								"match_phrase" => array(
+									"section" => $sections['name']
+								)
+							);
+							$isMustAbsolute = true;
+							unset($topSections[$key_sec]);
+						}
+					} /* else if($sections['percent'] >= 55 && $sections['percent'] <= 99){
+						$arrMust[] = array(
+							"term" => array(
+								"section.keyword" => $sections['name']
+							)
+						);
+						unset($topSections[$key_sec]);
+					} else if($sections['percent'] >= 35 && $sections['percent'] <= 54){
+						array_push($arrMustSection,$sections['name']);
+						unset($topSections[$key_sec]);
+					}	 */
+					else if($sections['percent'] >= 40){
+						array_push($arrMustSection,$sections['name']);
+						if($sections['name'] == "superball") array_push($arrMustSection,"super-ball");
+						if($sections['name'] == "super-ball") array_push($arrMustSection,"superball");
+						unset($topSections[$key_sec]);
+						$isMinShouldMatch = false;
+					} else if($sections['percent'] < 10){
+						unset($topSections[$key_sec]);
+					}	
+				}
+			}	
+			
+			$topSections = array_values($topSections);
+		
+			if(!$isMustAbsolute && count($arrMustSection) > 0){
+				$arrMust[] = array(
+						"terms" => array(
+							"section.keyword" => $arrMustSection
+						)
+					);
+			}
+			
+			$values = array_column($topSections, 'name');
+			if(!empty($values)){
+				foreach($values as $v){
+					if($v == "superball") array_push($values,"super-ball");
+					if($v == "super-ball") array_push($values,"superball");
+				}
+			
+				$arrShould[] = array(
+					"terms" => array(
+						"section.keyword" => $values,
+						//"boost" => 2
+						"boost" => $boostSection
+					)
+				); 
+				$boostSection+=2;
+			}
+		}
+
+		/* if (!empty($topSubtitle)) {
+			$values = array_column($topSubtitle, 'name');
+			$arrShould[] = [
+				"terms" => [
+					"subtitle" => $values,
+					"boost" => 3
+				]
+			];
+		}*/
+		 
+		/* if (!empty($topCategories)) {
+			$values = array_column($topCategories, 'name');
+			$arrShould[] = [
+				"terms" => [
+					"c_alias.keyword" => $values,
+					"boost" => 4
+				]
+			];
+		} */
+
+		if (!empty($topTags)) {
+			$values = array_column($topTags, 'name');
+			$arrShould[] = array(
+				"nested" => array(
+					"path" => "tagging",
+					"query" => array(
+						"terms" => array(
+							"tagging.alias" => $values,
+							//"boost" => 4
+							"boost" => $boostSection
+						)
+					)
+				)
+			);
+			$boostSection+=2;
+		}
+
+		if (!empty($viewArticles)) {
+			foreach($viewArticles as $val){
+				$arrMustNot[] = [
+					"bool" => [
+						"must" => [
+							["match_phrase" => ["domain_id" => intval($val['id'])]],
+							["match_phrase" => ["domain" => $val['domain']]]
+						]
+					]
+				];
+			}
+			
+			/* $excludeIds = array_column($viewArticles, 'id');
+			if (!empty($excludeIds)) {
+				$arrMustNot[] = array(
+					"terms" => array(
+						"domain_id" => $excludeIds
+					)
+				);
+			}  */
+		}
+
+		if($isMinShouldMatch){
+			$query = array(
+				"bool" => array(
+					"must" => $arrMust,
+					"should" => $arrShould,
+					"must_not" => $arrMustNot,
+					"minimum_should_match" => 1
+				)
+			);
+		} else 	{
+			$query = array(
+				"bool" => array(
+					"must" => $arrMust,
+					"should" => $arrShould,
+					"must_not" => $arrMustNot
+				)
+			);
+		}
+		$fields = array("domain_id","domain","alias","title","written_date","section","pageviews","tagging");	
+		//$sort = array("written_date" => array("order" => "desc"));
+		$sort = array("_score" => array("order" => "desc"), "written_date" => array("order" => "desc"));
+		//$sort = array("written_date" => array("order" => "desc"), "pageviews" => array("order" => "asc"));
+		$response = $opensearchAllNetwork->find("tribunnetwork-articles",$query,$fields,$sort,$start,$limit);
+
+		/* echo "<pre>";
+		print_r($query);
+		echo "</pre>"; */
+		
+		if($response['status']){
+			$dataMatch = isset($response['data'])?$response['data']:array();
+			
+			if(count($dataMatch) > 0){
+				$isRecommendation = true;
+				
+				echo "<b>Rekomendasi Artikel</b><br>";
+				
+				echo "<table border='1'>";
+				echo "<th>Judul</th><th>Network</th><th>Section</th><th>Written Date</th><th>Pageview</th><th>Link</th>";
+				
+				foreach($dataMatch as $val){
+					$row = $val['_source'];
+
+					$title = $row['title'];
+					
+					$url = "https://".$row['domain'].".tribunnews.com/".$row['alias'];
+					if($row['domain'] == "tribunnews") $url = "https://www.tribunnews.com/".$row['alias'];
+					
+					$pageviews = isset($row['pageviews'])?intval($row['pageviews']):0;
+					
+					echo "<tr><td>".$title."</td><td>".$row['domain']."</td><td>".$row['section']."</td><td>".$row['written_date']."</td><td>".$pageviews."</td><td><a href='".$url."'>Link</a></td></tr>";
+				}
+				echo "</table>";
+			}
+		}
+		
+		
+		/////////////////////////
+
+
+		if (!empty($topSubtitle)) {
+			foreach($topSubtitle as $key_sub => $subtitle){
+				if(isset($subtitle['percent']) && $subtitle['percent'] >= 30){
+					$arrMust = array();
+					$arrMustNot = array();
+					
+					$arrMust[] = array(
+						"match_phrase" => array(
+							"subtitle.keyword" => $subtitle['name']
+						)
+					);
+
+					if (!empty($viewArticles)) {
+						foreach($viewArticles as $val){
+							$arrMustNot[] = [
+								"bool" => [
+									"must" => [
+										["match_phrase" => ["id" => intval($val['id'])]],
+										["match_phrase" => ["domain" => $val['domain']]]
+									]
+								]
+							];
+						}
+					}
+					
+					$query = array(
+						"bool" => array(
+							"must" => $arrMust,
+							"must_not" => $arrMustNot,
+						)
+					);
+					$fields = array("domain_id","domain","alias","title","written_date","section","pageviews","tagging");	
+					$sort = array("written_date" => array("order" => "desc"));
+					$start = 0;
+					$limit = 5;
+					$response = $opensearchAllNetwork->find("tribunnetwork-articles",$query,$fields,$sort,$start,$limit);
+					
+					/* echo "<pre>";
+					print_r($query);
+					echo "</pre>";  */
+					
+					if($response['status']){
+						$dataMatch = isset($response['data'])?$response['data']:array();
+						
+						if(count($dataMatch) > 0){
+							echo "<hr><b>Rekomendasi Topik : ".$subtitle['name']."</b><br>";
+							
+							echo "<table border='1'>";
+							echo "<th>Judul</th><th>Network</th><th>Section</th><th>Written Date</th><th>Pageview</th><th>Link</th>";
+							
+							foreach($dataMatch as $val){
+								$row = $val['_source'];
+
+								$title = $row['title'];
+								
+								$url = "https://".$row['domain'].".tribunnews.com/".$row['alias'];
+								if($row['domain'] == "tribunnews") $url = "https://www.tribunnews.com/".$row['alias'];
+								
+								$pageviews = isset($row['pageviews'])?intval($row['pageviews']):0;
+								
+								echo "<tr><td>".$title."</td><td>".$row['domain']."</td><td>".$row['section']."</td><td>".$row['written_date']."</td><td>".$pageviews."</td><td><a href='".$url."'>Link</a></td></tr>";
+							}
+							echo "</table>";
+						}
+					}
+				}
+			}	
+		}
+		
+		
+		/////////////////////////
+		
+		
+		if (!empty($topTags)) {
+			foreach($topTags as $key_sub => $tags){
+				if(isset($tags['percent']) && $tags['percent'] >= 30){
+					$arrMust = array();
+					$arrMustNot = array();
+
+					$arrMust[] =  array(
+								"nested" => array(
+									"path" => "tagging",
+									"query" => array(
+										"bool" => array(
+											"must" => array("match" => array("tagging.title" => $tags['name']))
+											)
+									)
+								)
+							  );
+
+					if (!empty($viewArticles)) {
+						foreach($viewArticles as $val){
+							$arrMustNot[] = [
+								"bool" => [
+									"must" => [
+										["match_phrase" => ["id" => intval($val['id'])]],
+										["match_phrase" => ["domain" => $val['domain']]]
+									]
+								]
+							];
+						}
+					}
+					
+					$query = array(
+						"bool" => array(
+							"must" => $arrMust,
+							"must_not" => $arrMustNot,
+						)
+					);
+					$fields = array("domain_id","domain","alias","title","written_date","section","pageviews","tagging");	
+					$sort = array("written_date" => array("order" => "desc"));
+					$start = 0;
+					$limit = 5;
+					$response = $opensearchAllNetwork->find("tribunnetwork-articles",$query,$fields,$sort,$start,$limit);
+					
+					/* echo "<pre>";
+					print_r($query);
+					echo "</pre>";  */
+					
+					if($response['status']){
+						$dataMatch = isset($response['data'])?$response['data']:array();
+						
+						if(count($dataMatch) > 0){
+							echo "<hr><b>Rekomendasi Tag : ".$tags['name']."</b><br>";
+							
+							echo "<table border='1'>";
+							echo "<th>Judul</th><th>Network</th><th>Section</th><th>Written Date</th><th>Pageview</th><th>Link</th>";
+							
+							foreach($dataMatch as $val){
+								$row = $val['_source'];
+
+								$title = $row['title'];
+								
+								$url = "https://".$row['domain'].".tribunnews.com/".$row['alias'];
+								if($row['domain'] == "tribunnews") $url = "https://www.tribunnews.com/".$row['alias'];
+								
+								$pageviews = isset($row['pageviews'])?intval($row['pageviews']):0;
+								
+								echo "<tr><td>".$title."</td><td>".$row['domain']."</td><td>".$row['section']."</td><td>".$row['written_date']."</td><td>".$pageviews."</td><td><a href='".$url."'>Link</a></td></tr>";
+							}
+							echo "</table>";
+						}
+					}
+				}
+			}	
+		}
+	}	
+
+	if(!$isRecommendation){
+		$where1 = array();
+		$where2 = array();
+			
+		$hoursNow = date('G');
+		$dateToday = date("Y-m-d H:i:s"); 
+		if($hoursNow > 6){
+			$timeHoursAgo = strtotime('-8 hours', strtotime($dateToday));
+		} else if($hoursNow > 12){
+			$timeHoursAgo = strtotime('-6 hours', strtotime($dateToday));
+		} else if($hoursNow > 18){
+			$timeHoursAgo = strtotime('-4 hours', strtotime($dateToday));
+		} else {
+			$timeHoursAgo = strtotime('-10 hours', strtotime($dateToday));
+		}
+		$timeNow = strtotime("now");
+		$startDate = date('Y-m-d H:i:s', $timeHoursAgo);
+		$endDate = date('Y-m-d H:i:s', $timeNow);
+		array_push($where1,array("range" => array("publish_date" => array("gte" => $startDate, "lte" =>$endDate))));	
+		array_push($where1,array("match_phrase" => array("domain" =>$subdomain)));
+		
+		$where2 = array();
+		array_push($where2,array("match_phrase" => array("domain" => "tribunnewswiki")));
+		array_push($where2,array("match_phrase" => array("domain" => "video")));
+		
+		$query = array();
+		if(count($where1) > 0){
+			$query = array("bool" =>
+						array(
+							"must" => $where1,
+							"must_not" => $where2
+							)
+				);
+		}
+		$fields = array("domain_id","domain","alias","title","written_date","section","pageviews","tagging");	
+		$sort = array("pageviews" => array("order" => "desc"), "publish_date" => array("order" => "desc"));
+		$response1 = $opensearchAllNetwork->find("tribunnetwork-articles",$query,$fields,$sort,$start,$limit);
+		
+		if($response1['status']){
+			$dataMatchPopuler = isset($response1['data'])?$response1['data']:array();
+		
+			if(count($dataMatchPopuler) > 0){
+				echo "<b>Top Artikel</b><br>";
+				
+				echo "<table border='1'>";
+				echo "<th>Judul</th><th>Network</th><th>Section</th><th>Written Date</th><th>Pageview</th><th>Link</th>";
+				
+				/* echo "<pre>";
+				print_r($query);
+				echo "</pre>"; */
+				
+				foreach($dataMatchPopuler as $val){
+					$row = $val['_source'];
+					
+					$title = $row['title'];
+					
+					$url = "https://".$row['domain'].".tribunnews.com/".$row['alias'];
+					if($row['domain'] == "tribunnews") $url = "https://www.tribunnews.com/".$row['alias'];
+					
+					$pageviews = isset($row['pageviews'])?intval($row['pageviews']):0;
+					
+					echo "<tr><td>".$title."</td><td>".$row['domain']."</td><td>".$row['section']."</td><td>".$row['written_date']."</td><td>".$pageviews."</td><td><a href='".$url."'>Link</a></td></tr>";
+				}
+				echo "</table>";
+			} 
+		}
+	}
+	
+	
+	
+	///////////////
+	
+	
+	if(count($viewAllArticles) > 0){
+		echo "<hr><b>History Article</b><br>";
+						
+		echo "<table border='1'>";
+		echo "<th>Network</th><th>Type</th><th>Section</th><th>Channel</th><th>Link</th><th>Date</th>";
+						
+		foreach($viewAllArticles as $arc){
+			$alias = $arc['alias'];
+			$content_type = $arc['content_type'];
+			$subdomain = $arc['domain'];
+			if($subdomain == "tribunnews") $subdomain = "www";
+			$link = "https://".$subdomain.".tribunnews.com/".$alias;
+			
+			echo "<tr><td>".$arc['domain']."</td><td>".$arc['content_type']."</td><td>".$arc['section']."</td><td>".$arc['channel']."</td><td>".$link."</td><td>".$arc['created_at']."</td></tr>";
+		}
+
+		echo "</table>";
+	}			
+	
+	unset($opensearchAllNetwork);
+} 
+
+$mongodb->close();
+unset($mongodb);
+
+echo '<br>Execution time in seconds: ' . (microtime(true) - $time_start) . "<br>";
+?>

@@ -1,0 +1,267 @@
+<?php
+set_time_limit(0); 
+ini_set('max_execution_time', 0);
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+
+$time_start = time();
+
+define("DOC_ROOT","/var/www/html/web-cron/");
+
+include DOC_ROOT."config/config.php";
+include DOC_ROOT."lib/simple_html_dom.php";
+include DOC_ROOT."lib/Opensearch.php";
+
+$countries = [
+        "mexico" => "Meksiko",
+        "south africa" => "Afrika Selatan",
+        "south korea" => "Korea Selatan",
+		"czechia" => "Ceko",
+        "canada" => "Kanada",
+        "bosnia" => "Bosnia",
+        "qatar" => "Qatar",
+        "switzerland" => "Swiss",
+        "brazil" => "Brasil",
+        "morocco" => "Maroko",
+        "haiti" => "Haiti",
+        "scotland" => "Skotlandia",
+        "united states" => "Amerika Serikat",
+        "paraguay" => "Paraguay",
+        "australia" => "Australia",
+        "turkiye" => "Turki",
+        "germany" => "Jerman",
+        "curacao" => "Curacao",
+        "ivory coast" => "Pantai Gading",
+        "ecuador" => "Ekuador",
+        "netherlands" => "Belanda",
+        "japan" => "Jepang",
+        "sweden" => "Swedia",
+        "tunisia" => "Tunisia",
+        "belgium" => "Belgia",
+        "egypt" => "Mesir",
+        "iran" => "Iran",
+        "new zealand" => "Selandia Baru",
+        "spain" => "Spanyol",
+        "cape verde" => "Tanjung Verde",
+        "saudi arabia" => "Arab Saudi",
+        "uruguay" => "Uruguay",
+        "france" => "Prancis",
+        "senegal" => "Senegal",
+		"iraq" => "Irak",
+        "norway" => "Norwegia",
+        "argentina" => "Argentina",
+        "algeria" => "Aljazair",
+        "austria" => "Austria",
+        "jordan" => "Yordania",
+        "portugal" => "Portugal",
+        "dr congo" => "RD Kongo",
+        "uzbekistan" => "Uzbekistan",
+        "colombia" => "Kolombia",
+        "england" => "Inggris",
+        "croatia" => "Kroasia",
+        "ghana" => "Ghana",
+        "panama" => "Panama"
+    ];
+
+$hari = [
+    'Sunday' => 'Minggu',
+    'Monday' => 'Senin',
+    'Tuesday' => 'Selasa',
+    'Wednesday' => 'Rabu',
+    'Thursday' => 'Kamis',
+    'Friday' => 'Jumat',
+    'Saturday' => 'Sabtu'
+];
+
+$bulan = [
+    'January' => 'Januari',
+    'February' => 'Februari',
+    'March' => 'Maret',
+    'April' => 'April',
+    'May' => 'Mei',
+    'June' => 'Juni',
+    'July' => 'Juli',
+    'August' => 'Agustus',
+    'September' => 'September',
+    'October' => 'Oktober',
+    'November' => 'November',
+    'December' => 'Desember'
+];
+
+$countries_short = [
+    "mexico" => "MEX",
+    "south africa" => "RSA",
+    "south korea" => "KOR",
+	"czechia" => "CZE",
+    "canada" => "CAN",
+    "bosnia" => "BIH",
+    "qatar" => "QAT",
+    "switzerland" => "SUI",
+    "brazil" => "BRA",
+    "morocco" => "MAR",
+    "haiti" => "HAI",
+    "scotland" => "SCO",
+    "united states" => "USA",
+    "paraguay" => "PAR",
+    "australia" => "AUS",
+	"turkiye" => "TUR",
+    "germany" => "GER",
+    "curacao" => "CUW",
+    "ivory coast" => "CIV",
+    "ecuador" => "ECU",
+    "netherlands" => "NED",
+    "japan" => "JPN",
+	"sweden" => "SWE",
+    "tunisia" => "TUN",
+    "belgium" => "BEL",
+    "egypt" => "EGY",
+    "iran" => "IRN",
+    "new zealand" => "NZL",
+    "spain" => "ESP",
+    "cape verde" => "CPV",
+    "saudi arabia" => "KSA",
+    "uruguay" => "URU",
+    "france" => "FRA",
+    "senegal" => "SEN",
+	"iraq" => "IRQ",
+    "norway" => "NOR",
+    "argentina" => "ARG",
+    "algeria" => "ALG",
+    "austria" => "AUT",
+    "jordan" => "JOR",
+    "portugal" => "POR",
+	"dr congo" => "COD",
+    "uzbekistan" => "UZB",
+    "colombia" => "COL",
+    "england" => "ENG",
+    "croatia" => "CRO",
+    "ghana" => "GHA",
+    "panama" => "PAN"
+];
+
+$arrFindCountry = array("USA","Côte d'Ivoire","IR Iran","Korea Republic","Curaçao","Bosnia and Herzegovina","Türkiye","Congo DR","Cabo Verde");
+$arrReplCountry = array("United States","Ivory Coast","Iran","South Korea","Curacao","Bosnia","Turkiye","DR Congo","Cape Verde");
+
+$opensearchTBO = new Opensearch();
+$opensearchTBO->init(OS_TBO_URL,OS_TBO_USERNAME,OS_TBO_PASSWORD,true);
+
+$where = array();
+array_push($where,array("match_phrase" => array("index_year" => "2026")));
+
+$condition = array();
+if(count($where) > 0){
+	$condition = array("bool" =>
+					array("filter" =>
+						$where
+					)
+				);
+}
+
+$fields = array("id","id_competition","id_season","id_negara","negara");
+$sort = array("id_negara" => "asc");
+$start = 0;
+$limit = 50;
+$response = $opensearchTBO->find("klasemen_pialadunia",$condition,$fields,$sort,$start,$limit);
+
+$arrUpdateNegara = array();
+$totalupdate = 0;
+$idx = 1;
+if($response['status']){
+	$totalNegara = isset($response['total_row'])?$response['total_row']:0;
+	$dataNegara = isset($response['data'])?$response['data']:array();
+
+	if(count($dataNegara) > 0){
+		$user_agents = [
+				"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36",
+				"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36",
+				"Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/113.0",
+				"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
+			];
+		$random_user_agent = $user_agents[array_rand($user_agents)];
+
+		$cookie = array(
+			's_cc=true','OptanonAlertBoxClosed=2025-06-09T07:37:09.503Z'
+		);
+		
+		foreach($dataNegara as $rows){
+			$row = $rows['_source'];
+			
+			$id = isset($row['id'])?intval($row['id']):0;
+			$id_negara = isset($row['id_negara'])?$row['id_negara']:0;
+			$negara = isset($row['negara'])?$row['negara']:"";
+			$idCompetition = isset($row['id_competition'])?$row['id_competition']:17;
+			$idSeason = isset($row['id_season'])?$row['id_season']:285023; //2026
+			
+			if(!empty($id_negara)){
+				$url_pildun_stats = "https://fdh-api.fifa.com/v1/stats/season/$idSeason/team/$id_negara.json";
+								
+				echo $negara." : ". $url_pildun_stats."<br>";
+				
+				$options = array(
+				  'http'=>array(
+					'method'=>"GET",
+					'header'=>"Accept-language: en\r\n" .
+							  (!empty($cookie) ? "Cookie: ".implode('; ', (array)$cookie)."\r\n" : '').
+							  "User-Agent: ".$random_user_agent."\r\n",
+					"timeout" => 2
+				  )
+				);
+
+				$context = stream_context_create($options);
+				$results = file_get_contents($url_pildun_stats, false, $context);
+
+				if($results != false){
+					$results = json_decode($results, TRUE);
+					
+					if(count($results) > 0){
+						$arrStatsCountryTemp = array_column($results, 1, 0);
+						
+						$keys = array_keys($arrStatsCountryTemp);
+
+						$snakeKeys = array_map(function($key) {
+							return strtolower(preg_replace('/(?<!^)[A-Z]/', '_$0', $key));
+						}, $keys);
+
+						$arrStatsCountry = array_combine($snakeKeys, $arrStatsCountryTemp);
+						
+						if(count($arrStatsCountry) > 0){
+							$arrUpdate = array();
+							$arrUpdate['stats'] = $arrStatsCountry;
+							
+
+							$arrUpdateNegara[] = [
+									'id'  => $id,
+									'doc' => $arrUpdate
+								];
+						}
+					}
+				}
+				
+				if(is_countable($arrUpdateNegara) && count($arrUpdateNegara) > 0){
+					$responseUpdate = $opensearchTBO->bulkUpdate('klasemen_pialadunia', $arrUpdateNegara, 10, false);
+					
+					/* echo "<pre>";
+					print_r($arrUpdateNegara);
+					//print_r($responseUpdate);
+					echo "</pre>";  */
+					
+					if ($responseUpdate['status']) {
+						$totalupdate = $responseUpdate['total'];
+					} else {
+						echo "ERROR: " . $responseUpdate['error_reason'] . "\n\n";
+
+						if (!empty($responseUpdate['items'])) {
+							print_r($responseUpdate['items']);
+						}
+					} 
+				}
+			}
+		}	
+	}
+}	
+
+unset($opensearchTBO);
+
+echo 'Update : '.$totalupdate."<br>";
+echo 'Total execution time in seconds: ' . (microtime(true) - $time_start);
+?>

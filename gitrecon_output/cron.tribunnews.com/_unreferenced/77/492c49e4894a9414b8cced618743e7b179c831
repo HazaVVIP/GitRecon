@@ -1,0 +1,486 @@
+<?php
+date_default_timezone_set('Asia/Jakarta');
+set_time_limit(0);
+ini_set('display_errors', 1);
+error_reporting(E_ALL);
+
+define("DOC_ROOT","/var/www/html/web-cron/");
+
+include DOC_ROOT . "config/config.php";
+include DOC_ROOT . "lib/Utils.php";
+include DOC_ROOT . "lib/Opensearch.php";
+
+$json = isset($_SERVER["argv"][1]) ? $_SERVER["argv"][1] : 0;
+if (isset($_GET['json'])) {
+	$json = intval($_GET['json']);
+}
+
+
+$opensearchDev = new Opensearch();
+$opensearchDev->init(OS_DEV_URL, OS_DEV_USERNAME, OS_DEV_PASSWORD, true);
+
+$opensearchTBO = new Opensearch();
+$opensearchTBO->init(OS_TBO_URL, OS_TBO_USERNAME, OS_TBO_PASSWORD, true);
+
+
+function getSurah($os, $chapter_id) {
+    $condition = [
+        "bool" => [
+            "must" => [
+                ["term" => ["chapter_id" => $chapter_id]]
+            ]
+        ]
+    ];
+	
+	$fields = [
+		"ayah_id",
+		"ayah_text",
+		"ayah_translation_id",
+		"ayah_transliteration_en"
+	];
+
+    $sort = [
+        ["ayah_id" => ["order" => "asc"]]
+    ];
+
+    $res = $os->find("quran", $condition, $fields, $sort, 0, 300);
+
+    if ($res['status'] == 1) {
+        return array_map(function($hit){
+            return $hit['_source'];
+        }, $res['data']);
+    }
+
+    return [];
+}
+
+function getAyah($os, $chapter_id, $ayah) {
+    $condition = [
+        "bool" => [
+            "must" => [
+                ["term" => ["chapter_id" => $chapter_id]],
+                ["term" => ["ayah_id" => $ayah]]
+            ]
+        ]
+    ];
+
+    $res = $os->findOne("quran", $condition);
+
+    if ($res['status'] == 1) {
+        return $res['data']['_source'];
+    }
+
+    return null;
+}
+
+
+$urlJson = "https://cron.tribunnews.com/tribunnews/quran/json/tahlil.json";
+//$urlJson = "https://asset-2.tribunnews.com/tribunnews/alquran/json/index.json";
+
+$user_agents = [
+	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36",
+	"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36",
+	"Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/113.0",
+	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
+];
+$random_user_agent = $user_agents[array_rand($user_agents)];
+
+$options = array(
+	'http' => array(
+		'method'  => "GET",
+		'header'  => "Accept-language: en\r\n" .
+					 "User-Agent: " . $random_user_agent . "\r\n",
+		'timeout' => 1
+	)
+);
+
+$context = stream_context_create($options);
+$results = file_get_contents($urlJson, false, $context);
+
+$arrAlQuranCache = array();
+if ($results != false) {
+	$arrAlQuranCache = json_decode($results, true);
+	
+	if (!is_array($arrAlQuranCache)) {
+		$arrAlQuranCache = [];
+	}
+}
+
+if (is_countable($arrAlQuranCache) && count($arrAlQuranCache) > 0) {
+	$neededSurah = [];
+
+	$neededSurah = array_unique(array_column(
+		array_filter($arrAlQuranCache, fn($i) => in_array($i['type'], ['surah','range_ayah'])),
+		'chapter_id'
+	));
+
+	$surahCache = [];
+
+	foreach ($neededSurah as $sid) {
+		$surahCache[$sid] = getSurah($opensearchTBO, $sid);
+	}
+}	
+?>
+<!DOCTYPE html>
+<html>
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Tahlil - Al-Qur'an Digital</title>
+    <style>
+        * {
+			box-sizing: border-box;
+		}
+		
+		html {
+			scroll-behavior: smooth;
+		}
+		
+		body {margin: 0;padding: 16px;background: #f5f7fb;color: #222;}
+        
+		.container {
+			max-width: 900px;
+			margin: 0 auto;
+			padding: 16px;
+		}
+		
+		.title {
+			font-size: 28px;
+			font-weight: bold;
+			margin-bottom: 20px;
+			text-align: center;
+		}
+		
+		.back-link {
+			display: inline-block;
+			margin-top: 20px;
+			margin-bottom: 20px;
+			text-decoration: none;
+			color: #2563eb;
+			font-size: 14px;
+		}
+
+		.back-link:hover {
+			text-decoration: none;
+		}
+		
+		/* Nav */
+		.tahlil-nav {
+            position: sticky;
+            top: 0;
+            background: #f5f7fb;
+            padding-bottom: 10px;
+            z-index: 10;
+        }
+
+        .tahlil-nav-list {
+            display: flex;
+			justify-content: center; 
+            overflow-x: auto;
+			gap: 8px;
+			padding: 6px 0;
+        }
+
+        .tahlil-nav-item {
+            padding: 6px 10px;
+            background: #2563eb;
+            border: 1px solid #e5e7eb;
+			border-radius: 50%;
+            text-decoration: none;
+            color: #fff;
+			
+			font-weight: bold
+        }
+
+		.tahlil-nav-item:hover {
+			color: #ccc;
+		}
+		
+		.tahlil-box {
+			background: #fff;
+			border: 1px solid #e5e7eb;
+			border-radius: 12px;
+			padding: 18px;
+			margin-bottom: 18px;
+			box-shadow: 0 2px 8px rgba(0,0,0,0.03);
+		}
+
+		.tahlil-header {
+			display: flex;
+			align-items: center;
+			justify-content: space-between;
+			margin-bottom: 12px;
+		}
+
+		.tahlil-title {
+			font-size: 16px;
+			font-weight: 700;
+			color: #111827;
+		}
+
+		.tahlil-repeat {
+			font-size: 12px;
+			background: #eff6ff;
+			color: #1d4ed8;
+			padding: 4px 8px;
+			border-radius: 999px;
+			border: 1px solid #bfdbfe;
+		}
+
+		.tahlil-note {
+			font-size: 14px;
+			color: #6b7280;
+			margin-bottom: 12px;
+		}
+
+		/* Arab text */
+		.tahlil-arab {
+			font-size: 26px;
+			line-height: 1.9;
+			text-align: right;
+			direction: rtl;
+			margin: 12px 0;
+			color: #111;
+		}
+		
+		.tahlil-arab-long {
+			font-size: 24px;
+			line-height: 2;
+			text-align: right;
+			direction: rtl;
+			color: #0f172a;
+		}
+
+		/* Latin */
+		.tahlil-latin {
+			font-size: 15px;
+			color: #333;
+			font-style: italic;
+			margin-bottom: 4px;
+		}
+
+		/* Translation */
+		.tahlil-translation {
+			font-size: 15px;
+			color: #333;
+			margin-bottom: 10px;
+		}
+
+		/* Divider ayat */
+		.ayah-separator {
+			height: 1px;
+			background: #f1f5f9;
+			margin: 12px 0;
+		}
+		
+		/* AUDIO */
+		.tahlil-audio {
+			margin: 10px 0;
+		}
+
+		.audio-player {
+			width: 100%;
+			border-radius: 8px;
+			outline: none;
+		}
+		
+		@media (max-width: 768px) {
+			body {
+				padding: 12px;
+			}
+
+			.tahlil-box {
+				padding: 14px;
+			}
+
+			.tahlil-arab {
+				font-size: 22px;
+			}
+
+			.tahlil-title {
+				font-size: 15px;
+			}
+
+			.tahlil-latin {
+				font-size: 13px;
+			}
+
+			.tahlil-translation {
+				font-size: 12px;
+			}
+		}
+    </style>
+</head>
+<body>
+
+<div class="container">
+	<a href="quran.php" class="back-link">&larr; Kembali</a>
+	
+	<div class="title">Tahlil</div>
+	
+	<div class="tahlil-nav">
+		<div class="tahlil-nav-list">
+			<?php foreach ($arrAlQuranCache as $item): ?>
+				<?php if (!isset($item['id'])) continue; ?>
+				<a href="#step-<?= $item['id'] ?>" class="tahlil-nav-item">
+					<?= $item['id'] ?>
+				</a>
+			<?php endforeach; ?>
+		</div>
+	</div>
+<?php foreach ($arrAlQuranCache as $item): ?>
+<?php if (!isset($item['type'])) continue;  ?>
+	<div class="tahlil-box" id="step-<?= $item['id'] ?>">
+
+		<div class="tahlil-header">
+			<div class="tahlil-title">
+				<?= $item['id'] ?>. <?= $item['title'] ?>
+			</div>
+
+			<?php if (!empty($item['repeat'])): ?>
+				<div class="tahlil-repeat">
+					x<?= $item['repeat'] ?>
+				</div>
+			<?php endif; ?>
+		</div>
+
+		<?php if (!empty($item['note'])): ?>
+			<div class="tahlil-note">
+				<?= $item['note'] ?>
+			</div>
+		<?php endif; ?>
+
+		<?php if ($item['type'] == 'surah'): ?>
+			<?php $surah = $surahCache[$item['chapter_id']] ?? []; ?>
+			<?php foreach ($surah as $ayat): ?>
+				<div class="tahlil-arab"><?= $ayat['ayah_text'] ?></div>
+				<div class="tahlil-latin"><strong><?= $ayat['ayah_transliteration_en'] ?></strong></div>
+				<div class="tahlil-translation"><?= $ayat['ayah_translation_id'] ?></div>
+				<div class="ayah-separator"></div>
+			<?php endforeach; ?>
+		
+		<?php elseif ($item['type'] == 'range_ayah'): ?>
+
+		<?php 
+		for ($i = $item['start']; $i <= $item['end']; $i++):
+			$ayat = getAyah($opensearchTBO, $item['chapter_id'], $i);
+			if (!$ayat) continue;
+
+			$verse_key = str_replace(":", "_", $ayat['verse_key']);
+			$url_mp3 = "https://asset-2.tribunnews.com/tribunnews/alquran/mp3/".$ayat['chapter_id']."/".$verse_key.".mp3";
+			$url_hls = "http://localhost/cron/tribunnews/quran/hls/surah/".$ayat['chapter_id']."/".$verse_key."/index.m3u8";
+		?>
+
+			<div class="tahlil-audio">
+				<audio class="audio-player"
+					   data-hls="<?= htmlspecialchars($url_hls) ?>"
+					   data-fallback="<?= htmlspecialchars($url_mp3) ?>"
+					   controls
+					   preload="none">
+				</audio>
+			</div>
+
+			<div class="tahlil-arab"><?= $ayat['ayah_text'] ?></div>
+			<div class="tahlil-latin"><strong><?= $ayat['ayah_transliteration_en'] ?></strong></div>
+			<div class="tahlil-translation"><?= $ayat['ayah_translation_id'] ?></div>
+
+			<div class="ayah-separator"></div>
+
+		<?php endfor; ?>
+		
+		<?php elseif ($item['type'] == 'ayah'): ?>
+			<?php $ayat = getAyah($opensearchTBO, $item['chapter_id'], $item['ayah']); ?>
+			
+			<?php 
+			$verse_key = str_replace(":", "_", $ayat['verse_key']);
+			$url_mp3 = "https://asset-2.tribunnews.com/tribunnews/alquran/mp3/".$ayat['chapter_id']."/".$verse_key.".mp3";
+			//$url_hls = "https://asset-2.tribunnews.com/tribunnews/alquran/hls/surah/".$ayat['chapter_id']."/".$verse_key."/index.m3u8";
+			$url_hls = "http://localhost/cron/tribunnews/quran/hls/surah/".$ayat['chapter_id']."/".$verse_key."/index.m3u8";
+			?>
+			
+			<div class="tahlil-audio">
+				<audio class="audio-player"
+					   data-hls="<?php echo htmlspecialchars($url_hls); ?>"
+					   data-fallback="<?php echo htmlspecialchars($url_mp3); ?>"
+					   controls
+					   preload="none">
+				</audio>
+            </div>
+			<div class="tahlil-arab"><?= $ayat['ayah_text'] ?></div>
+			<div class="tahlil-latin"><strong><?= $ayat['ayah_transliteration_en'] ?></strong></div>
+			<div class="tahlil-translation"><?= $ayat['ayah_translation_id'] ?></div>
+
+		<?php else: ?>
+	
+			<div class="<?= ($item['type'] == 'dzikir_long') ? 'tahlil-arab-long' : 'tahlil-arab' ?>"><?= $item['arab'] ?></div>
+
+			<?php if (!empty($item['latin'])): ?>
+				<div class="tahlil-latin"><strong><?= $item['latin'] ?></strong></div>
+			<?php endif; ?>
+
+			<?php if (!empty($item['translation'])): ?>
+				<div class="tahlil-translation"><?= $item['translation'] ?></div>
+			<?php endif; ?>
+
+		<?php endif; ?>
+
+	</div>
+<?php endforeach; ?>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+
+<script>
+const audios = document.querySelectorAll(".audio-player");
+
+audios.forEach(audio => {
+
+    let hls;
+
+    function initAudio() {
+        if (audio.dataset.loaded) return;
+
+        const hlsUrl = audio.dataset.hls;
+        const fallback = audio.dataset.fallback;
+
+        if (Hls.isSupported()) {
+            hls = new Hls();
+            hls.loadSource(hlsUrl);
+            hls.attachMedia(audio);
+
+            hls.on(Hls.Events.ERROR, function () {
+                audio.src = fallback;
+            });
+
+        } else if (audio.canPlayType('application/vnd.apple.mpegurl')) {
+            audio.src = hlsUrl;
+        } else {
+            audio.src = fallback;
+        }
+
+        audio.dataset.loaded = "1";
+    }
+
+    // 🔥 load saat pertama play (hemat bandwidth)
+    audio.addEventListener("play", () => {
+        initAudio();
+
+        // stop audio lain
+        audios.forEach(a => {
+            if (a !== audio) {
+                a.pause();
+                a.currentTime = 0;
+            }
+        });
+    });
+
+});
+</script>
+
+</body>
+</html>
+
+<?php
+unset($opensearchDev);
+unset($opensearchTBO);
+?>

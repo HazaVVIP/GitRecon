@@ -1,0 +1,45 @@
+<?php
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+//error_reporting(0);
+
+$time_start = time();
+
+define("DOC_ROOT","/var/www/html/web-cron/");
+
+require_once "vendor_new/autoload.php";
+include DOC_ROOT."config/config.php";
+include DOC_ROOT."config/other_config.php";
+include DOC_ROOT."lib/Opensearch.php";
+include DOC_ROOT."lib/Google_analytic4.php";
+
+define("AUTH_CREDENTIAL_PROD", DOC_ROOT."google_analytic/tribunnews-17d8f@appspot.gserviceaccount.json");
+define("AUTH_CREDENTIAL_STAG", DOC_ROOT."google_analytic/google-analytic-dev@stone-goal-266105.iam.gserviceaccount.json");
+
+/* 
+Running in command
+- sudo -u cron /usr/bin/php7.4 /var/www/html/web-cron/google_analytic/insert_article_tribunnewswiki.php > /home/cron/log_cron/insert_ga_article_tribunnewswiki.txt
+*/
+
+$google_analytic = new Google_analytic4(AUTH_CREDENTIAL_PROD);
+
+$propertyId = '280294341'; //tribunnews all network
+$google_analytic->initializeAnalytics($propertyId);
+$analytics = $google_analytic->getReportTopArticleTribunnewsWiki();
+
+$dataPopuler = array();
+$total = 0;
+
+if($analytics['status']){
+	$dataPopuler = isset($analytics['data'])?$analytics['data']:array();
+	
+	if(count($dataPopuler) > 0){
+		echo "<pre>";
+		print_r($dataPopuler);
+		echo "</pre>";
+	}
+}
+	
+
+echo "\nExecution time in seconds: ". (microtime(true) - $time_start) . "\n";
+?>

@@ -1,0 +1,235 @@
+<?php
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+ini_set('memory_limit', '-1');
+set_time_limit(0); 
+
+define("DOC_ROOT","/var/www/html/web-cron/");
+
+define('OS_INDEX', 'tribunnetwork-articles');
+
+define('UPLOAD_BATCH_SIZE', 50); 
+define('UPLOAD_MAX_RETRY',  3); 
+define('UPLOAD_RETRY_DELAY_MS', 300); 
+/* define('UPLOAD_DEFAULT_HEADERS', [
+    'Cache-Control' => 'public, max-age=2592000',
+]); */
+define('UPLOAD_DEFAULT_HEADERS', []);
+
+define('OS_SCROLL_BATCH', 250); 
+define('OS_SCROLL_TTL', '5m');
+
+define('LOG_DIR', DOC_ROOT . '/logs');
+define('LOG_LEVEL', 'info'); // 'debug' | 'info' | 'warning' | 'error'
+
+include DOC_ROOT."config/config.php";
+include DOC_ROOT."lib/Opensearch.php";
+include DOC_ROOT."lib/aws/aws-autoloader.php";
+include DOC_ROOT."lib/Helper.php";
+include DOC_ROOT."lib/Storage.php";
+include DOC_ROOT."lib/UploadManager.php";
+include DOC_ROOT."lib/Logger.php";
+
+/* 
+Running in command
+- sudo -u www-data /usr/bin/php7.4 /var/www/html/web-cron/tribunnews/static_file/article_json.php aceh 2023 1
+*/
+
+$domain = isset($_SERVER["argv"][1])?$_SERVER["argv"][1]:"";
+if(isset($_GET['domain'])){
+	$domain = $_GET['domain'];
+}
+
+if (empty($domain)) {
+    echo "Usage: php article_json.php <domain> <year> [month]\n";
+    exit(1);
+}
+$domain = str_replace("jatim-timur","jatimtimur",$domain);
+
+$year = isset($_SERVER["argv"][2])?$_SERVER["argv"][2]:2022;
+if(isset($_GET['year'])){
+	$year = $_GET['year'];
+}
+
+$month = isset($_SERVER["argv"][3])?$_SERVER["argv"][3]:0;
+if(isset($_GET['month'])){
+	$month = $_GET['month'];
+}
+
+if ($month > 0) {
+    $monthPad = sprintf('%02d', $month);
+    $dateFrom = "{$year}-{$monthPad}-01 00:00:00";
+    $dateTo   = date('Y-m-t 23:59:59', mktime(0, 0, 0, $month, 1, (int)$year));
+} else {
+    $dateFrom = "{$year}-01-01 00:00:00";
+    $dateTo   = "{$year}-12-31 23:59:59";
+}
+
+
+$logger = new Logger(DOC_ROOT . 'logs', $domain.'_article_json', LOG_LEVEL);
+$logger->info("=== Cron mulai ===", [
+	'domain' => $domain,
+	'year'   => $year,
+	'month'  => $month ?: 'all',
+]);
+
+$storage       = new Storage(STORAGE_DRIVER, S3_BUCKET);
+$uploadManager = new UploadManager($storage, $logger, UPLOAD_BATCH_SIZE, UPLOAD_MAX_RETRY, UPLOAD_RETRY_DELAY_MS);
+
+$opensearchAllNetwork = new Opensearch();
+$opensearchAllNetwork->init(OS_DEV_URL,OS_DEV_USERNAME,OS_DEV_PASSWORD,true);
+
+$where = array();
+array_push($where,array("match_phrase" => array("domain" => $domain)));
+array_push($where,array("range" => array("publish_date" => array("gte" => $dateFrom, "lte" => $dateTo))));
+array_push($where,array("terms" => array("content_status" => array(1,2))));
+
+$condition = array();
+if(count($where) > 0){
+	$condition = array("bool" =>
+					array("must" =>
+						$where
+					)
+				);
+}
+$index = "tribunnetwork-articles";
+$fields = array();
+$sort = [
+	[
+		"publish_date" => [
+			"order" => "asc"
+		]
+	],
+	[
+		"id" => [
+			"order" => "asc"
+		]
+	]
+];
+
+$response = $opensearchAllNetwork->scroll(
+	OS_INDEX,
+	$condition,
+	$fields,
+	$sort,
+	OS_SCROLL_BATCH,
+	OS_SCROLL_TTL
+);
+
+if (empty($response['status'])) {
+    $logger->error("OpenSearch scroll awal gagal", ['reason' => $response['error_reason'] ?? 'unknown']);
+    exit(1);
+}
+
+$totalData = (int)($response['total_row'] ?? 0);
+$scrollId  = $response['_scroll_id'] ?? '';
+$logger->info("Total artikel ditemukan: {$totalData}");
+
+if ($totalData === 0) {
+    $logger->info("Tidak ada artikel, selesai.");
+    exit(0);
+}
+
+$timeStart    = microtime(true);
+$processed = 0;
+$skipped      = 0;
+$batchNo      = 0;
+
+while (true) {
+	$hits = $response['data'] ?? [];
+
+	if (empty($hits)) {
+		break;
+	}
+
+	$batchNo++;
+	$batchCount = count($hits);
+
+	foreach ($hits as $hit) {
+		$row = $hit['_source'] ?? [];
+
+		if (empty($row)) {
+			$skipped++;
+			continue;
+		}
+
+		$alias = (string)($row['alias'] ?? '');
+
+		if (empty($alias)) {
+			$logger->warning("Artikel tanpa alias", ['id' => $hit['_id'] ?? '']);
+			$skipped++;
+			continue;
+		}
+
+		try {
+			$key  = Helper::buildKey($domain, $alias);
+			$key  = "dev/".$key; //development
+			$json = json_encode($row, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+			$uploadManager->add($key, $json);
+			$processed++;
+		} catch (AwsException $e) {
+			$logger->error("AwsException queue [{$alias}]", ['error' => $e->getMessage()]);
+		}
+	}
+
+	unset($hits);
+
+	$nextResponse = $opensearchAllNetwork->scrollNext($scrollId);
+
+	$uploadManager->flushAll();
+
+	$elapsed = microtime(true) - $timeStart;
+	$pct     = $totalData > 0 ? round($processed / $totalData * 100, 1) : 0;
+	$logger->info("Batch #{$batchNo} ({$batchCount} dok)", [
+		'processed' => $processed,
+		'pct'       => "{$pct}%",
+		'success'   => $uploadManager->getSuccessCount(),
+		'failed'    => $uploadManager->getFailCount(),
+		'elapsed'   => Helper::formatDuration($elapsed),
+		'memory'    => Helper::memoryUsage(),
+	]);
+
+	if (empty($nextResponse['_scroll_id'])) {
+		$logger->warning("Scroll ID kosong, hentikan loop.");
+		break;
+	}
+
+	$scrollId = $nextResponse['_scroll_id'];
+	$response = $nextResponse;
+}
+
+if (!empty($scrollId)) {
+	$opensearchAllNetwork->clearScroll($scrollId);
+}
+
+unset($opensearchAllNetwork);
+
+
+$elapsed = microtime(true) - $timeStart;
+$success = $uploadManager->getSuccessCount();
+$failed  = $uploadManager->getFailCount();
+$peakMem = Helper::memoryUsage(true);
+
+$logger->info("=== Cron selesai ===", [
+    'domain'    => $domain,
+    'processed' => $processed,
+    'uploaded'  => $success,
+    'failed'    => $failed,
+    'skipped'   => $skipped,
+    'elapsed'   => Helper::formatDuration($elapsed),
+    'peak_mem'  => $peakMem,
+]);
+
+if ($failed > 0) {
+    $uploadManager->writeErrorReport(DOC_ROOT . 'logs');
+}
+
+echo "\n";
+echo "Domain    : {$domain}\n";
+echo "Processed : {$processed}\n";
+echo "Uploaded  : {$success}\n";
+echo "Failed    : {$failed}\n";
+echo "Skipped   : {$skipped}\n";
+echo "Elapsed   : " . Helper::formatDuration($elapsed) . "\n";
+echo "Peak Mem  : {$peakMem}\n";
+?>

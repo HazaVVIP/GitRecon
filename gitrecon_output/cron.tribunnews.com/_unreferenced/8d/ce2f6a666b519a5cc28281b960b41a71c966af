@@ -1,0 +1,477 @@
+<?php
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+//error_reporting(0);
+
+$time_start = time();
+
+define("DOC_ROOT","/var/www/html/web-cron/");
+
+include DOC_ROOT."config/config.php";
+include DOC_ROOT."lib/simple_html_dom.php";
+include DOC_ROOT."lib/Opensearch.php";
+
+/* 
+Running in command
+- sudo -u www-data /usr/bin/php7.4 /var/www/html/web-cron/tribunnews/klasemen_bola_indonesia_transfermarkt.php 
+*/
+
+
+$liga = "indonesia";
+$index = "klasemen_liga_".$liga;
+
+$opensearchTBO = new Opensearch();
+$opensearchTBO->init(OS_TBO_URL,OS_TBO_USERNAME,OS_TBO_PASSWORD,true);
+
+$totalUpdate = 0;
+$totalInsert = 0;
+
+$url_klasmen = "https://www.transfermarkt.co.id/liga-1-indonesia/tabelle/wettbewerb/IN1L/saison_id/2025";
+
+$cookie = COOKIE_TRANSFERMARKT;
+
+$user_agents = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/113.0",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
+    ];
+$random_user_agent = $user_agents[array_rand($user_agents)];
+
+$options = array(
+  'http'=>array(
+	'method'=>"GET",
+	'header'=>"Accept-language: en-US,en;q=0.9,id-ID;q=0.8,id;q=0.7,pl;q=0.6\r\n" .
+			  "Cookie: ".$cookie."\r\n" .
+			  "Referer: ".$url_klasmen."\r\n" .
+			  "User-Agent: ".$random_user_agent."\r\n",
+	"timeout" => 2
+  )
+);
+
+$context = stream_context_create($options);
+$results = @file_get_contents($url_klasmen, false, $context);
+
+$http_code = "";
+$status_response_header = isset($http_response_header[0])?$http_response_header[0]:"";
+if(!empty($status_response_header)){
+	preg_match('{HTTP\/\S*\s(\d{3})}', $status_response_header, $match);
+	$http_code = isset($match[1])?$match[1]:"";
+}
+
+echo $url_klasmen." : ".$http_code."<br><br>";
+
+if($results != false){
+	$dom = new DOMDocument('1.0', 'UTF-8');
+	$dom->preserveWhiteSpace = false; 
+	@$dom->loadHTML($results);
+	
+	$xpath = new DOMXPath($dom);
+	
+	$rows = $xpath->query("//table[contains(@class,'items')]/tbody/tr");
+	
+	$no = 1;
+	foreach ($rows as $row) {
+		$cols = $xpath->query("./td", $row);
+		
+		if ($cols->length >= 9) {
+			$urutan = trim($cols->item(0)->textContent);
+			$klub = trim($cols->item(2)->textContent);
+			$score_D = trim($cols->item(3)->textContent);
+			$score_M = trim($cols->item(4)->textContent);
+			$score_S = trim($cols->item(5)->textContent);
+			$score_K = trim($cols->item(6)->textContent);
+			$str_GMGK = trim($cols->item(7)->textContent);
+			$score_min_plus = trim($cols->item(8)->textContent);
+			$score_P = trim($cols->item(9)->textContent);
+			
+			if(!empty($urutan) && !empty($klub)){
+				$arr_GMGK = explode(":",$str_GMGK);
+				$score_GM = isset($arr_GMGK[0])?$arr_GMGK[0]:0;
+				$score_GK = isset($arr_GMGK[1])?$arr_GMGK[1]:0;
+				
+				$urutan = intval($urutan);
+				$klub = trim($klub);
+				$score_D = intval(trim($score_D));
+				$score_M = intval(trim($score_M));
+				$score_S = intval(trim($score_S));
+				$score_K = intval(trim($score_K));
+				$score_GM = intval(trim($score_GM));
+				$score_GK = intval(trim($score_GK));
+				$score_min_plus = trim($score_min_plus);
+				$score_P = intval(trim($score_P));
+				$lima_hasil_terakhir = "[]";
+				
+				$condition = array("match_phrase" => array("klub" => $klub));
+				$fields = array("id","image_klub_link");
+				$response = $opensearchTBO->findOne($index,$condition,$fields);
+				
+				echo $urutan." - ".$klub." - ".$score_D." - ".$score_M." - ".$score_S." - ".$score_K." - ".$score_GM." - ".$score_GK." - ".$score_min_plus." - ".$score_P."<br>";
+				
+				if($response['status']){
+					$id = isset($response['data']['_source']['id'])?intval($response['data']['_source']['id']):0;
+					$image_klub_link = isset($response['data']['_source']['image_klub_link'])?$response['data']['_source']['image_klub_link']:"";
+					$image_klub_link = str_replace(array("https://t-1.tstatic.net","https://asset-1.tstatic.net"),"https://asset-1.tribunnews.com",$image_klub_link);
+					
+					$arrUpdate = array();
+					$arrUpdate['id'] = $id;
+					$arrUpdate['klub'] = $klub;
+					$arrUpdate['urutan'] = intval($urutan);
+					$arrUpdate['group'] = "";
+					$arrUpdate['image_klub_link'] = $image_klub_link;
+					$arrUpdate['score_D'] = $score_D;
+					$arrUpdate['score_M'] = $score_M;
+					$arrUpdate['score_S'] = $score_S;
+					$arrUpdate['score_K'] = $score_K;
+					$arrUpdate['score_GM'] = $score_GM;
+					$arrUpdate['score_GK'] = $score_GK;
+					$arrUpdate['score_min_plus'] = $score_min_plus;
+					$arrUpdate['score_P'] = $score_P;
+					$arrUpdate['lima_hasil_terakhir'] = $lima_hasil_terakhir;
+					
+					$responseUpdate = $opensearchTBO->updateOne($index, $id, $arrUpdate);
+					
+					/* echo "<pre>";
+					print_r($arrUpdate);
+					print_r($responseUpdate);
+					echo "</pre>"; */
+					
+					if($responseUpdate['status']){
+						$totalUpdate++;
+					} 
+				} else {
+					$klub = trim($klub);
+					$klub_alias = str_replace(array(" ","."),"-",strtolower($klub));
+					
+					$image_klub_link = "https://asset-1.tribunnews.com/img/klubimageasset/".$liga."/".$klub_alias.".png";
+					
+					$arrInsert = array();
+					$arrInsert['id'] = time()+$no;
+					$arrInsert['klub'] = $klub;
+					$arrInsert['urutan'] = intval($urutan);
+					$arrInsert['group'] = "";
+					$arrInsert['image_klub_link'] = $image_klub_link;
+					$arrInsert['score_D'] = $score_D;
+					$arrInsert['score_M'] = $score_M;
+					$arrInsert['score_S'] = $score_S;
+					$arrInsert['score_K'] = $score_K;
+					$arrInsert['score_GM'] = $score_GM;
+					$arrInsert['score_GK'] = $score_GK;
+					$arrInsert['score_min_plus'] = $score_min_plus;
+					$arrInsert['score_P'] = $score_P;
+					$arrInsert['lima_hasil_terakhir'] = $lima_hasil_terakhir;
+					
+					$responseInsert = $opensearchTBO->insert($index, $arrInsert);
+					
+					/* echo "<pre>";
+					print_r($arrInsert);
+					print_r($responseInsert);
+					echo "</pre>";  */
+					
+					if($responseInsert['status']){
+						$totalInsert++;
+					}
+					
+					$no++;
+				}
+			}
+		}
+	}
+}	
+
+//// Top Skor & Assist
+$url_topskor = "https://www.transfermarkt.co.id/liga-1-indonesia/torschuetzenliste/wettbewerb/IN1L/saison_id/2025";
+$url_assist = "https://www.transfermarkt.co.id/liga-1-indonesia/assistliste/wettbewerb/IN1L/saison_id/2025";
+	
+
+$arrFindClub = array("Malut United FC","Borneo FC Samarinda","Dewa United Banten FC","Persija Jakarta","PERSIB Bandung","PERSIS Solo","Bhayangkara Presisi Lampung FC","Persebaya Surabaya","Persik Kediri","Persita Tangerang","Bali United FC","Madura United FC");
+
+$arrReplClub = array("Malut United","Borneo FC","Dewa United","Persija","PERSIB","PERSIS","Bhayangkara FC","Persebaya","Persik","Persita","Bali United","Madura United");
+
+$user_agents = [
+		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36",
+		"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36",
+		"Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/113.0",
+		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
+	];
+$random_user_agent = $user_agents[array_rand($user_agents)];
+
+$options = array(
+  'http'=>array(
+	'method'=>"GET",
+	'header'=>"Accept-language: en-US,en;q=0.9,id-ID;q=0.8,id;q=0.7,pl;q=0.6\r\n" .
+			  "Cookie: ".$cookie."\r\n" .
+			  "Referer: ".$url_topskor."\r\n" .
+			  "User-Agent: ".$random_user_agent."\r\n",
+	"timeout" => 2
+  )
+);
+
+$context = stream_context_create($options);
+$results = @file_get_contents($url_topskor, false, $context);
+
+//echo $url_topskor."<br><br>";
+
+if($results != false){
+	$dom = new DOMDocument('1.0', 'UTF-8');
+	$dom->preserveWhiteSpace = false; 
+	@$dom->loadHTML($results);
+	
+	$xpath = new DOMXPath($dom);
+	
+	$rows = $xpath->query("//table[contains(@class,'items')]/tbody/tr");
+	$rankGoal = 1;
+	
+	foreach ($rows as $row) {
+		$urutanNode = $xpath->query(".//td[contains(@class,'zentriert')][1]", $row);
+		$urutan = $urutanNode->length ? trim($urutanNode->item(0)->textContent) : '';
+	
+		$nameNode = $xpath->query(".//td[contains(@class,'hauptlink')]/a", $row);
+		$name = $nameNode->length ? trim($nameNode->item(0)->textContent) : '';
+
+		$club = '';
+		$clubImg = $xpath->query(".//td[a[contains(@href,'/verein/')]]//img", $row);
+		if($clubImg->length){
+			$club = trim($clubImg->item(0)->getAttribute("alt"));
+		}
+
+		if(empty($club)){
+			$clubText = $xpath->query(".//td[a[contains(@href,'/verein/')]]/a", $row);
+			if($clubText->length){
+				$club = trim($clubText->item(0)->textContent);
+			}
+		}
+
+		$goalNode = $xpath->query(".//td[contains(@class,'zentriert')][last()]", $row);
+		$goals = $goalNode->length ? intval(trim($goalNode->item(0)->textContent)) : 0;
+
+		if(!empty($name) && !empty($club) && !empty($goals)){
+			$club = str_replace($arrFindClub,$arrReplClub,$club);
+			
+			$query2 = array("match_phrase" => array("klub" => $club));
+			$fields2 = array("id","image_klub_link");
+			$response2 = $opensearchTBO->findOne($index,$query2,$fields2);
+
+			$image_klub_link2 = "";
+			if($response2['status']){
+				$image_klub_link2 = isset($response2['data']['_source']['image_klub_link'])?$response2['data']['_source']['image_klub_link']:"";
+				$image_klub_link2 = str_replace(array("https://t-1.tstatic.net","https://asset-1.tstatic.net"),"https://asset-1.tribunnews.com",$image_klub_link2);
+			}	
+
+			$where1 = array();
+			array_push($where1,array("match_phrase" => array("player_name" => $name)));
+			array_push($where1,array("match_phrase" => array("klub" => $club)));
+			array_push($where1,array("match_phrase" => array("liga" => $liga)));
+			array_push($where1,array("match_phrase" => array("jenis" => "goal")));
+			
+			$query1 = array("bool" =>
+							array("must" =>
+								$where1
+							)
+					);
+			$fields1 = array("id");
+			$response1 = $opensearchTBO->findOne("topskorassist",$query1,$fields1);
+			
+			/* echo "Nama  : $name <br>";
+			echo "Klub  : $club <br>";
+			echo "Gol   : $goals <br>";
+			echo "<hr>"; */
+			
+			if($response1['status']){
+				$id = isset($response1['data']['_source']['id'])?intval($response1['data']['_source']['id']):0;
+				
+				$arrUpdateGoal = array();
+				$arrUpdateGoal['urutan'] = intval($urutan);
+				$arrUpdateGoal['val'] = intval($goals);
+				
+				$responseUpdateGoal = $opensearchTBO->updateOne("topskorassist", $id, $arrUpdateGoal);
+				
+				/* echo "<pre>";
+				print_r($arrUpdateGoal);
+				print_r($responseUpdateGoal);
+				echo "</pre>"; */
+				
+				if($responseUpdateGoal['status']){
+					
+				} 
+			} else {
+				$arrInsertGoal = array();
+				$arrInsertGoal['id'] = time()+$rankGoal;
+				$arrInsertGoal['klub'] = $club;
+				$arrInsertGoal['urutan'] = intval($urutan);
+				$arrInsertGoal['player_name'] = $name;
+				$arrInsertGoal['image_klub_link'] = $image_klub_link2;
+				$arrInsertGoal['liga'] = $liga;
+				$arrInsertGoal['val'] = intval($goals);
+				$arrInsertGoal['jenis'] = 'goal';
+				
+				$responseInsertGoal = $opensearchTBO->insert("topskorassist", $arrInsertGoal);
+				
+				/* echo "<pre>";
+				print_r($arrInsertGoal);
+				print_r($responseInsertGoal);
+				echo "</pre>"; */
+				
+				if($responseInsertGoal['status']){
+					
+				} 
+				
+				$rankGoal++;
+			}	
+		}
+	}
+}	
+
+
+if(!empty($url_assist)){
+	$results1 = @file_get_contents($url_assist, false, $context);
+	$rankAssist = 1;
+	
+	$http_code = "";
+	$status_response_header = isset($http_response_header[0])?$http_response_header[0]:"";
+	if(!empty($status_response_header)){
+		preg_match('{HTTP\/\S*\s(\d{3})}', $status_response_header, $match);
+		$http_code = isset($match[1])?$match[1]:"";
+	}
+	
+	echo $url_assist." : ".$http_code."<br><br>";
+	
+	if($results1 != false){
+		$dom1 = new DOMDocument('1.0', 'UTF-8');
+		$dom1->preserveWhiteSpace = false; 
+		@$dom1->loadHTML($results1);
+		
+		$xpath1 = new DOMXPath($dom1);
+		
+		$rows = $xpath1->query("//table[contains(@class,'items')]/tbody/tr");
+		
+		foreach ($rows as $row) {
+			$urutanNode = $xpath1->query(".//td[contains(@class,'zentriert')][1]", $row);
+			$urutan = $urutanNode->length ? trim($urutanNode->item(0)->textContent) : '';
+		
+			$nameNode = $xpath1->query(".//td[contains(@class,'hauptlink')]/a", $row);
+			$name = $nameNode->length ? trim($nameNode->item(0)->textContent) : '';
+
+			$club = '';
+			$clubImg = $xpath1->query(".//td[a[contains(@href,'/verein/')]]//img", $row);
+			if($clubImg->length){
+				$club = trim($clubImg->item(0)->getAttribute("alt"));
+			}
+
+			if(empty($club)){
+				$clubText = $xpath1->query(".//td[a[contains(@href,'/verein/')]]/a", $row);
+				if($clubText->length){
+					$club = trim($clubText->item(0)->textContent);
+				}
+			}
+
+			$goalNode = $xpath1->query(".//td[contains(@class,'zentriert')][last()]", $row);
+			$assists = $goalNode->length ? intval(trim($goalNode->item(0)->textContent)) : 0;
+
+			if(!empty($name) && !empty($club) && !empty($assists)){
+				$club = str_replace($arrFindClub,$arrReplClub,$club);
+				
+				$query3 = array("match_phrase" => array("klub" => $club));
+				$fields3 = array("id","image_klub_link");
+				$response3 = $opensearchTBO->findOne($index,$query3,$fields3);
+				
+				$image_klub_link3 = "";
+				if($response3['status']){
+					$image_klub_link3 = isset($response3['data']['_source']['image_klub_link'])?$response3['data']['_source']['image_klub_link']:"";
+					$image_klub_link3 = str_replace(array("https://t-1.tstatic.net","https://asset-1.tstatic.net"),"https://asset-1.tribunnews.com",$image_klub_link3);
+				}	
+				
+				$where4 = array();
+				array_push($where4,array("match_phrase" => array("player_name" => $name)));
+				array_push($where4,array("match_phrase" => array("klub" => $club)));
+				array_push($where4,array("match_phrase" => array("liga" => $liga)));
+				array_push($where4,array("match_phrase" => array("jenis" => "assist")));
+				
+				$query4 = array("bool" =>
+								array("must" =>
+									$where4
+								)
+						);
+				$fields4 = array("id");
+				$response4 = $opensearchTBO->findOne("topskorassist",$query4,$fields4);
+				
+				/* echo "Nama  	: $name <br>";
+				echo "Klub  	: $club <br>";
+				echo "Assist   	: $assists <br>";
+				echo "<hr>"; */
+				
+				if($response4['status']){
+					$id = isset($response4['data']['_source']['id'])?intval($response4['data']['_source']['id']):0;
+					
+					$arrUpdateAssist = array();
+					$arrUpdateAssist['urutan'] = intval($urutan);
+					$arrUpdateAssist['val'] = intval($assists);
+					
+					$responseUpdateAssist = $opensearchTBO->updateOne("topskorassist", $id, $arrUpdateAssist);
+					
+					/* echo "<pre>";
+					print_r($arrUpdateAssist);
+					print_r($responseUpdateAssist);
+					echo "</pre>";  */
+					
+					if($responseUpdateAssist['status']){
+						
+					} 
+				} else {
+					$arrInsertAssist = array();
+					$arrInsertAssist['id'] = time()+$rankAssist;
+					$arrInsertAssist['klub'] = $club;
+					$arrInsertAssist['urutan'] = intval($urutan);
+					$arrInsertAssist['player_name'] = $name;
+					$arrInsertAssist['image_klub_link'] = $image_klub_link3;
+					$arrInsertAssist['liga'] = $liga;
+					$arrInsertAssist['val'] = intval($assists);
+					$arrInsertAssist['jenis'] = 'assist';
+					
+					$responseInsertAssist = $opensearchTBO->insert("topskorassist", $arrInsertAssist);
+					
+					/* echo "<pre>";
+					print_r($arrInsertAssist);
+					print_r($responseInsertAssist);
+					echo "</pre>"; */
+					
+					if($responseInsertAssist['status']){
+						
+					}
+					
+					$rankAssist++;
+				}
+			}
+		}
+	}	
+}
+//// End Top Skor & Assist	
+
+unset($opensearchTBO);
+
+
+$opts = array(
+			  'http'=>array(
+				'method'=>"GET",
+				'header'=>"Accept-language: en\r\n" .
+						  "User-Agent: Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; Tribunbot/1.0; +http://tribunnews.com/bot.html) Chrome/W.X.Y.Z Safari/537.36\r\n",
+				'timeout' => 2
+			  ),
+			  'ssl'  => array (
+				'verify_peer'      => false,
+				'verify_peer_name' => false,
+			  )
+			);
+$context = stream_context_create($opts);
+
+file_get_contents('https://api.tribunnews.com/tcache/update_custom_memcache/dataKlasemen'.$liga.'', false, $context);
+file_get_contents('https://api.tribunnews.com/tcache/update_custom_memcache/dataKlasemenBola'.$liga.'', false, $context);
+file_get_contents('https://api.tribunnews.com/tcache/update_custom_memcache/klasemen_'.$liga.'', false, $context);
+file_get_contents('https://api.tribunnews.com/tcache/update_custom_memcache/dataKlasemenBolaFull'.$liga.'', false, $context);
+file_get_contents('https://api.tribunnews.com/tcache/update_custom_memcache/klasemen_'.$liga.'_standings', false, $context);
+
+echo "Total Update Liga ".$liga." = ".$totalUpdate."\n";
+echo "Total Insert Liga ".$liga." = ".$totalInsert."\n";
+
+echo "\nExecution time in seconds: ". (microtime(true) - $time_start) . "\n";
+?>

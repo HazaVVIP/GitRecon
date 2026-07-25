@@ -1,0 +1,82 @@
+<?php 
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+define('TIMEZONE', 'Asia/Jakarta');
+date_default_timezone_set(TIMEZONE);
+//error_reporting(0);
+
+$time_start = time();
+
+include "/var/www/html/web-cron/config/config.php";
+include_once "/var/www/html/web-cron/tjb/model/model_cron.php";
+
+$dbname = "tribunjualbeli";
+$servername = "db-tjb.cttdtdmogujb.ap-southeast-1.rds.amazonaws.com";
+$username = "ittjb-cms";
+$password = "sp#trodrop5awOpridu_awavuF?Mefuye!ruBeB2";
+
+$conn = new mysqli($servername, $username, $password, $dbname);
+//load model class
+
+$now = new DateTime();
+// $mins = $now->getOffset() / 60;
+// $sgn = ($mins < 0 ? -1 : 1);
+// $mins = abs($mins);
+// $hrs = floor($mins / 60);
+// $mins -= $hrs * 60;
+// $offset = sprintf('%+d:%02d', $hrs*$sgn, $mins);
+// $conn->query("SET time_zone='$offset';");
+$dateNow    = $now->format('Y-m-d');
+
+$model_cron  = new model_cron();
+
+//$date_now = date("Y-m-d", time());
+$TotalPendingToActiveCount = 0;
+$TotalActiveToExpiredCount = 0;
+//query check pending campaign to active
+$queryGetPendingtoActive = $model_cron->get_data_voucher_pending_active($dateNow);
+$totalPendingtoActive = mysqli_num_rows($queryGetPendingtoActive);
+
+//set status pending to active
+if ($totalPendingtoActive > 0) {
+    $queryDataGetPendingtoActive = mysqli_fetch_assoc($queryGetPendingtoActive);
+    foreach($queryDataGetPendingtoActive as $row_active)
+    {
+        $status_voucher_active = "active";
+        // $arrUpdateStatusVoucherToActive = array(
+        // 	"status_voucher" => "active",
+        // 	"modified_by" => 1,
+        // 	"modified_date" => date('Y-m-d H:i:s')
+        // );
+        $model_cron->update_status_voucher($row_active['id_voucher'], $status_voucher_active);
+        $TotalPendingToActiveCount++;
+    }
+} 
+sleep(2);
+//query check active campaign to expired
+$queryGetActivetoExpired = $model_cron->get_data_voucher_active_expired($dateNow);
+$totalActivetoExpired = mysqli_num_rows($queryGetActivetoExpired);
+
+//set status active to expired
+if ($totalActivetoExpired > 0) {
+    $queryDataGetPendingtoExpired = mysqli_fetch_assoc($queryGetActivetoExpired);
+    foreach($queryDataGetPendingtoExpired as $row_expired)
+    {
+        $status_voucher_expired = "expired";
+        // $arrUpdateStatusVoucherToExpired = array(
+        // 	"status_voucher" => "expired",
+        // 	"modified_by" => 1,
+        // 	"modified_date" => date('Y-m-d H:i:s')
+        // );
+        $model_cron->update_status_voucher($row_expired['id_voucher'], $status_voucher_expired);
+        $TotalActiveToExpiredCount++;
+    }
+}
+
+echo "TOTAL ACTIVATED VOUCHER : " . $TotalPendingToActiveCount . "<br />";
+echo "TOTAL EXPIRED VOUCHER : " . $TotalActiveToExpiredCount . "<br />";
+
+echo "\nExecution time in seconds: ". (microtime(true) - $time_start) . "\n";
+
+
+?>

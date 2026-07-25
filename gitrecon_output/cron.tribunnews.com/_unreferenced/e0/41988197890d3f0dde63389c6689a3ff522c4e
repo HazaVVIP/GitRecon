@@ -1,0 +1,66 @@
+<?php
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+
+$time_start = time();
+
+define("DOC_ROOT","/var/www/html/web-cron/");
+//define("DOC_ROOT",$_SERVER["DOCUMENT_ROOT"]."/");
+
+include DOC_ROOT."config/config.php";
+include DOC_ROOT."lib/Opensearch.php";
+
+$url = "https://www.logammulia.com/id/harga-emas-hari-ini";
+$ch = curl_init();
+
+curl_setopt($ch, CURLOPT_URL, $url);
+curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+curl_setopt($ch, CURLOPT_HTTPHEADER, [
+    'accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+    'accept-language: en-US,en;q=0.9',
+    'cache-control: no-cache',
+    'pragma: no-cache',
+    'user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:110.0) Gecko/20100101 Firefox/110.0',
+]);
+$html = curl_exec($ch);
+curl_close($ch);
+
+var_dump($html);
+
+// Parse HTML dengan DOM
+$dom = new DOMDocument();
+libxml_use_internal_errors(true); // Hindari warning HTML tidak valid
+$dom->loadHTML($html);
+libxml_clear_errors();
+
+$xpath = new DOMXPath($dom);
+
+// Cari baris-baris harga di tabel
+$rows = $xpath->query("//table[contains(@class, 'table')]/tbody/tr");
+
+$data = [];
+
+foreach ($rows as $row) {
+    $cols = $xpath->query("td", $row);
+    if ($cols->length >= 3) {
+        $berat = trim($cols[0]->nodeValue);
+        $harga = trim($cols[1]->nodeValue);
+        $harga_pph = trim($cols[2]->nodeValue);
+
+        $data[] = [
+            'berat' => $berat,
+            'harga' => $harga,
+            'harga_dengan_pph' => $harga_pph,
+        ];
+    }
+}
+
+// Tampilkan hasil sebagai JSON
+header('Content-Type: application/json');
+echo json_encode($data, JSON_PRETTY_PRINT);
+
+unset($opensearch);
+
+
+echo '<br>Execution time in seconds: ' . (microtime(true) - $time_start) . "<br>";
+?>

@@ -1,0 +1,119 @@
+<?php
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+
+$time_start = time();
+
+define("DOC_ROOT","/var/www/html/web-cron/");
+
+/* 
+Running in cmd / command
+- sudo -u cron /usr/bin/php7.4 /var/www/html/web-cron/tribunnews/quickcount_pilpres2024.php 
+*/
+
+include DOC_ROOT."config/config.php";
+include DOC_ROOT."lib/Opensearch.php";
+
+$base_url_kompas = 'https://hasil.menarakita.net/result_pileg';
+$api_key_kompas = 'xvZnjXOn7SHqEWNXVWqWmgyiqGPDBp3o';
+
+$headers = array(
+				'Accept: application/json', 
+				'Content-Type: application/json',
+				'API-key: xvZnjXOn7SHqEWNXVWqWmgyiqGPDBp3o'
+			);
+
+$ch = curl_init();
+curl_setopt($ch, CURLOPT_URL, $base_url_kompas);
+curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+curl_setopt($ch, CURLOPT_MAXREDIRS, 10);
+curl_setopt($ch, CURLOPT_TIMEOUT, 10);
+curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
+curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+$server_output = curl_exec($ch);
+$http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+curl_close($ch);
+
+$result = json_decode($server_output, TRUE);
+
+echo "<pre>";
+print_r($server_output);
+echo "</pre>";
+
+if($http_code === 200){
+	$id = 1;
+	$suaramasuk = isset($result['suaramasuk'])?intval($result['suaramasuk']):0;
+	$persensuaramasuk = isset($result['persensuaramasuk'])?floatval($result['persensuaramasuk']):0;
+	$timestamp = $result['timestamp'];
+	
+	$parpol1 = isset($result['A'])?floatval($result['A']):0;
+	$parpol2 = isset($result['B'])?floatval($result['B']):0;
+	$parpol3 = isset($result['C'])?floatval($result['C']):0;
+	$parpol4 = isset($result['D'])?floatval($result['D']):0;
+	$parpol5 = isset($result['E'])?floatval($result['E']):0;
+	$parpol6 = isset($result['F'])?floatval($result['F']):0;
+	$parpol7 = isset($result['G'])?floatval($result['G']):0;
+	$parpol8 = isset($result['H'])?floatval($result['H']):0;
+	$parpol9 = isset($result['I'])?floatval($result['I']):0;
+	$parpol10 = isset($result['J'])?floatval($result['J']):0;
+	$parpol11 = isset($result['K'])?floatval($result['K']):0;
+	$parpol12 = isset($result['L'])?floatval($result['L']):0;
+	$parpol13 = isset($result['M'])?floatval($result['M']):0;
+	$parpol14 = isset($result['N'])?floatval($result['N']):0;
+	$parpol15 = isset($result['O'])?floatval($result['O']):0;
+	$parpol16 = isset($result['P'])?floatval($result['P']):0;
+	$parpol17 = isset($result['Q'])?floatval($result['Q']):0;
+	$parpol24 = isset($result['R'])?floatval($result['R']):0;
+	
+	if(!empty($suaramasuk)){
+		$opensearchTest = new Opensearch();
+		$opensearchTest->init(OS_DEV_URL,OS_DEV_USERNAME,OS_DEV_PASSWORD,true);
+		
+		//$opensearchTBO = new Opensearch();
+		//$opensearchTBO->init(OS_TBO_URL,OS_TBO_USERNAME,OS_TBO_PASSWORD,true);
+
+		$arrValue = array();
+		$arrValue['id'] = $id;
+		$arrValue['parpol1'] = $parpol1;
+		$arrValue['parpol2'] = $parpol2;
+		$arrValue['parpol3'] = $parpol3;
+		$arrValue['parpol4'] = $parpol4;
+		$arrValue['parpol5'] = $parpol5;
+		$arrValue['parpol6'] = $parpol6;
+		$arrValue['parpol7'] = $parpol7;
+		$arrValue['parpol8'] = $parpol8;
+		$arrValue['parpol9'] = $parpol9;
+		$arrValue['parpol10'] = $parpol10;
+		$arrValue['parpol11'] = $parpol11;
+		$arrValue['parpol12'] = $parpol12;
+		$arrValue['parpol13'] = $parpol13;
+		$arrValue['parpol14'] = $parpol14;
+		$arrValue['parpol15'] = $parpol15;
+		$arrValue['parpol16'] = $parpol16;
+		$arrValue['parpol17'] = $parpol17;
+		$arrValue['parpol24'] = $parpol24;
+		$arrValue['suaramasuk'] = $suaramasuk;
+		$arrValue['persensuaramasuk'] = $persensuaramasuk;
+		$arrValue['timestamp'] = $timestamp;
+		$arrValue['created_date'] = date("Y-m-d H:i:s");
+
+		//$responseInsert = $opensearchTest->insert("widget_quickcount_pilleg2024", $arrValue);
+		//$responseInsert = $opensearchTBO->insert("widget_quickcount_pilleg2024", $arrValue);
+
+		echo "<pre>";
+		//print_r($responseInsert);
+		print_r($arrValue);
+		echo "</pre>"; 
+		
+		unset($opensearchTest);
+		//unset($opensearchTBO);
+	}
+} else {
+	echo "Error HTTP Code ".$http_code." = ".$result['detail'];
+}	
+
+echo '<br>Execution time in seconds: ' . (microtime(true) - $time_start) . "<br>";
+echo '\n'.date("Y-m-d H:i:s");
+?>

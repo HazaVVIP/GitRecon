@@ -1,0 +1,85 @@
+<?php
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+//error_reporting(0);
+
+use \MongoDB\BSON\UTCDateTime;
+
+$time_start = time();
+
+define("DOC_ROOT","/var/www/html/web-cron/");
+
+require_once "./../../vendor/autoload.php";
+include DOC_ROOT."config/config.php";
+include DOC_ROOT."lib/Mongodb.php";
+include DOC_ROOT."lib/Opensearch.php";
+
+$date = isset($_GET['date'])?$_GET['date']:"";
+
+if(!empty($date)){
+	$dateStart = $date;
+} else {	
+	$dateStart = date("Y-m-d", strtotime('-1 days'));
+}
+
+
+//MONGODB
+$mongodb = new Mongodb();
+$mongodb->connect(MONGODB_USER_HOST_PROD,MONGODB_USER_USERNAME_PROD,MONGODB_USER_PASSWORD_PROD,"tribunnews",true);
+
+
+$collection = "users_history_not_login";
+$dateHistory = date("Ymd", strtotime($dateStart));
+
+$query = [
+			"dt" => ['$lte' => intval($dateHistory)]
+		];
+//$totalUserHistory = $mongodb->total($collection,$query);
+
+echo $dateHistory."<br>";
+
+
+$batchSize = 1000;
+
+do {
+    try {
+		$fields = array("_id");
+		$sort = array("dt" => -1);
+		$cursor = $mongodb->find($collection,$query,$fields,$sort,0,$batchSize);
+
+
+		$ids = [];
+		if ($cursor && is_iterable($cursor)) {
+			foreach ($cursor as $doc) {
+				$ids[] = $doc->_id;
+			}
+		} else {
+			echo "Cursor invalid or empty\n";
+			break;
+		}
+
+		$count = count($ids);
+
+		if ($count > 0) {
+			$mongodb->deleteMany(
+				$collection,
+				["_id" => ['$in' => $ids]]
+			);
+
+			echo date("Y-m-d H:i:s")." Deleted batch: ".$count."\n";
+			usleep(200000);
+		}
+	 } catch (Throwable $e) {
+        echo "ERROR: ".$e->getMessage()."\n";
+        break; 
+    }
+
+} while ($count > 0);
+
+$mongodb->close();
+unset($mongodb);
+
+
+//echo 'Total Deleted : '.$totalUserHistory."<br>\n";
+echo '<br>Execution time in seconds: ' . (microtime(true) - $time_start) . "<br>";
+?>

@@ -1,0 +1,33 @@
+<?php
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+
+define("DOC_ROOT","/var/www/html/web-cron/");
+
+include DOC_ROOT."config/config.php";
+include DOC_ROOT."lib/Opensearch.php";
+
+$opensearch = new Opensearch();
+$opensearch->init(ES_ADS_URL,ES_ADS_USERNAME,ES_ADS_PASSWORD,true);
+
+$index = 'tribunnews-ads_setting';
+$tables = array(
+		'id' => "integer",
+		'unit' => "text_keyword",
+		'pos' => "text_keyword",
+		'page' => "text_keyword",
+		'section' => "text_keyword",
+		'status' => "integer",
+		"start" => "date_null", 
+		"finish" => "date_null", 
+		"comment" => "text"
+	);
+$response = $opensearch->create($index,$tables);
+
+echo "<pre>";
+print_r($tables);
+print_r($response);
+echo "</pre>";
+
+unset($opensearch);
+?>

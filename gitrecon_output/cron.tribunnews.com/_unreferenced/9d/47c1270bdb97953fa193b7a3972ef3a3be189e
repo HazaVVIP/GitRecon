@@ -1,0 +1,22 @@
+<?php
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+//error_reporting(0);
+
+$time_start = time();
+
+define("DOC_ROOT","/var/www/html/web-cron/");
+
+include DOC_ROOT."config/config.php";
+include DOC_ROOT."lib/Opensearch.php";
+//include DOC_ROOT."google_analytic/Google_analytic.php";
+
+/* 
+Running in command
+- sudo -u www-data /usr/bin/php7.4 /var/www/html/web-cron/tribunnews/klasemen_bola_kompas.php inggris
+*/
+
+echo "OK";
+
+echo "\nExecution time in seconds: ". (microtime(true) - $time_start) . "\n";
+?>

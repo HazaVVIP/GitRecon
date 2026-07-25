@@ -1,0 +1,58 @@
+<?php
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+
+$time_start = time();
+
+define("DOC_ROOT","/var/www/html/web-cron/");
+
+include DOC_ROOT."config/config.php";
+
+$base_url_kompas = 'https://hasil.menarakita.net/result';
+$api_key_kompas = 'xvZnjXOn7SHqEWNXVWqWmgyiqGPDBp3o';
+
+$headers = array(
+				'Accept: application/json', 
+				'Content-Type: application/json',
+				'API-key: xvZnjXOn7SHqEWNXVWqWmgyiqGPDBp3o'
+			);
+
+$ch = curl_init();
+curl_setopt($ch, CURLOPT_URL, $base_url_kompas);
+curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+curl_setopt($ch, CURLOPT_MAXREDIRS, 10);
+curl_setopt($ch, CURLOPT_TIMEOUT, 10);
+curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
+curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+$server_output = curl_exec($ch);
+$http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+curl_close($ch);
+
+$result = json_decode($server_output, TRUE);
+
+if($http_code === 200){
+	echo "<pre>";
+	print_r($result);
+	echo "</pre>";
+	
+	$paslon1 = floatval($result['1-ANIES']);
+	$paslon2 = floatval($result['2-PRABOWO']);
+	$paslon3 = floatval($result['3-GANJAR']);
+	$suaramasuk = intval($result['suaramasuk']);
+	$persensuaramasuk = floatval($result['persensuaramasuk']);
+	$timestamp = intval($result['timestamp']);
+	
+	var_dump($paslon1);
+	var_dump($paslon2);
+	var_dump($paslon3);
+	var_dump($suaramasuk);
+	var_dump($persensuaramasuk);
+	var_dump($timestamp);
+} else {
+	echo "Error HTTP Code ".$http_code." = ".$result['detail'];
+}	
+
+echo '<br>Execution time in seconds: ' . (microtime(true) - $time_start) . "<br>";
+?>

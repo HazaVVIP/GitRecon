@@ -1,0 +1,50 @@
+<?php 
+include_once "/var/www/html/web-cron/config/config_db_booking.php";
+
+class model_transaction{
+
+    private $conn_db;
+    public function __construct()
+    {
+        //get conn db
+        $this->conn_db = new config_db_booking();
+    }
+
+    public function get_invoice_expired($dateNow) {
+        $con = $this->conn_db->conn_to_db_prod();
+        /* $sql = "SELECT id,id_event,id_ticket,jumlah_ticket,kode_invoice,status_paid,transaction_status,custom_field,tgl_transaksi,tgl_expire,JSON_UNQUOTE(JSON_EXTRACT(response, '$.transaction_status')) AS resp_status,
+                transaction_status, status_paid, jersey
+                FROM tbl_transaksi WHERE transaction_status='1' AND DATE(tgl_transaksi) >= '2023-05-03' AND LEFT(user_id,5) !='error'
+                AND JSON_UNQUOTE(JSON_EXTRACT(response, '$.status_code')) IN ('407','202') LIMIT 50"; */
+        $sql = "SELECT user_id,id,id_event,id_ticket,jumlah_ticket,kode_invoice,status_paid,transaction_status,custom_field,tgl_transaksi,tgl_expire, transaction_status, status_paid, jersey, transaction_status
+        FROM tbl_transaksi WHERE transaction_status='1' AND DATE(tgl_transaksi) >= '2023-05-03' AND tgl_expire < '$dateNow'
+        LIMIT 50";
+        // $sql = "SELECT user_id,id,id_event,id_ticket,jumlah_ticket,kode_invoice,status_paid,transaction_status,custom_field,tgl_transaksi,tgl_expire, transaction_status, status_paid, jersey, transaction_status
+        // FROM tbl_transaksi WHERE kode_invoice='TB477517188984249495808'
+        // LIMIT 50";
+        $result = mysqli_query($con, $sql);	
+		return $result;
+	}
+
+    public function getStockTicket($id){
+        $con = $this->conn_db->conn_to_db_prod();
+		$sql = "SELECT stock from ticket where id=$id";
+		$result = mysqli_query($con, $sql);	
+		return $result;
+	}
+
+    public function get_voucher_expired($dateNow) {
+        $con = $this->conn_db->conn_to_db_prod();
+        $sql = "SELECT * FROM voucher WHERE end_date < '$dateNow' LIMIT 20";
+        $result = mysqli_query($con, $sql);	
+		return $result;
+	}
+
+    public function getStockJersey($id, $type='',$size=''){
+        $con = $this->conn_db->conn_to_db_prod();
+        $sql = "SELECT stock from jersey where id_ticket=$id AND jersey_type='$type' AND `size`='$size' ";
+        $result = mysqli_query($con, $sql);	
+		return $result;
+	}
+}
+?>

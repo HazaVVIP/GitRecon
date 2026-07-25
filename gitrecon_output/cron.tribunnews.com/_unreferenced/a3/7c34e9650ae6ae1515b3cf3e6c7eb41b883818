@@ -1,0 +1,1 @@
+<?php//ini_set('display_errors',1);//error_reporting(E_ALL);error_reporting(0);$time_start = time();$url = "https://www.logammulia.com/id/harga-emas-hari-ini";$response = @file_get_contents($url);echo $url_klasmen."<br>";var_dump($response);echo "\nExecution time in seconds: ". (microtime(true) - $time_start) . "\n";?>

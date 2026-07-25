@@ -1,0 +1,13 @@
+{
+  "type": "service_account",
+  "project_id": "tribunnews-17d8f",
+  "private_key_id": "39905f55b4e43b5c507121726ae47d0e1ab7dfdc",
+  "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQC2V+VLqx1+gQ/L\nfhyTMe5794N1TN8scP68onPTafxVk20Z1ZiVt9K6vKspPPdUF6vFARB3VW+c/Ll+\nzfiuLLQsmvrlTl5lUHv7AfdJVQrI0rhMBhISXkXGhCkjIqJyrQ4YvPbiWGfRGWft\n9z1mxvlhjmADIJRXKeYQ33dimrk9Wyrz1OVVqMJ7JdBaJP/8QWZm16BhzZyNTgjI\njm99EB3BeY2Mzza/ERsp0CUDKK4IGh/ijiPIh7MUG5EdYFe15gEC1/nOC8d9D/+Q\nvMyE4X932mqKhWc5wqMeyvBgNE5aRudjzWKUY37af2+gdyysG9rJjvpMdHIjW0/x\nc9xPHaePAgMBAAECggEAIIPq9QPV9hWAogpigRMB0mRQMk4ba9rYaf3UBqqbHw1z\ngoxWsbf+YWM8aFWhSwMPk8k9TPJUvVtJnqWPB0wccunN/K7tYUapXRi8Jnz+N9Jv\nn8rjVRgvfBdcGJJYAnf+kAW+Rp16IczUfhg9AENR/AX99ADOwv5LMs4OhWxOxPRb\n/+QNzJaTYQDVgfqzabXi6DuBXt4xDYhYrefOvWXkqOYOEsUPRx14nVcicLGAQifl\nPMUkcQ35n6ZPqW96TSZGfhW6kIaX4dn6uh5EW754v/AYayp9T0e9FxlvOI1vtbo3\nJecMjOk6T+dCKCFqOy73hVqfXJHfxKT/b/N5iHkYmQKBgQDtMpuC2vvebbf++MTH\nIP8RW1+dedKDu9/xj8J/LITx/55STqCYxsgDqq8XhkJiLomqKKg4jRTGn2AqYT3r\nD2eDbRLac77A4rMsKjYPL3IzoQ6YTJiq9Ni050qXUVdPh109NlBGoFINtzs33G0K\ncj0Fy9WP3FnFF8tX8Hr7SvsJNwKBgQDEzCSXk0cx2TklRaOHixxgzjYuxmMg4qk4\nZHRu/YS37MaWAz37mgJdTY/r/K0lRUgkDCU4snbGb6Ej/nj6sc6COJyMzG/H9EFd\niQGCl/RzHig46GVyZcVqrVeTE0uzXcvG+yJjWwpUJI6vRjkdAqcqVA/nxxNGgSr1\nzavQuwAgaQKBgAz5pLoewoJjXBpNf24pJurLJcrWfCaKo3ByXcBZLhiS1BVKicxx\nq0VQE+3kgUMfqpYtTS5ywT0wQLFwylNOb2ooEEz04e1pOUXkNTrVbJjYaZT5M6y+\nYhBbSqBGadFG5VnQ28lRQcvQRyQCIdDdeOsVQGRzOFHowE3aMNAIRP03AoGBAIdH\nNRgkm1n+0jN2zVSNIbLBzakVomqmpGApXYg2KRctYc0Y6XCci2eLu5Uimfr2xwJQ\nfv2cX91EOua9NHhP5X7KX4LBvU0b8BrV5P3aaqT/Y/LKfYHHx47vHTXym6Tuovdj\nBl555H22q4Z8pSH2Aucr5csTo4JhpCBXgvX2tb2RAoGBANsC2HOULuQIbvZpPKz/\nNEFx4SHCPF2zSYwmJ9DyJsHz15D/A4wAuQtYtc/bdmiFekXKQXFBbEoIq0Ltd8/J\nDG3GhpQLFFFPQVAcY0lp1/l8BTkFvC0Secyuuijwq3QHnl17OHnIDEZsik69OmS9\n4DQBwca2r4p4zy/HxHlckaFq\n-----END PRIVATE KEY-----\n",
+  "client_email": "ga-4-report@tribunnews-17d8f.iam.gserviceaccount.com",
+  "client_id": "101298844734721654455",
+  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+  "token_uri": "https://oauth2.googleapis.com/token",
+  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/ga-4-report%40tribunnews-17d8f.iam.gserviceaccount.com",
+  "universe_domain": "googleapis.com"
+}

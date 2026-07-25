@@ -1,0 +1,233 @@
+<?php
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+//error_reporting(0);
+
+use \MongoDB\BSON\UTCDateTime;
+
+$time_start = time();
+
+define("DOC_ROOT","/var/www/html/web-cron/");
+
+require_once DOC_ROOT."vendor/autoload.php";
+include DOC_ROOT."config/config.php";
+include DOC_ROOT."lib/Writelog.php";
+include DOC_ROOT."lib/Mongodb.php";
+
+/* 
+Running in command
+- sudo -u cron /usr/bin/php7.4 /var/www/html/web-cron/tribunnews/user/users_migrasi_rds_mongo.php
+*/
+
+$writelog = new Writelog();
+$writelog->Log(DOC_ROOT."logs/","users");
+
+$writelog_doubleuser = new Writelog();
+$writelog_doubleuser->Log(DOC_ROOT."logs/","users_double");
+
+$lastid = 0;
+$total = 0;
+$filename = DOC_ROOT . "data/lastid_users.txt";
+$valueLog = file_get_contents($filename);
+if ($valueLog !== FALSE) {
+	$lastid = $valueLog;
+}
+
+$gmt7 = 7*3600*1000;
+
+//MONGODB
+$mongodb = new Mongodb();
+$mongodb->connect(MONGODB_USER_HOST_PROD,MONGODB_USER_USERNAME_PROD,MONGODB_USER_PASSWORD_PROD,"tribunnews",true);
+
+$collection = "users";
+$totalDataMongo = $mongodb->total("users");
+
+//RDS
+$con = mysqli_connect(RDS_HOST,RDS_USERNAME,RDS_PASSWORD,"tribunnews");
+if (mysqli_connect_errno()) {
+	echo "Failed to connect to MySQL: " . mysqli_connect_error();
+	exit();
+}
+
+$sql = "SELECT count(id) as total FROM users WHERE id > 0";
+$result = mysqli_query($con, $sql);
+$row = mysqli_fetch_assoc($result);
+$totalDataRDS = isset($row['total'])?$row['total']:0;
+
+//$limit = 7500;
+$limit = 20;
+if (empty($lastid)) {
+	$sql = "SELECT a.id, a.username, a.fullname, a.password, a.email, a.type_id, a.activated, a.banned, a.ban_reason, a.new_password_key,
+		a.new_password_requested, a.new_email, a.new_email_key, a.last_ip, a.last_login, a.created, a.modified,
+		a.tribunpoin, a.photo,
+		b.kmps_usrid
+		FROM users a
+		LEFT JOIN user_sso b ON a.id = b.user_id
+	    ORDER BY a.id ASC LIMIT ".$limit."";
+	$result = mysqli_query($con, $sql);
+	$totalRds = mysqli_num_rows($result);
+} else {
+	$sql = "SELECT a.id, a.username, a.fullname, a.password, a.email, a.type_id, a.activated, a.banned, a.ban_reason, a.new_password_key,
+		a.new_password_requested, a.new_email, a.new_email_key, a.last_ip, a.last_login, a.created, a.modified,
+		a.tribunpoin, a.photo,
+		b.kmps_usrid
+		FROM users a
+		LEFT JOIN user_sso b ON a.id = b.user_id
+		WHERE a.id > ".$lastid."
+	    ORDER BY a.id ASC LIMIT ".$limit."";
+	$result = mysqli_query($con, $sql);
+	$totalRds = mysqli_num_rows($result);
+}	
+
+if($totalRds > 0){
+	while($post = mysqli_fetch_assoc($result))
+	{
+		$id = isset($post['id'])?intval($post['id']):0;
+		$old_id = $id;
+		$username = isset($post['username'])?$post['username']:"";
+		$fullname = isset($post['fullname'])?$post['fullname']:"";
+		$password = isset($post['password'])?$post['password']:"";
+		$email = isset($post['email'])?$post['email']:"";
+		$type_id = isset($post['type_id'])?intval($post['type_id']):4;
+		$activated = isset($post['activated'])?intval($post['activated']):1;
+		$banned = isset($post['banned'])?intval($post['banned']):0;
+		$ban_reason = isset($post['ban_reason'])?$post['ban_reason']:"";
+		$new_password_key = isset($post['new_password_key'])?$post['new_password_key']:"";
+		$new_password_requested = isset($post['new_password_requested'])?$post['new_password_requested']:""; //datetime default null
+		$new_email = isset($post['new_email'])?$post['new_email']:"";
+		$new_email_key = isset($post['new_email_key'])?$post['new_email_key']:"";
+		$last_ip = isset($post['last_ip'])?$post['last_ip']:"";
+		$last_login = isset($post['last_login'])?$post['last_login']:""; //datetime default 0000-00-00 00:00:00
+		$created = isset($post['created'])?$post['created']:"";
+		$modified = isset($post['modified'])?$post['modified']:"";
+		$tribunpoin = isset($post['tribunpoin'])?intval($post['tribunpoin']):0;
+		$photo = isset($post['photo'])?$post['photo']:"";
+		$kmps_usrid = isset($post['kmps_usrid'])?$post['kmps_usrid']:"";
+		
+		if(!empty($email)){
+			$condition = array("email" => $email); //$condition = array("_id" => new MongoDB\BSON\ObjectId($id));
+			$fields = array("_id","old_id","username","email");
+			$rsUserCheck = $mongodb->findOne("users",$condition,$fields);
+
+			if(!$rsUserCheck){
+				if($last_login == "0000-00-00 00:00:00") $last_login = "";
+				if($modified == "0000-00-00 00:00:00") $modified = "";
+				
+				$created = new UTCDateTime( ((strtotime($created) * 1000) + $gmt7) );
+				if(!empty($modified)){
+					$modified = new UTCDateTime( ((strtotime($modified) * 1000) + $gmt7) );
+				}	
+				if(!empty($last_login)){
+					$last_login = new UTCDateTime( ((strtotime($last_login) * 1000) + $gmt7) );
+				}
+				
+				$arrInsert = array();
+				$arrInsert['old_id'] = intval($old_id);
+				$arrInsert['username'] = $username;
+				$arrInsert['fullname'] = $fullname;
+				$arrInsert['password'] = $password;
+				$arrInsert['email'] = $email;
+				$arrInsert['type_id'] = intval($type_id);
+				$arrInsert['activated'] = intval($activated);
+				$arrInsert['banned'] = intval($banned);
+				$arrInsert['ban_reason'] = $ban_reason;
+				$arrInsert['new_password_key'] = $new_password_key;
+				$arrInsert['new_password_requested'] = $new_password_requested;
+				$arrInsert['new_email'] = $new_email;
+				$arrInsert['new_email_key'] = $new_email_key;
+				$arrInsert['last_ip'] = $last_ip;
+				$arrInsert['last_login'] = $last_login;
+				$arrInsert['created'] = $created;
+				$arrInsert['modified'] = $modified;
+				$arrInsert['tribunpoin'] = intval($tribunpoin);
+				$arrInsert['photo'] = $photo;
+				$arrInsert['kmps_usrid'] = $kmps_usrid;
+				
+				$rsInsert = $mongodb->insert("users",$arrInsert);
+				
+				/* echo "<pre>";
+				print_r($rsInsert);
+				print_r($arrInsert);
+				echo "</pre>"; */
+				
+				$total++; 
+			} else {
+				$id_exist = $rsUserCheck['_id']->__toString();
+				$old_id_exist = $rsUserCheck['old_id'];
+				$username_exist = $rsUserCheck['username'];
+				$email_exist = $rsUserCheck['email'];
+				
+				echo $id_exist." = ".$old_id." - ".$username_exist." - ".$email_exist."<br>";
+				
+				/* $data_doubleuser = $id_exist." = ".$old_id." - ".$username_exist." - ".$email_exist."\n";
+				$writelog_doubleuser->doLogInfo($data_doubleuser); */
+				
+				$urlAPI = "https://apis.kompas.com/api/sso_new/account/cek_user";
+				$dataParam = array ('email' => $email_exist);
+				
+				$authorization = 'd3e398bd125ea28e442fe106316914da';
+				
+				$authorization_bearer = password_hash($authorization, PASSWORD_DEFAULT);
+		
+				$opts = array(
+						  'http'=>array(
+							'method'=>"POST",
+							'timeout' => 5,
+							'header'=> "Accept: application/json\r\n".
+									   "Authorization: Bearer ".$authorization_bearer."\r\n",
+							'content' => http_build_query($dataParam)
+						  )
+						);
+				$context = stream_context_create($opts);
+				$respond = @file_get_contents($urlAPI,false,$context);
+				
+				if($respond !== FALSE){
+					$respond = json_decode($respond, TRUE);
+					$status_profile = isset($respond['status'])?$respond['status']:0;
+
+					if($status_profile){
+						$dataUserProfile = isset($respond['profile'])?$respond['profile']:array();
+
+						if(count($dataUserProfile) > 0){
+							echo "<pre>";
+							print_r($dataUserProfile);
+							echo "</pre>";
+							
+							/* $arrUpdate = array();
+							$arrInsert['username'] = $username;
+							$arrInsert['fullname'] = $fullname;
+				
+							$condition = array("old_id" => intval($old_id));
+							$rsUser = $mongodb->update('users', $condition, array('$set'=>$arrUpdate));	 */
+						}
+					}
+				}
+				
+			}	
+		}
+		
+		$lastid = $id;
+	}	
+}
+
+echo "TOTAL RDS : " . $totalDataRDS . "\n";
+echo "TOTAL MONGODB : " . $totalDataMongo . "\n";
+echo "TOTAL MIGRASI : " . $total . "\n";
+echo "LAST ID : " . $lastid . "\n";
+if (!empty($lastid)) {
+	if (!$handle = fopen($filename, 'w+')) {
+		die("Cannot open file $filename");
+	}
+	if (fwrite($handle, $lastid) === FALSE) {
+		die("Cannot write to file $this->log_file");
+	}
+	
+	$loginfo = "TOTAL = ".$totalDataRDS." | TOTAL MIGRASI = ".$total." | LAST ID = ".$lastid."\n";
+	$writelog->doLogInfo($loginfo);
+}
+
+unset($mongodb);
+mysqli_close($con);
+
+echo '<br>Execution time in seconds: ' . (microtime(true) - $time_start) . "<br>";
+?>

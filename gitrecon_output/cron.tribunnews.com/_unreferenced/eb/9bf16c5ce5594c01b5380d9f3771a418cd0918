@@ -1,0 +1,197 @@
+<?php
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+
+$time_start = time();
+
+define("DOC_ROOT","/var/www/html/web-cron/");
+
+/* 
+Running command
+- sudo -u cron sudo -u www-data /usr/bin/php7.4 /var/www/html/web-cron/tools/rpt_tribun_compare_total.php
+*/
+
+include DOC_ROOT."config/config.php";
+include DOC_ROOT."config/other_config.php";
+include DOC_ROOT."lib/Opensearch.php";
+
+$date = isset($_GET['date'])?$_GET['date']:"";	
+		
+if(!empty($date)){
+	$dateStart = $date;
+	$dateEnd = $date;
+} else {	
+	$dateStart = date("Y-m-d", strtotime('-1 days'));
+	$dateEnd = date("Y-m-d", strtotime('-1 days'));
+}
+
+echo $dateStart." - ".$dateEnd."<br>";
+
+$totalOsAllNetwork = 0;
+
+$opensearchAllNetwork = new Opensearch();
+$opensearchAllNetwork->init(OS_ALLNETWOORK_URL,OS_ALLNETWOORK_USERNAME,OS_ALLNETWOORK_PASSWORD,true);
+
+
+$aggs = array(
+					"by_domain" => array(
+							"terms" => array(
+										"field" => "domain",
+										"order" => array("_term"=> "asc"),
+										"size" => 100
+									   )
+						)
+					);
+
+$arrMust = array();
+array_push($arrMust,array("range" => array("publish_date" => array("gte" => ''.$dateStart.' 00:00:00', "lte" => ''.$dateEnd.' 23:59:59'))));
+
+$query = array("bool" =>
+				array(
+					"must" => $arrMust
+				)
+	);
+
+$response_os_allnetwork = $opensearchAllNetwork->aggregations("tribunnetwork-articles",$aggs,$query);	
+
+$arrDomain = array();
+$arrAllNetwork = array();
+if($response_os_allnetwork['status']){
+	$totalOsAllNetwork = isset($response_os_allnetwork['total_row'])?$response_os_allnetwork['total_row']:0;
+	$dataOsAllNetwork = isset($response_os_allnetwork['data']['by_domain']['buckets'])?$response_os_allnetwork['data']['by_domain']['buckets']:array();
+	
+	echo "<br>Total : ".$totalOsAllNetwork."<br>";
+
+	foreach($dataOsAllNetwork as $rowosallnetwork){
+		$domain = isset($rowosallnetwork['key'])?$rowosallnetwork['key']:"";
+		$total = isset($rowosallnetwork['doc_count'])?intval($rowosallnetwork['doc_count']):0;
+		
+		$arrRow = array();
+		$arrRow['domain'] = $domain;
+		$arrRow['total'] = $total;
+		
+		array_push($arrAllNetwork,$arrRow);
+		array_push($arrDomain,$arrRow['domain']);
+	}
+}
+
+
+/////////
+
+
+$opensearch = new Opensearch();
+$opensearch->init(OS_URL,OS_USERNAME,OS_PASSWORD,true);
+
+$opensearchDaerah = new Opensearch();
+$opensearchDaerah->init(OS_DAERAH_URL,OS_DAERAH_USERNAME,OS_DAERAH_PASSWORD,true);
+
+$opensearchDaerahNew = new Opensearch();
+$opensearchDaerahNew->init(OS_DAERAH_NEW_URL,OS_DAERAH_NEW_USERNAME,OS_DAERAH_NEW_PASSWORD,true);
+
+$opensearchDaerahCluster = new Opensearch();
+$opensearchDaerahCluster->init(OS_DAERAH_CLUSTER_URL,OS_DAERAH_CLUSTER_USERNAME,OS_DAERAH_CLUSTER_PASSWORD,true);
+
+$opensearchCommerce = new Opensearch();
+$opensearchCommerce->init(OS_TBO_URL,OS_TBO_USERNAME,OS_TBO_PASSWORD,true);
+
+$opensearchTBO = new Opensearch();
+$opensearchTBO->init(OS_TBO_NEW_URL,OS_TBO_NEW_USERNAME,OS_TBO_NEW_PASSWORD,true);
+
+
+if(count($arrAllNetwork) > 0){
+	foreach($arrAllNetwork as $idx => $rows){
+		$network = $rows['domain'];
+
+		if($network == "tribunnews"){
+			$index = "tribunnews-articles";
+			$response_os = $opensearch->count_total($index,$query);	
+		} else {
+			if(in_array($network, LIST_COMMERCE_CLUSTER)){
+				$index = $network.".articles";
+				$response_os = $opensearchCommerce->count_total($index,$query);		
+			} else if(in_array($network, LIST_TBO_CLUSTER)){
+				$index = $network.".articles";
+				$response_os = $opensearchTBO->count_total($index,$query);	
+			} else if(in_array($network, LIST_DAERAH_NEW)){
+				$index = $network.".tribundaerah-articles";
+				$response_os = $opensearchDaerahNew->count_total($index,$query);
+			} else if(in_array($network, LIST_DAERAH_CLUSTER)){
+				$index = $network.".tribundaerah-articles";
+				$response_os = $opensearchDaerahCluster->count_total($index,$query);
+			} else { 
+				$index = $network.".tribundaerah-articles";
+				$response_os = $opensearchDaerah->count_total($index,$query);
+			}
+		}
+		
+		if($response_os['status']){
+			$total_os = isset($response_os['total'])?intval($response_os['total']):0;
+			
+			$arrAllNetwork[$idx]['total_os'] = $total_os;
+		} 
+	}	
+}	
+
+
+//RDS
+$conTBO = mysqli_connect(RDS_TBO_HOST,RDS_TBO_USERNAME,RDS_TBO_PASSWORD);
+if (mysqli_connect_errno()) die( "Failed to connect to MySQL: " . mysqli_connect_error());
+
+$conCommerce = mysqli_connect(RDS_TBO_HOST,RDS_TBO_USERNAME,RDS_TBO_PASSWORD,$site);
+if (mysqli_connect_errno()) die( "Failed to connect to MySQL: " . mysqli_connect_error());
+
+if(count($arrAllNetwork) > 0){
+	foreach($arrAllNetwork as $idx => $rows){
+		$network = $rows['domain'];
+		
+		if($network == "tribunnews"){
+			$total_rds = 0;
+		} else {
+			if(in_array($network, LIST_COMMERCE_CLUSTER)){
+				$sql = "SELECT a.id
+						FROM articles a
+						WHERE a.publish_date BETWEEN '".$dateStart." 00:00:00' AND '".$dateEnd." 23:59:59'
+						ORDER BY a.id DESC";
+				$result = mysqli_query($conCommerce, $sql);
+				$total_rds = mysqli_num_rows($result);
+			} else if(in_array($network, LIST_TBO_CLUSTER)){
+				$sql = "SELECT a.id
+						FROM articles a
+						WHERE a.publish_date BETWEEN '".$dateStart." 00:00:00' AND '".$dateEnd." 23:59:59'
+						ORDER BY a.id DESC";
+				echo $sql."<br>";
+				$resultTBO = mysqli_query($conTBO, $sql);
+				$total_rds = mysqli_num_rows($resultTBO);
+				echo $total_rds."<br>";
+			} else if(in_array($network, LIST_DAERAH_NEW)){
+				$total_rds = 0;
+			} else if(in_array($network, LIST_DAERAH_CLUSTER)){
+				$total_rds = 0;
+			} else { 
+				$total_rds = 0;
+			}
+		}
+		
+		$arrAllNetwork[$idx]['total_rds'] = $total_rds;
+	}
+}	
+
+
+echo "<pre>";
+print_r($arrAllNetwork);
+echo "</pre>";
+
+
+mysqli_close($conCommerce);
+mysqli_close($conTBO);
+
+unset($opensearch);
+unset($opensearchDaerah);
+unset($opensearchDaerahNew);
+unset($opensearchDaerahCluster);
+unset($opensearchCommerce);
+unset($opensearchTBO);
+unset($opensearchAllNetwork);
+
+echo '<br>Execution time in seconds: ' . (microtime(true) - $time_start) . "<br>";
+?>

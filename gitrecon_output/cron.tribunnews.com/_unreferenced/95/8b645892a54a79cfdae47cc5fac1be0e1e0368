@@ -1,0 +1,31 @@
+<?php
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+
+define("DOC_ROOT","/var/www/html/web-cron/");
+
+include DOC_ROOT."config/config.php";
+include DOC_ROOT."lib/Opensearch.php";
+
+$opensearch = new Opensearch();
+$opensearch->init(OS_TNEWS_IMAGE_URL,OS_TNEWS_IMAGE_USERNAME,OS_TNEWS_IMAGE_PASSWORD,true);
+//$opensearch->init(OS_DEV_URL,OS_DEV_USERNAME,OS_DEV_PASSWORD,true);
+
+$index = 'widget_quickcount_pilpres2024';
+$tables = array(
+		'id' => "integer",
+		'paslon1' => "integer",
+		'paslon2' => "integer",
+		'paslon3' => "integer",
+		'timestamp' => "date"
+		'created_date' => "date"
+	);
+$response = $opensearch->create($index,$tables);
+
+echo "<pre>";
+print_r($tables);
+print_r($response);
+echo "</pre>";
+
+unset($opensearch);
+?>

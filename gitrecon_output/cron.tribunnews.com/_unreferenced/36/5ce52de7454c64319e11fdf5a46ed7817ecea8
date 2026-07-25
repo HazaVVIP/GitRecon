@@ -1,0 +1,197 @@
+<?php
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+
+$time_start = time();
+
+define("DOC_ROOT","/var/www/html/web-cron/");
+
+include DOC_ROOT."config/config.php";
+include DOC_ROOT."config/other_config.php";
+include DOC_ROOT."lib/Opensearch.php";
+
+$site = isset($_GET['site'])?$_GET['site']:"aceh";
+$tag = isset($_GET['tag'])?$_GET['tag']:"";
+$dt_month = isset($_GET['dt_month'])?$_GET['dt_month']:"";
+
+if(!empty($site) && !empty($tag) && !empty($dt_month)){
+	$arrTag = explode(",",$tag);
+	$year_now = date("Y");
+	
+	if(count($arrTag) > 0){
+		$opensearch = new Opensearch();
+		$opensearch->init(OS_URL,OS_USERNAME,OS_PASSWORD,true);
+		
+		$opensearchDaerah = new Opensearch();
+		$opensearchDaerah->init(OS_DAERAH_URL,OS_DAERAH_USERNAME,OS_DAERAH_PASSWORD,true);
+		
+		$opensearchDaerahNew = new Opensearch();
+		$opensearchDaerahNew->init(OS_DAERAH_NEW_URL,OS_DAERAH_NEW_USERNAME,OS_DAERAH_NEW_PASSWORD,true);
+		
+		$opensearchDaerahCluster = new Opensearch();
+		$opensearchDaerahCluster->init(OS_DAERAH_CLUSTER_URL,OS_DAERAH_CLUSTER_USERNAME,OS_DAERAH_CLUSTER_PASSWORD,true);
+		
+		$opensearchCommerce = new Opensearch();
+		$opensearchCommerce->init(OS_TBO_URL,OS_TBO_USERNAME,OS_TBO_PASSWORD,true);
+		
+		$opensearchTBO = new Opensearch();
+		$opensearchTBO->init(OS_TBO_NEW_URL,OS_TBO_NEW_USERNAME,OS_TBO_NEW_PASSWORD,true);
+		
+		$arrShould = array();
+		foreach($arrTag as $tag_alias){
+			$arrShoudTag = [
+							 "match_phrase" => [
+								"tagging.alias" => $tag_alias
+							 ]
+						  ];
+			array_push($arrShould,$arrShoudTag);
+		}
+		
+		if(count($arrShould) > 0){
+			$index_name = "tribunnews-articles";
+			if($site == "video"){
+				$index_name = "tribunnews-video";
+			} else if(in_array($site, LIST_COMMERCE_CLUSTER)){
+				$index_name = $site.".articles";
+			} else if(in_array($site, LIST_TBO_CLUSTER)){
+				$index_name = $site.".articles";
+			} else if(in_array($site, LIST_DAERAH_NEW)){
+				$index_name = $site.".tribundaerah-articles";
+			} else if(in_array($site, LIST_DAERAH_CLUSTER)){
+				$index_name = $site.".tribundaerah-articles";
+			} else if(in_array($site, LIST_DAERAH_MERBABU)){
+				$index_name = $site.".tribundaerah-articles";
+			} 
+			
+			if($site == "video"){
+				$aggs = array(
+								"date_hist_agg" => array(
+										"date_histogram" => array(
+													"field" => "upload_date",
+													"interval" => "month",
+													"format" => "yyyy-MM",
+													"order" => array("_term"=> "desc")
+												   )
+									)
+								);
+								
+				$query =  array(
+								"bool" => array(
+									"must" => 
+										array(
+											array(
+												"nested" => array(
+													"path" => "tagging",
+													"query" => array(
+														"bool" => array(
+															"should" => $arrShould
+															)
+													)
+												)
+											),
+											array(
+												"range" => array(
+													"written_date" => array (
+													  'gte' => ''.$dt_month.'-01 00:00:00',
+													  'lte' => ''.$dt_month.'-31 23:59:59',
+													)
+												)
+											)
+										)
+								)
+							  );
+			} else {	
+				$aggs = array(
+								"date_hist_agg" => array(
+										"date_histogram" => array(
+													"field" => "written_date",
+													"interval" => "month",
+													"format" => "yyyy-MM",
+													"order" => array("_term"=> "desc")
+												   )
+									)
+								);
+								
+				$query =  array(
+								"bool" => array(
+									"must" => 
+										array(
+											array(
+												"nested" => array(
+													"path" => "tagging",
+													"query" => array(
+														"bool" => array(
+															"should" => $arrShould
+															)
+													)
+												)
+											),
+											array(
+												"range" => array(
+													"written_date" => array (
+													  'gte' => ''.$dt_month.'-01 00:00:00',
+													  'lte' => ''.$dt_month.'-31 23:59:59',
+													)
+												)
+											)
+										)
+								)
+							  );
+			}
+
+			$limit = 300;
+	
+			if($site == "video"){
+				$response = $opensearch->aggregations($index_name,$aggs,$query,$limit);
+			} else if(in_array($site, LIST_COMMERCE_CLUSTER)){
+				$response = $opensearchCommerce->aggregations($index_name,$aggs,$query,$limit);
+			} else if(in_array($site, LIST_TBO_CLUSTER)){
+				$response = $opensearchTBO->aggregations($index_name,$aggs,$query,$limit);
+			} else if(in_array($site, LIST_DAERAH_NEW)){
+				$response = $opensearchDaerahNew->aggregations($index_name,$aggs,$query,$limit);
+			} else if(in_array($site, LIST_DAERAH_CLUSTER)){
+				$response = $opensearchDaerahCluster->aggregations($index_name,$aggs,$query,$limit);
+			} else if(in_array($site, LIST_DAERAH_MERBABU)){
+				$response = $opensearchDaerah->aggregations($index_name,$aggs,$query,$limit);
+			} else {
+				$response = $opensearch->aggregations($index_name,$aggs,$query,$limit);
+			}
+			
+			if($response['status']){
+				$total = isset($response['total_row'])?$response['total_row']:0;
+				$rows = isset($response['data'])?$response['data']:array();
+				
+				echo "Site = ".$site."<br>";
+				echo "Tag = ".$tag."<br>";
+				echo "Total = ".$total."<br>";
+			
+				if(count($rows) > 0){
+					echo "<hr>";
+					echo "<h4>List Article</h4>";
+					
+					foreach($rows as $row){
+						$val = isset($row['_source'])?$row['_source']:array();
+						
+						$title = str_replace(array("'","\"",";",','),"",$val['title']);
+						$url = "https://".$site.".tribunnews.com/".$val['alias'];
+						if($site == "tribunnews"){
+							$url = "https://www.tribunnews.com/".$val['alias'];
+						} else if($site == "video"){
+							$url = "https://video.tribunnews.com/view/".$val['id']."/".$val['alias'];
+						}	
+						$editor_fullname = isset($val['editor_fullname'])?$val['editor_fullname']:"";
+						$writter_fullname = isset($val['writter_fullname'])?$val['writter_fullname']:"";
+						if($site == "video"){
+							$editor_fullname = isset($val['uploader_name'])?$val['uploader_name']:"";
+						}	
+						
+						echo $title.";".$url.";".$editor_fullname.";".$writter_fullname."<br>";
+					}
+				}
+			}
+		}	
+	}
+}	
+
+//echo '<br>Execution time in seconds: ' . (microtime(true) - $time_start) . "<br>";
+?>

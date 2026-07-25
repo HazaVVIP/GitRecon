@@ -1,0 +1,35 @@
+<?php
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+
+define("DOC_ROOT","/var/www/html/web-cron/");
+
+include_once DOC_ROOT."config/config.php";
+include_once DOC_ROOT."lib/Opensearch.php";
+
+$opensearch = new Opensearch();
+$opensearch->init(OS_URL,OS_USERNAME,OS_PASSWORD,true);
+
+$index = 'widget_iqair';
+$tables = array(
+		'id' => "keyword",
+		'lokasi' => "text_keyword",
+		'aqius' => "integer",
+		'stat' => "keyword",
+		'suhu' => "integer",
+		'kelembapan' => "integer",
+		'konsentrasi' => "integer",
+		'polutan' => "text_keyword",
+		'tanggal_iqair' => "text_keyword",
+		"tanggal_dt" => "date_only",
+		"tanggal_fetch" => "date"
+	);
+$response = $opensearch->create($index,$tables);
+
+echo "<pre>";
+print_r($tables);
+print_r($response);
+echo "</pre>";
+
+unset($opensearch);
+?>

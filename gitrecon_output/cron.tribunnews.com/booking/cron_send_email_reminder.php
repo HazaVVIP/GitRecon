@@ -1,0 +1,50 @@
+<?php 
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+define('TIMEZONE', 'Asia/Jakarta');
+date_default_timezone_set(TIMEZONE);
+//error_reporting(0);
+
+$time_start = time();
+
+include "/var/www/html/web-cron/config/config.php";
+include_once "/var/www/html/web-cron/booking/model/model_transaction.php";
+
+$dbname = "booking";
+$servername = "t-booking.cttdtdmogujb.ap-southeast-1.rds.amazonaws.com";
+$username = "cms-booking";
+$password = "=JmMbD5Yb_3&!avTNWg35*JjfJeT4NMzUs?S8a+G";
+
+$conn = new mysqli($servername, $username, $password, $dbname);
+
+$curl = curl_init();
+
+curl_setopt_array($curl, array(
+  CURLOPT_URL => 'https://webdev-booking.tribunnews.com/payment/api-send-email',
+  CURLOPT_RETURNTRANSFER => true,
+  CURLOPT_ENCODING => '',
+  CURLOPT_MAXREDIRS => 10,
+  CURLOPT_TIMEOUT => 0,
+  CURLOPT_FOLLOWLOCATION => true,
+  CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_1_1,
+  CURLOPT_CUSTOMREQUEST => 'POST',
+  CURLOPT_POSTFIELDS =>'{
+    "token":"$2y$10$8CE/dd7IkvWvNoLFgCO6KuyF/gU.ju7r9ZwtAmvQJlbarTKdZ7PHW",
+    "id_event": "237"
+}',
+  CURLOPT_HTTPHEADER => array(
+    'app-id: tribunbooking',
+    'app-secret: $2y$10$8CE/dd7IkvWvNoLFgCO6KuyF/gU.ju7r9ZwtAmvQJlbarTKdZ7PHW',
+    'Content-Type: application/json',
+    'Cookie: 3bun_session=342br3ej92rsvi37hj97dahse1r6eoln; XKMPSS=WTlKdWNBdG1DaDVxcC8wMlFWRjRxRy9KVVRsSGozbWJQVGtPWjc5eWFyTUZIVmVtSUZQM05LdFRXSDZLTnAvKw%3D%3D; kmps_usrid=6045f4be95c13ae24248a815a7171ffe; trbn_prof=T2lvSVR2TW91WVQyMGVDMGtMK2ZVUDQ2T0lxUVFLQWhtSWFid3ZSUkhBcG1iVjRvaHN4N3V1bENXUkEwV1dyTHEyalFSUUZtc1VRK3NSVU1SbkxqZmpVRWVFakhEaVczVlJuVXdBa2Z5MjMzMXJ0cnVpNmVlcFdDaC9iQlZjUlI%3D; usermail=6196cfa79b824a44bef0b8d5906a7b46f8d2a150186155b0cb18872c2a86538b'
+  ),
+));
+
+$response = curl_exec($curl);
+
+curl_close($curl);
+echo $response;
+
+echo "\nExecution time in seconds: ". (microtime(true) - $time_start) . "\n";
+
+?>

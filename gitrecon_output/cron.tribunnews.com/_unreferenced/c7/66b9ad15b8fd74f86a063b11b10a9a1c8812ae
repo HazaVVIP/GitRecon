@@ -1,0 +1,55 @@
+<?php
+
+class Google_analytic4{
+	private $ga_credential_file;
+	private $ga_credential_file_staging;
+	private $ga_memcached_expired = 86400; 
+	private $ga_memcached_short_expired = 1200;
+	private $ga_memcached_long_expired = 2592000;
+	
+	private $applicationName;
+	private $viewId;
+	private $website;
+	private $type;
+	private $period;
+	private $analytics = array();
+	
+	public function __construct($ga_credential_file){
+		$this->ga_credential_file = $ga_credential_file;
+	}
+	
+	public function initializeAnalytics($applicationName,$viewId,$website="",$type="",$period=""){
+		if (!function_exists('curl_reset')){
+			function curl_reset(&$ch){
+				$ch = curl_init();
+			}
+		}
+
+		$this->applicationName = $applicationName;
+		$this->viewId = $viewId;
+		$this->website = $website;
+		$this->type = $type;
+		$this->period = $period;
+
+		$client = new Google_Client();
+		$client->setApplicationName($this->applicationName);
+		$client->setAuthConfig($this->ga_credential_file);
+		$client->setScopes(['https://www.googleapis.com/auth/analytics.readonly']);
+		$this->analytics = new Google_Service_AnalyticsReporting($client);
+
+		return $this->analytics;
+	}
+	
+	public function url_title($str) {
+		 $title = strtolower(trim($str));
+		 $replacements = ['@'=> "at", '#' => "hash", '$' => "dollar", '%' => "percentage", '&' => "and", '.' => "dot", 
+					'+' => "plus", '-' => "minus", '*' => "multiply", '/' => "devide", '=' => "equal to",
+					'<' => "less than", '<=' => "less than or equal to", '>' => "greater than", '<=' => "greater than or equal to",
+			];
+
+		 $title = strtr($title, $replacements);
+		 return $urlKey = preg_replace('#[^0-9a-z]+#i', '-', $title);
+	}
+}
+
+?>

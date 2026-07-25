@@ -1,0 +1,164 @@
+<?php
+date_default_timezone_set('Asia/Jakarta');
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+
+$time_start = time();
+
+$apiKey = 'bda7647c-53ce-4b2e-a0b7-3d24f2d60fee';
+
+$daerah = isset($_SERVER["argv"][1])?$_SERVER["argv"][1]:"";
+if(isset($_GET['daerah'])){
+	$daerah = $_GET['daerah'];
+}	
+
+if(empty($daerah)) $daerah = "jakarta";
+
+$country = 'Indonesia';
+$state = 'Jakarta'; $city = 'Jakarta';
+if($daerah == "bali"){
+	$city = 'Denpasar'; $state = 'Bali';
+} else if($daerah == "medan"){
+	$city = 'Medan'; $state = 'North Sumatra';
+} else if($daerah == "bogor"){
+	$city = 'Bogor'; $state = 'West Java';
+} else if($daerah == "bandung"){
+	$city = 'Bandung'; $state = 'West Java';
+} else if($daerah == "bekasi"){
+	$city = 'Bekasi'; $state = 'West Java';
+} else if($daerah == "depok"){
+	$city = 'Depok'; $state = 'West Java';
+} else if($daerah == "surabaya"){
+	$city = 'Surabaya'; $state = 'East Java';
+} else if($daerah == "makassar"){
+	$city = 'Makassar'; $state = 'South Sulawesi';
+} else if($daerah == "banjarmasin"){
+	$city = 'Banjarmasin'; $state = 'South Kalimantan';
+} else if($daerah == "aceh"){
+	$city = 'Takengon'; $state = 'Aceh';
+} else if($daerah == "palembang"){
+	$city = 'Palembang'; $state = 'South Sumatra';
+} else if($daerah == "manado"){
+	$city = 'Manado'; $state = 'North Sulawesi';
+} else if($daerah == "papua"){
+	$city = 'Muting'; $state = 'Papua';
+}		
+
+$user_agents = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:102.0) Gecko/20100101 Firefox/102.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36 Edg/114.0.1823.51",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 12_6_1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_4_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Safari/605.1.15",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:109.0) Gecko/20100101 Firefox/109.0",
+    "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:103.0) Gecko/20100101 Firefox/103.0",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.5672.92 Safari/537.36",
+    "Mozilla/5.0 (Linux; Android 12; Pixel 6 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.5735.196 Mobile Safari/537.36",
+    "Mozilla/5.0 (Linux; Android 11; SM-A505F) AppleWebKit/537.36 (KHTML, like Gecko) SamsungBrowser/17.0 Chrome/96.0.4664.45 Mobile Safari/537.36",
+    "Mozilla/5.0 (Android 10; Mobile; rv:102.0) Gecko/102.0 Firefox/102.0",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/114.0.5735.124 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (iPad; CPU OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (iPad; CPU OS 15_7_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/114.0.5735.134 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.5481.100 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 6.3; Win64; x64; rv:104.0) Gecko/20100101 Firefox/104.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_4) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36 Brave/114.1.52.122",
+    "Mozilla/5.0 (Linux; Android 11; CPH2083) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/94.0.4606.71 Mobile Safari/537.36 OPR/61.1.3076.56626",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.5735.199 Safari/537.36 OPR/100.0.4815.76",
+];
+$random_user_agent = $user_agents[array_rand($user_agents)];
+
+$city = urlencode($city);
+$state = urlencode($state);
+$url = "https://api.airvisual.com/v2/city?city={$city}&state={$state}&country={$country}&key={$apiKey}";
+
+$ch = curl_init();
+curl_setopt($ch, CURLOPT_URL, $url);
+curl_setopt($ch, CURLOPT_USERAGENT, $random_user_agent);
+curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+$response = curl_exec($ch);
+$httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+curl_close($ch);
+
+echo $url."<br>";
+echo $httpCode."<br>";
+echo "<hr>";
+
+if ($httpCode === 200) {
+    $data = json_decode($response, true);
+	$status = ($data['status'] && $data['status'] == "success") ? 1 : 0;
+
+    if ($status) {
+        $res_country = $data['data']['country'];
+        $res_state = $data['data']['state'];
+		$res_city = $data['data']['city'];
+		
+        $res_current = $data['data']['current'];
+		
+		/* echo "<pre>";
+		print_r($data);
+		echo "</pre>"; */
+		
+		$pollution = $res_current['pollution'];
+		$deskripsi = getAqiDescription($pollution['aqius']);
+		
+		$weather = $res_current['weather'];
+		$date = new DateTime($weather['ts'], new DateTimeZone('UTC'));
+		$date->setTimezone(new DateTimeZone('Asia/Jakarta'));
+		$ts = $date->format('Y-m-d H:i:s');
+		$img_weather = "https://www.iqair.com/dl/assets/svg/weather/ic-weather-".$weather['ic'].".svg";
+		
+		
+		echo "📍 Lokasi: " . $res_city . "<br>\n";
+		echo "Waktu: " . $ts . "<br>\n";
+		echo "<hr>";
+		
+		echo "AQI: ".$pollution['aqius']." AQI⁺ US<br>\n";
+		echo "Status: {$deskripsi['kategori']}<br>\n";
+		echo "Dampak Kesehatan: {$deskripsi['dampak']}<br>\n";
+		echo "Suhu: " . $weather['tp'] . "°C<br>\n";
+		echo "Kelembapan: " . $weather['hu'] . "%<br>\n";
+		echo "<img src='$img_weather'><br>\n";
+    } else {
+        echo "❌ Data tidak ditemukan untuk kota {$city}\n";
+    }
+} else {
+    echo "❌ HTTP Error Code: {$httpCode}\n";
+    echo "Response: {$response}\n";
+}
+
+echo "\nExecution time in seconds: ". (microtime(true) - $time_start) . "\n";
+
+function getAqiDescription($aqi) {
+    if ($aqi >= 0 && $aqi <= 50) {
+        return [
+            'kategori' => 'Baik',
+            'dampak' => 'Tidak ada risiko atau dampak terhadap kesehatan. Udara bersih dan aman untuk semua orang.'
+        ];
+    } elseif ($aqi <= 100) {
+        return [
+            'kategori' => 'Sedang',
+            'dampak' => 'Masih bisa diterima, tetapi ada beberapa orang yang sangat sensitif terhadap polusi mungkin mengalami efek kecil.'
+        ];
+    } elseif ($aqi <= 150) {
+        return [
+            'kategori' => 'Tidak sehat bagi kelompok sensitif',
+            'dampak' => 'Kelompok sensitif, seperti anak-anak, orang tua, dan individu dengan masalah pernapasan, disarankan untuk membatasi aktivitas luar ruangan.'
+        ];
+    } elseif ($aqi <= 200) {
+        return [
+            'kategori' => 'Tidak sehat',
+            'dampak' => 'Semua orang dapat mulai merasakan dampak kesehatan. Kelompok sensitif mungkin mengalami dampak yang lebih serius.'
+        ];
+    } elseif ($aqi <= 300) {
+        return [
+            'kategori' => 'Sangat tidak sehat',
+            'dampak' => 'Peringatan kesehatan dikeluarkan. Risiko kesehatan meningkat untuk semua orang.'
+        ];
+    } else {
+        return [
+            'kategori' => 'Berbahaya',
+            'dampak' => 'Kondisi darurat kesehatan. Seluruh populasi berisiko mengalami dampak kesehatan yang serius.'
+        ];
+    }
+}

@@ -1,0 +1,195 @@
+<?php
+
+ini_set('display_errors', 1);
+error_reporting(E_ALL);
+
+/*
+|--------------------------------------------------------------------------
+| CONFIG OBJECT
+|--------------------------------------------------------------------------
+*/
+$config = (object)[
+    'path_root'  => '/var/www/html/web-cron/',
+    'path_config'=> 'config/config.php',
+    'path_oslib' => 'lib/Opensearch.php',
+
+    // NOCO API
+    'noco_url'   => 'https://lawu.tribun.co.id/api/v2/tables/my9kjld2azl549i/records',
+    'noco_token' => 'EakzVscfgMaz4EYtd8AgzDWyV9HuG9qy5Ulqg0vH',
+
+    // OPENSEARCH PARAMS
+    'os_params'  => [
+        'index'  => 'tribunnews-historypushnotif-v2',
+        'fields' => ['id','judul','fullname','url','datepush','content_type','user_id','deskripsi','image'],
+        'sort'   => ['datepush' => ['order' => 'desc']],
+    ],
+];
+
+define("DOC_ROOT", $config->path_root);
+
+// include configs
+include DOC_ROOT.$config->path_config;
+include DOC_ROOT.$config->path_oslib;
+
+/*
+|--------------------------------------------------------------------------
+| INIT OPENSEARCH
+|--------------------------------------------------------------------------
+*/
+$opensearch = new Opensearch();
+$opensearch->init(OS_TBO_URL, OS_TBO_USERNAME, OS_TBO_PASSWORD, true);
+
+/*
+|--------------------------------------------------------------------------
+| DATE RANGE INPUT
+|--------------------------------------------------------------------------
+*/
+$date_push = $_GET['date_push'] ?? date('Y-m-d', strtotime('-1 day')); 
+$start = $date_push . " 00:00:00";
+$end   = $date_push . " 23:59:59";
+
+/*
+|--------------------------------------------------------------------------
+| BUILD QUERY (Origin Style)
+|--------------------------------------------------------------------------
+*/
+$query = ['bool' => ['must' => []]];
+
+$query['bool']['must'][] = [
+    'range' => [
+        'datepush' => [
+            'gte' => $start,
+            'lte' => $end
+        ]
+    ]
+];
+
+/*
+|--------------------------------------------------------------------------
+| RUN QUERY
+|--------------------------------------------------------------------------
+*/
+// $response = $opensearch->find(
+//     $config->os_params['index'],
+//     $query,
+//     $config->os_params['fields'],
+//     $config->os_params['sort']
+// );
+
+/*
+|--------------------------------------------------------------------------
+| PUSH EACH RECORD TO LAWU
+|--------------------------------------------------------------------------
+*/
+$x = check_nocodb_exists("XAK2I0XI", "2025-11-18 18:45:00+00:00");
+echo "<pre>"; print_r($x); echo "</pre>"; 
+echo "Running no error....";
+die();
+// push_to_lawu($response);
+
+/**
+ * Push data ke NocoDB
+ */
+function push_to_lawu($response)
+{
+    global $config;
+
+    if (!isset($response['data']) || empty($response['data'])) {
+        echo "No data found.\n";
+        return;
+    }
+
+    foreach ($response['data'] as $row) {
+
+	 	$exists = check_nocodb_exists($row['id'], $row['datepush']);
+        if ($exists) {
+            echo "SKIP: record {$row['id']} for {$row['datepush']} already exists\n";
+            continue;
+        }
+
+        $payload = [
+            "Date Push"    => $row['datepush'] ?? "",
+            "Image"        => $row['image'] ?? "",
+            "User Id"      => (int)($row['user_id'] ?? 0),
+            "Origin ID"    => $row['id'] ?? "",
+            "Deskripsi"    => $row['deskripsi'] ?? "",
+            "Full Name"    => $row['fullname'] ?? "",
+            "Judul"        => $row['judul'] ?? "",
+            "Url"          => $row['url'] ?? "",
+            "Content Type" => $row['content_type'] ?? ""
+        ];
+
+        $ret = send_to_nocodb($payload);
+
+        echo "PUSH: {$row['id']} → Status: {$ret['status_code']}\n";
+    }
+}
+
+/**
+ * Cek apakah record sudah ada di NocoDB
+ */
+function check_nocodb_exists($origin_id, $date_push)
+{
+    global $config;
+
+    $url = $config->noco_url . "?filter[Origin ID]={$origin_id}&filter[Date Push]={$date_push}";
+
+    $opts = [
+        "http" => [
+            "header" => "xc-token: {$config->noco_token}\r\n",
+            "method" => "GET",
+            "ignore_errors" => true
+        ]
+    ];
+
+    $context = stream_context_create($opts);
+    $response = file_get_contents($url, false, $context);
+
+    return $response;
+
+    if ($response === false) {
+        echo "Warning: failed to check {$origin_id} in NocoDB\n";
+        return false;
+    }
+
+    $data = json_decode($response, true);
+
+    return !empty($data['data']); 
+}
+
+/**
+ * Fungsi HTTP Client POST
+ */
+function send_to_nocodb($data)
+{
+    global $config;
+
+    $ch = curl_init($config->noco_url);
+
+    curl_setopt_array($ch, [
+        CURLOPT_HTTPHEADER     => ["xc-token: {$config->noco_token}", "Content-Type: application/json"],
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST           => true,
+        CURLOPT_POSTFIELDS     => json_encode($data),
+    ]);
+
+    $response = curl_exec($ch);
+
+    if (curl_errno($ch)) {
+        $err = curl_error($ch);
+        curl_close($ch);
+        return ["success" => false, "error" => $err];
+    }
+
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    return [
+        "success"     => $httpCode >= 200 && $httpCode < 300,
+        "status_code" => $httpCode,
+        "response"    => json_decode($response, true)
+    ];
+}
+
+
+

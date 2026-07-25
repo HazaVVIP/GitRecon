@@ -1,0 +1,250 @@
+<?php
+date_default_timezone_set('Asia/Jakarta');
+set_time_limit(0);
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+
+$time_start = time();
+
+define("DOC_ROOT","/var/www/html/web-cron/");
+
+include DOC_ROOT ."config/config.php";
+include DOC_ROOT ."lib/Utils.php";
+include DOC_ROOT."lib/Opensearch.php";
+
+$lastid = 0;
+$filename_cached = PATH_ROOT . "/data/lastid_quran.txt";
+$valueLog = file_get_contents($filename_cached);
+if ($valueLog !== FALSE) {
+	$lastid = $valueLog;
+}
+
+$index = "quran";
+
+$opensearchDev = new Opensearch();
+$opensearchDev->init(OS_DEV_URL,OS_DEV_USERNAME,OS_DEV_PASSWORD,true);
+
+$opensearchTBO = new Opensearch();
+$opensearchTBO->init(OS_TBO_URL,OS_TBO_USERNAME,OS_TBO_PASSWORD,true);
+
+$global_id = 1;
+$maxSurah = 114;
+$totalInsert = 0;
+$totalUpdate = 0;
+
+$startSurahId = 1;
+if($lastid > 0) { 
+	$startSurahId = $startSurahId + $lastid;
+}	
+$endSurahId = 3;
+if($lastid > 0) { 
+	$endSurahId = $endSurahId + $lastid;
+}	
+if($lastid > $maxSurah) die('STOP'); 
+
+for ($i = $startSurahId; $i <= $endSurahId; $i++) {
+	$urlSurahQuran = "https://api.quran.gading.dev/surah/".$i;
+
+	$user_agents = [
+		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
+		"Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:102.0) Gecko/20100101 Firefox/102.0",
+		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36 Edg/114.0.1823.51",
+		"Mozilla/5.0 (Macintosh; Intel Mac OS X 12_6_1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36",
+		"Mozilla/5.0 (Macintosh; Intel Mac OS X 13_4_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Safari/605.1.15",
+		"Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:109.0) Gecko/20100101 Firefox/109.0",
+		"Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:103.0) Gecko/20100101 Firefox/103.0",
+		"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.5672.92 Safari/537.36",
+		"Mozilla/5.0 (Linux; Android 12; Pixel 6 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.5735.196 Mobile Safari/537.36",
+		"Mozilla/5.0 (Linux; Android 11; SM-A505F) AppleWebKit/537.36 (KHTML, like Gecko) SamsungBrowser/17.0 Chrome/96.0.4664.45 Mobile Safari/537.36",
+		"Mozilla/5.0 (Android 10; Mobile; rv:102.0) Gecko/102.0 Firefox/102.0",
+		"Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1",
+		"Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/114.0.5735.124 Mobile/15E148 Safari/604.1",
+		"Mozilla/5.0 (iPad; CPU OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1",
+		"Mozilla/5.0 (iPad; CPU OS 15_7_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/114.0.5735.134 Mobile/15E148 Safari/604.1",
+		"Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.5481.100 Safari/537.36",
+		"Mozilla/5.0 (Windows NT 6.3; Win64; x64; rv:104.0) Gecko/20100101 Firefox/104.0",
+		"Mozilla/5.0 (Macintosh; Intel Mac OS X 13_4) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36 Brave/114.1.52.122",
+		"Mozilla/5.0 (Linux; Android 11; CPH2083) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/94.0.4606.71 Mobile Safari/537.36 OPR/61.1.3076.56626",
+		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.5735.199 Safari/537.36 OPR/100.0.4815.76",
+	];
+	$random_user_agent = $user_agents[array_rand($user_agents)];
+
+	$options = array(
+	  'http'=>array(
+		'method'=>"GET",
+		'header'=>"Accept-language: en\r\n" .
+				  "User-Agent: ".$random_user_agent."\r\n",
+		'timeout'=>1
+	  )
+	);
+
+	$context = stream_context_create($options);
+	$response = file_get_contents($urlSurahQuran, false, $context);
+
+	$http_code = "";
+	$http_message = "";
+	$status_response_header = isset($http_response_header[0])?$http_response_header[0]:"";
+	if(!empty($status_response_header)){
+		preg_match('{HTTP\/\S*\s(\d{3})}', $status_response_header, $match);
+		$http_code = isset($match[1])?$match[1]:"";
+		$arrMessage = explode($http_code, $status_response_header);
+		$http_message = isset($arrMessage[1])?trim($arrMessage[1]):"";
+	}
+
+	if($response != false && $http_code == 200){
+		$response = json_decode($response, TRUE);
+		
+		$code = $response['code'] ?? '';
+		$dataSurrah = $response['data'] ?? array();
+		
+		if($code == 200 && count($dataSurrah) > 0){
+			$chapter_id = intval($dataSurrah['number']);
+			$chapter_total_verses = intval($dataSurrah['numberOfVerses']);
+			$chapter_sequence = intval($dataSurrah['sequence']);
+			$chapter_tafsir_id = $dataSurrah['tafsir']['id'];
+			$surah_name = $dataSurrah['name']['short'];
+			$surah_name_long = $dataSurrah['name']['long'];
+			$chapter_name_latin_en = $dataSurrah['name']['transliteration']['en'];
+			$chapter_name_latin_id = $dataSurrah['name']['transliteration']['id'];
+			$chapter_translation_id = $dataSurrah['name']['translation']['id'];
+			$chapter_translation_en = $dataSurrah['name']['translation']['en'];
+			$chapter_type_en = $dataSurrah['revelation']['en'];
+			$chapter_type_id = $dataSurrah['revelation']['id'];
+			$chapter_type_ar = $dataSurrah['revelation']['arab'];
+			$arrVerses = $dataSurrah['verses'] ?? array();
+			
+			if(count($arrVerses) > 0){
+				foreach($arrVerses as $verse){
+					$ayah_id  = (int)($verse['number']['inSurah'] ?? 0);
+					$ayah_text = (string)(trim($verse['text']['arab']) ?? '');
+					$ayah_plain = normalizeArabic(removeHarakat($ayah_text));
+					
+					$ayah_transliteration_en = (string)($verse['text']['transliteration']['en'] ?? '');
+					$ayah_translation_en = (string)($verse['translation']['en'] ?? '');
+					$ayah_translation_id = (string)($verse['translation']['id'] ?? '');
+					
+					$juz = (int)($verse['meta']['juz'] ?? 0);
+					$manzil = (int)($verse['meta']['manzil'] ?? 0);
+					$ruku = (int)($verse['meta']['ruku'] ?? 0);
+					$hizb_quarter = (int)($verse['meta']['hizbQuarter'] ?? 0);
+					
+					$sajda_recommended = (bool)($verse['meta']['sajda']['recommended'] ?? false);
+					$sajda_obligatory = (bool)($verse['meta']['sajda']['obligatory'] ?? false);
+					
+					$ayah_audio_primary = (string)($verse['audio']['primary'] ?? '');
+					$ayah_audio_secondary = array_values($verse['audio']['secondary'] ?? []);
+
+					$ayah_tafsir_short_id = (string)($verse['tafsir']['id']['short'] ?? '');
+					$ayah_tafsir_long_id = (string)($verse['tafsir']['id']['long'] ?? '');
+					
+					$verse_key = $chapter_id . ':' . $ayah_id;
+					$global_id = microtime(true);
+					$global_id = str_replace(".","",$global_id);
+					$sort_order = ($chapter_id * 1000) + $ayah_id;
+					
+					$arrInsert = array();
+					$arrInsert['id'] = $global_id;
+					$arrInsert['verse_key'] = $verse_key;
+					$arrInsert['chapter_id'] = $chapter_id;
+					$arrInsert['chapter_sequence'] = $chapter_sequence;
+					$arrInsert['surah_name'] = $surah_name;
+					$arrInsert['surah_name_long'] = $surah_name_long;
+					$arrInsert['chapter_name_latin_en'] = $chapter_name_latin_en;
+					$arrInsert['chapter_name_latin_id'] = $chapter_name_latin_id;
+					$arrInsert['chapter_translation_id'] = $chapter_translation_id;
+					$arrInsert['chapter_translation_en'] = $chapter_translation_en;
+					$arrInsert['chapter_type_ar'] = $chapter_type_ar;
+					$arrInsert['chapter_type_en'] = $chapter_type_en;
+					$arrInsert['chapter_type_id'] = $chapter_type_id;
+					$arrInsert['chapter_tafsir_id'] = $chapter_tafsir_id;
+					$arrInsert['chapter_total_verses'] = $chapter_total_verses;
+					$arrInsert['ayah_id'] = $ayah_id;
+					$arrInsert['ayah_text'] = $ayah_text;
+					$arrInsert['ayah_plain'] = $ayah_plain;
+					$arrInsert['ayah_transliteration_en'] = $ayah_transliteration_en;
+					$arrInsert['ayah_translation_en'] = $ayah_translation_en;
+					$arrInsert['ayah_translation_id'] = $ayah_translation_id;
+					$arrInsert['juz'] = $juz;
+					$arrInsert['manzil'] = $manzil;
+					$arrInsert['ruku'] = $ruku;
+					$arrInsert['hizb_quarter'] = $hizb_quarter;
+					$arrInsert['sajda_recommended'] = $sajda_recommended;
+					$arrInsert['sajda_obligatory'] = $sajda_obligatory;
+					$arrInsert['ayah_audio_primary'] = $ayah_audio_primary;
+					$arrInsert['ayah_audio_secondary'] = $ayah_audio_secondary;
+					$arrInsert['ayah_tafsir_short_id'] = $ayah_tafsir_short_id;
+					$arrInsert['ayah_tafsir_long_id'] = $ayah_tafsir_long_id;
+					$arrInsert['sort_order'] = $sort_order;
+					$arrInsert['create_date'] = date('Y-m-d H:i:s');
+					
+					//$global_id++;
+													
+					$responseInsert = $opensearchTBO->insert($index, $arrInsert);
+					
+					//$opensearchDev->insert($index, $arrInsert);
+						
+					/* echo "<pre>";
+					print_r($arrInsert);
+					print_r($responseInsert);
+					echo "</pre>"; */
+					
+					if($responseInsert['status']){
+						$totalInsert++;
+					} 
+					
+					$lastid = $i;
+				}	
+			}
+		}
+	}	
+
+	usleep(200000);
+}
+
+unset($opensearchDev);
+unset($opensearchTBO);
+
+echo "Total Insert = ".$totalInsert."\n";
+echo "\nExecution time in seconds: ". (microtime(true) - $time_start) . "\n";
+echo "\nSource: https://api.quran.gading.dev\n";
+echo "\nLast Surah ID : " . $lastid . "\n";
+if (!empty($lastid)) {
+	if (!$handle = fopen($filename_cached, 'w+')) {
+		die("Cannot open file $filename_cached");
+	}
+	if (fwrite($handle, $lastid) === FALSE) {
+		die("Cannot write to file $this->log_file");
+	}
+	
+	fclose($handle);
+}
+
+function removeHarakat(string $text): string
+{
+    $patterns = [
+        '/[\x{064B}-\x{065F}]/u', // fathatan..kasra..sukun..shadda dll
+        '/\x{0670}/u',            // superscript alef
+        '/[\x{06D6}-\x{06ED}]/u', // tanda quranic annotation
+        '/\x{0640}/u',            // tatweel
+    ];
+
+    $clean = preg_replace($patterns, '', $text);
+    return is_string($clean) ? $clean : $text;
+}
+
+function normalizeArabic(string $text): string
+{
+    $map = [
+        'ٱ' => 'ا',
+        'أ' => 'ا',
+        'إ' => 'ا',
+        'آ' => 'ا',
+        'ى' => 'ي',
+        'ؤ' => 'و',
+        'ئ' => 'ي',
+        'ة' => 'ه',
+    ];
+
+    return strtr($text, $map);
+}
+?>

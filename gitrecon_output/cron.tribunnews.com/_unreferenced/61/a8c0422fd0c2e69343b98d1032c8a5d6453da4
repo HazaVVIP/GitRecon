@@ -1,0 +1,162 @@
+<?php
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+ini_set('memory_limit', '-1');
+set_time_limit(0); 
+
+define("DOC_ROOT","/var/www/html/web-cron/");
+
+define('STORAGE_DRIVER', 's3');
+define('S3_ENDPOINT', 'https://tribunservice-article.s3.ap-southeast-1.amazonaws.com');
+define('S3_ACCESS_KEY', 'AKIARASX4TBNZIMEXTHI'); 
+define('S3_SECRET_KEY', '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'); 
+define('S3_BUCKET', 'tribunservice-article');
+define('S3_REGION', 'ap-southeast-1');
+
+define('UPLOAD_MAX_RETRY',  3); 
+define('UPLOAD_RETRY_DELAY_MS', 300); 
+/* define('UPLOAD_DEFAULT_HEADERS', [
+    'Cache-Control' => 'public, max-age=2592000',
+]); */
+define('UPLOAD_DEFAULT_HEADERS', []);
+
+define('OS_INDEX', 'tribunnetwork-articles');
+
+define('LOG_DIR', DOC_ROOT . '/logs');
+define('LOG_LEVEL', 'info'); // 'debug' | 'info' | 'warning' | 'error'
+
+include DOC_ROOT."config/config.php";
+include DOC_ROOT."lib/Opensearch.php";
+include DOC_ROOT."lib/aws/aws-autoloader.php";
+include DOC_ROOT."lib/Helper.php";
+include DOC_ROOT."lib/Storage.php";
+include DOC_ROOT."lib/UploadManager.php";
+include DOC_ROOT."lib/Logger.php";
+
+$url = isset($_GET["url"])?$_GET["url"]:"";
+
+if (empty($url)) {
+    echo "Usage: php get_detail.php <url>\n";
+    exit(1);
+}
+
+$parsedUrl = parse_url($url);
+$host = isset($parsedUrl['host']) ? $parsedUrl['host'] : '';
+$alias = isset($parsedUrl['path']) ? $parsedUrl['path'] : '';
+
+$domain = '';
+if (!empty($host)) {
+    $hostParts = explode('.', $host);
+    if (count($hostParts) > 2) {
+        $domain = $hostParts[0]; 
+    }
+}
+
+if(!empty($domain) && !empty($alias)){
+	$domain = str_replace(array("www","m"),"tribunnews",$domain);
+	$domain = str_replace("jatim-timur","jatimtimur",$domain);
+
+	$logger = new Logger(DOC_ROOT . 'logs', $domain.'_article_detail_json', LOG_LEVEL);
+	$logger->info("=== Cron mulai ===", [
+		'domain' => $domain,
+		'alias'   => $alias,
+	]);
+
+	$storage       = new Storage(STORAGE_DRIVER, S3_BUCKET);
+	$uploadManager = new UploadManager($storage, $logger, 1, UPLOAD_MAX_RETRY, UPLOAD_RETRY_DELAY_MS);
+
+	$opensearchAllNetwork = new Opensearch();
+	$opensearchAllNetwork->init(OS_DEV_URL,OS_DEV_USERNAME,OS_DEV_PASSWORD,true);
+
+	$where = array();
+	array_push($where,array("match_phrase" => array("domain" => $domain)));
+	array_push($where,array("match_phrase" => array("alias" => $alias)));
+	array_push($where,array("terms" => array("content_status" => array(1,2))));
+
+	$condition = array();
+	if(count($where) > 0){
+		$condition = array("bool" =>
+						array("must" =>
+							$where
+						)
+					);
+	}
+	$index = "tribunnetwork-articles";
+	$fields = array();
+	$sort = [
+		[
+			"publish_date" => [
+				"order" => "asc"
+			]
+		],
+		[
+			"id" => [
+				"order" => "asc"
+			]
+		]
+	];
+
+	$response = $opensearchAllNetwork->findOne(
+		OS_INDEX,
+		$condition,
+		$fields
+	);
+
+	unset($opensearchAllNetwork);
+
+	if (empty($response['status'])) {
+		$logger->error("Artikel tidak ditemukan atau OpenSearch error", [
+			'reason' => $response['error_reason'] ?? 'unknown',
+		]);
+		echo "Error: artikel tidak ditemukan.\n";
+		exit(1);
+	}
+
+	$row = $response['data']['_source'] ?? [];
+
+	if (empty($row)) {
+		$logger->error("Data _source kosong", ['domain' => $domain, 'alias' => $alias]);
+		echo "Error: data artikel kosong.\n";
+		exit(1);
+	}
+
+	$timeStart = microtime(true);
+
+	$aliasFromSource = (string)($row['alias'] ?? $alias);
+	$key  = Helper::buildKey($domain, $aliasFromSource);
+	$key  = "dev/".$key; //development
+	$json = json_encode($row, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+
+	$logger->info("Upload ke: {$key}");
+
+	try {
+		$uploadManager->add($key, $json);
+		$uploadManager->flushAll();
+	} catch (AwsException $e) {
+		$logger->error("AwsException [{$key}]", ['error' => $e->getMessage()]);
+	}
+
+	$elapsed = microtime(true) - $timeStart;
+	$success = $uploadManager->getSuccessCount();
+	$failed  = $uploadManager->getFailCount();
+
+	$logger->info("=== Selesai ===", [
+		'key'     => $key,
+		'success' => $success,
+		'failed'  => $failed,
+		'elapsed' => Helper::formatDuration($elapsed),
+	]);
+
+	if ($failed > 0) {
+		$uploadManager->writeErrorReport(DOC_ROOT . 'logs');
+	}
+}
+
+echo "\n";
+echo "URL     : {$url}\n";
+echo "Domain  : {$domain}\n";
+echo "Alias   : {$aliasFromSource}\n";
+echo "Key     : {$key}\n";
+echo "Upload  : " . ($success ? "OK" : "GAGAL") . "\n";
+echo "Elapsed : " . Helper::formatDuration($elapsed) . "\n";
+?>

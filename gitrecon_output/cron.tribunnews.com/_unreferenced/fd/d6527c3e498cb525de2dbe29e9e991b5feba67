@@ -1,0 +1,137 @@
+<?php
+date_default_timezone_set('Asia/Jakarta');
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+
+$time_start = time();
+
+$apiKey = 'bda7647c-53ce-4b2e-a0b7-3d24f2d60fee';
+
+$daerah = isset($_SERVER["argv"][1])?$_SERVER["argv"][1]:"";
+if(isset($_GET['daerah'])){
+	$daerah = $_GET['daerah'];
+}	
+
+if(empty($daerah)) $daerah = "jakarta";
+
+$country = 'Indonesia';
+$state = 'Jakarta'; $city = 'Jakarta';
+if($daerah == "bali"){
+	$city = 'Denpasar'; $state = 'Bali';
+} else if($daerah == "medan"){
+	$city = 'Medan'; $state = 'North Sumatra';
+} else if($daerah == "bogor"){
+	$city = 'Bogor'; $state = 'West Java';
+} else if($daerah == "bandung"){
+	$city = 'Bandung'; $state = 'West Java';
+} else if($daerah == "bekasi"){
+	$city = 'Bekasi'; $state = 'West Java';
+} else if($daerah == "depok"){
+	$city = 'Depok'; $state = 'West Java';
+} else if($daerah == "surabaya"){
+	$city = 'Surabaya'; $state = 'East Java';
+} else if($daerah == "makassar"){
+	$city = 'Makassar'; $state = 'South Sulawesi';
+} else if($daerah == "banjarmasin"){
+	$city = 'Banjarmasin'; $state = 'South Kalimantan';
+} else if($daerah == "aceh"){
+	$city = 'Takengon'; $state = 'Aceh';
+} else if($daerah == "palembang"){
+	$city = 'Palembang'; $state = 'South Sumatra';
+} else if($daerah == "manado"){
+	$city = 'Manado'; $state = 'North Sulawesi';
+} else if($daerah == "papua"){
+	$city = 'Muting'; $state = 'Papua';
+}		
+
+$url = "https://api.airvisual.com/v2/city?city={$city}&state={$state}&country={$country}&key={$apiKey}";
+
+$ch = curl_init();
+curl_setopt($ch, CURLOPT_URL, $url);
+curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+$response = curl_exec($ch);
+$httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+curl_close($ch);
+
+echo $url."<br>";
+echo $httpCode."<br>";
+echo "<hr>";
+
+if ($httpCode === 200) {
+    $data = json_decode($response, true);
+	$status = ($data['status'] && $data['status'] == "success") ? 1 : 0;
+
+    if ($status) {
+        $res_country = $data['data']['country'];
+        $res_state = $data['data']['state'];
+		$res_city = $data['data']['city'];
+		
+        $res_current = $data['data']['current'];
+		
+		/* echo "<pre>";
+		print_r($data);
+		echo "</pre>"; */
+		
+		$pollution = $res_current['pollution'];
+		$deskripsi = getAqiDescription($pollution['aqius']);
+		
+		$weather = $res_current['weather'];
+		$date = new DateTime($weather['ts'], new DateTimeZone('UTC'));
+		$date->setTimezone(new DateTimeZone('Asia/Jakarta'));
+		$ts = $date->format('Y-m-d H:i:s');
+		$img_weather = "https://www.iqair.com/dl/assets/svg/weather/ic-weather-".$weather['ic'].".svg";
+		
+		
+		echo "📍 Lokasi: " . $res_city . "<br>\n";
+		echo "Waktu: " . $ts . "<br>\n";
+		echo "<hr>";
+		
+		echo "AQI: ".$pollution['aqius']." AQI⁺ US<br>\n";
+		echo "Status: {$deskripsi['kategori']}<br>\n";
+		echo "Dampak Kesehatan: {$deskripsi['dampak']}<br>\n";
+		echo "Suhu: " . $weather['tp'] . "°C<br>\n";
+		echo "Kelembapan: " . $weather['hu'] . "%<br>\n";
+		echo "<img src='$img_weather'><br>\n";
+    } else {
+        echo "❌ Data tidak ditemukan untuk kota {$city}\n";
+    }
+} else {
+    echo "❌ HTTP Error Code: {$httpCode}\n";
+    echo "Response: {$response}\n";
+}
+
+echo "\nExecution time in seconds: ". (microtime(true) - $time_start) . "\n";
+
+function getAqiDescription($aqi) {
+    if ($aqi >= 0 && $aqi <= 50) {
+        return [
+            'kategori' => 'Baik',
+            'dampak' => 'Tidak ada risiko atau dampak terhadap kesehatan. Udara bersih dan aman untuk semua orang.'
+        ];
+    } elseif ($aqi <= 100) {
+        return [
+            'kategori' => 'Sedang',
+            'dampak' => 'Masih bisa diterima, tetapi ada beberapa orang yang sangat sensitif terhadap polusi mungkin mengalami efek kecil.'
+        ];
+    } elseif ($aqi <= 150) {
+        return [
+            'kategori' => 'Tidak sehat bagi kelompok sensitif',
+            'dampak' => 'Kelompok sensitif, seperti anak-anak, orang tua, dan individu dengan masalah pernapasan, disarankan untuk membatasi aktivitas luar ruangan.'
+        ];
+    } elseif ($aqi <= 200) {
+        return [
+            'kategori' => 'Tidak sehat',
+            'dampak' => 'Semua orang dapat mulai merasakan dampak kesehatan. Kelompok sensitif mungkin mengalami dampak yang lebih serius.'
+        ];
+    } elseif ($aqi <= 300) {
+        return [
+            'kategori' => 'Sangat tidak sehat',
+            'dampak' => 'Peringatan kesehatan dikeluarkan. Risiko kesehatan meningkat untuk semua orang.'
+        ];
+    } else {
+        return [
+            'kategori' => 'Berbahaya',
+            'dampak' => 'Kondisi darurat kesehatan. Seluruh populasi berisiko mengalami dampak kesehatan yang serius.'
+        ];
+    }
+}

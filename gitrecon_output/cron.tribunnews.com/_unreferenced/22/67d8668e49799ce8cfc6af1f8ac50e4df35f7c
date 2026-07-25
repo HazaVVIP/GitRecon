@@ -1,0 +1,8 @@
+[ERROR][SyncRdsEsBlog][2024-03-04 08:30:30] DATA RDS <= 0
+[INFO][SyncRdsEsBlog][2024-03-04 09:06:31] NOTHING TO SYNC
+[INFO][ReportIklanCategory][2024-03-04 09:57:41] {"total_procced":2,"source_data":2,"execution_time":0.8558559417724609}
+[INFO][ReportIklanCategory][2024-03-04 09:57:41] {"total_procced_premium":7,"source_data_premium":7,"execution_time_premium":0.9456100463867188}
+[INFO][ReportRecap][2024-03-04 10:54:23] {"tot_usr_reg_email":12,"tot_usr_reg_social":63,"tot_usr_reg":75}
+[INFO][ReportRecap][2024-03-04 10:55:53] {"tot_usr_reg_email":12,"tot_usr_reg_social":63,"tot_usr_reg":75}
+[INFO][ReportRecap][2024-03-04 11:05:54] {"tot_usr_reg_email":12,"tot_usr_reg_social":63,"tot_usr_reg":75}
+[INFO][ReportRecap][2024-03-05 03:02:51] {"tot_usr_reg_email":5,"tot_usr_reg_social":36,"tot_usr_reg":41}

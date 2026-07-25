@@ -1,0 +1,175 @@
+<?php
+
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+
+
+define("DOC_ROOT","/var/www/html/web-cron/");
+
+include DOC_ROOT."config/config.php";
+include DOC_ROOT."lib/Opensearch.php";
+
+
+require_once 'vendor/autoload.php';
+use TencentCloud\Common\Credential;
+use TencentCloud\Common\Profile\ClientProfile;
+use TencentCloud\Common\Profile\HttpProfile;
+use TencentCloud\Common\Exception\TencentCloudSDKException;
+use TencentCloud\Vod\V20180717\VodClient;
+use TencentCloud\Vod\V20180717\Models\SearchMediaRequest;
+try {
+    // Required steps:
+    // Instantiate an authentication object. The Tencent Cloud account key pair `secretId` and `secretKey` need to be passed in as the input parameters
+    // This example uses the way to read from the environment variable, so you need to set these two values in the environment variable in advance
+    // You can also write the key pair directly into the code, but be careful not to copy, upload, or share the code to others
+    // Query the CAM key: https://console.tencentcloud.com/capi
+    // $cred = new Credential("IKIDvjYJrFXnvwpjV8oMm04uVr0wd5Hk6LSQ", "uZ7Xpt17FOXZSfmjYBgCdv6HWeeXKNJ3"); // Prangki
+    $cred = new Credential("IKIDX2siU6xmPsBG8oGZxy5JXp9aAe6VnDkU", "UxKiEmANeuHZjwEbxPj5RxiYQLAjP5vs"); // Tribun
+    // Instantiate an HTTP option (optional; skip if there are no special requirements)
+    $httpProfile = new HttpProfile();
+    $httpProfile->setEndpoint("vod.tencentcloudapi.com");
+
+    // Optional steps:
+    // Instantiate a client configuration object. You can specify the timeout period and other configuration items
+    $clientProfile = new ClientProfile();
+    $clientProfile->setHttpProfile($httpProfile);
+    // Instantiate an client object
+    // The second parameter is the region information. You can directly enter the string "ap-guangzhou" or import the preset constant
+    $client = new VodClient($cred, "ap-singapore", $clientProfile);
+
+    // Instantiate a request object. You can further set the request parameters according to the API called and actual conditions
+    $req = new SearchMediaRequest();
+
+    $params = array(
+        // "SubAppId" => 1317736385 // Prangki
+        "SubAppId" => 1500023640, // Tribun (Prod CMS)
+        "Categories" => [
+            "Video"
+        ],
+        "Sort" => [
+            "Field" => 'CreateTime',
+            "Order" => 'Desc'
+        ]
+        // "Name" => [
+        //     "Mertua Sekjen PDIP Hasto Meninggal, Karangan Bunga"
+        // ]
+          
+        // "Name" => "gol-tunggal-mason-greenwood-membuat-manchester-united-menang-1-0-atas-astana-kamis-1992019.jpg" // Tribun
+        
+    );
+    $req->fromJsonString(json_encode($params));
+
+    // The returned "resp" is an instance of the SearchMediaResponse class which corresponds to the request object
+    $resp = $client->SearchMedia($req);
+
+    // A string return packet in JSON format is output
+    // print_r($resp->toJsonString());
+    $resultVod = $resp->toJsonString();
+    // print_r(json_decode($resultVod)->MediaInfoSet);
+    $arr = array();
+    foreach(json_decode($resultVod)->MediaInfoSet as $item){
+
+        $index_name = "tribunnews-video";
+        // //OS
+        // $opensearch = new Opensearch();
+        // $opensearch->init(OS_URL,OS_USERNAME,OS_PASSWORD,true);
+        // // $opensearch->init($this->config->item('os_server_tbo'),$this->config->item('os_username_tbo'),$this->config->item('os_password_tbo'),$this->config->item('os_auth_tbo'));
+        
+        // $condition = array("match" => array("id" => intval($row->id)));
+        // $fields = array("title","tagging");
+
+        // $get_tag_os = $this->opensearch->findOne($index_name,$condition,$fields);
+        // $get_tag_os = $get_tag_os['data']['_source']['tagging'];
+
+
+
+
+
+            // $condition 	= array (
+            //     'bool' => 
+            //         array (
+            //             'filter' => 
+            //                 array (
+            //                     0 => 
+            //                     array (
+            //                         'match_phrase' => 
+            //                             array (
+            //                                 'alias' => 'lirik-lagu-mambo-jambo-whisnu-santika-viral-di-tiktok-mambo-jambo-mi-gusta-arriba-le'
+            //                             ),
+            //                         ),
+            //                     ),
+            //                 ),
+            //             );	
+
+            
+            // $condition = array("match_phrase" => array("alias" => 'lirik-lagu-mambo-jambo-whisnu-santika-viral-di-tiktok-mambo-jambo-mi-gusta-arriba-le'));
+            $condition = array("match_phrase" => array("alias" => 'terungkap-pesan-mantan-pacar-ini-buat-mario-dendy-meradang-hingga-dendam-dan-lakukan-penganiayaan'));
+
+            $fields = array('id', 'title');
+
+            
+
+
+            $sort = array("publish_date" => "asc");
+            $start = 0;
+            $limit = 1;
+
+            //OS
+            $opensearch = new Opensearch();
+            // $opensearch->init(OS_URL,OS_USERNAME,OS_PASSWORD,true);
+            $opensearch->init('https://raung.tribun.co.id','rakaipikatan','FkxNuAJ-q8QmI6ieiEfmc0WLr7Mw_ACv',true);
+            // $opensearch->init('https://leuser.tribun.co.id','tunggulametung','cTCYgE8gVXgxiS7/BmIQKcL/1NUpCDslUYJsvLnkmj4',true);
+            // $response_os = $opensearch->find('tribunnews-video',$condition,$fields,$sort,$start,$limit);
+			$response_os = $opensearch->findOne('tribunnews-video',$condition,$fields);
+
+            print_r($response_os['data']).'<br>'; 
+            echo $response_os['data']['_source']['id'];
+            die();
+            // $idUpdateOs = $response_os['data']['_source']['id'];
+            $idUpdateOs = 536867;
+            $totalOs = 0;
+            $arrIDOs = array();
+            if($response_os['status']){
+                $dataUpdateOS = array();
+                $dataUpdateOS['duration'] = '120';
+                
+                $responseUpdateOs = $opensearch->updateOne('tribunnews-video',$idUpdateOs,$dataUpdateOS);
+                if($responseUpdateOs['status'] == 1){
+                    echo "Updated"; die();
+                }else{
+                    echo "Failed"; die();
+                }
+
+                // $totalOs = isset($response_os['total_row'])?$response_os['total_row']:0;
+                // $dataOs = isset($response_os['data'])?$response_os['data']:array();
+
+                // if(count($dataOs) > 0){
+                //     foreach($dataOs as $rowos){
+                //         array_push($arrIDOs, intval($rowos['_source']['id']));
+                //     }
+                // }
+            }
+
+            // echo "Total OS : ".$totalOs."<br>";
+
+
+
+
+        $arr_child = array(
+            'title' => $item->BasicInfo->Name,
+            'url' => $item->BasicInfo->MediaUrl,
+            'publish_date' => $item->BasicInfo->CreateTime,
+            'duration' => date('i:s', floor($item->MetaData->Duration)),
+            'duration2' => floor($item->MetaData->Duration),
+        );
+        array_push($arr, $arr_child);
+        // echo $item->BasicInfo->Name.'<br>';
+    }
+
+    print_r($arr);
+
+
+}
+catch(TencentCloudSDKException $e) {
+    echo $e;
+}

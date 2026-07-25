@@ -1,0 +1,85 @@
+<?php
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+
+$time_start = time();
+
+define("DOC_ROOT","/var/www/html/web-cron/");
+
+/* 
+Running in cmd / command
+- sudo -u cron /usr/bin/php7.4 /var/www/html/web-cron/tribunnews/quickcount_pilpres2024.php 
+*/
+
+include DOC_ROOT."config/config.php";
+include DOC_ROOT."lib/Opensearch.php";
+
+$base_url_kompas = 'https://hasil.menarakita.net/result';
+$api_key_kompas = 'xvZnjXOn7SHqEWNXVWqWmgyiqGPDBp3o';
+
+$headers = array(
+				'Accept: application/json', 
+				'Content-Type: application/json',
+				'API-key: xvZnjXOn7SHqEWNXVWqWmgyiqGPDBp3o'
+			);
+
+$ch = curl_init();
+curl_setopt($ch, CURLOPT_URL, $base_url_kompas);
+curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+curl_setopt($ch, CURLOPT_MAXREDIRS, 10);
+curl_setopt($ch, CURLOPT_TIMEOUT, 10);
+curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
+curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+$server_output = curl_exec($ch);
+$http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+curl_close($ch);
+
+$result = json_decode($server_output, TRUE);
+
+if($http_code === 200){
+	$id = 1;
+	$suaramasuk = isset($result['suaramasuk'])?intval($result['suaramasuk']):0;
+	$persensuaramasuk = isset($result['persensuaramasuk'])?floatval($result['persensuaramasuk']):0;
+	$timestamp = isset($result['timestamp'])?$result['timestamp']:"";
+	
+	$paslon1 = isset($result['1-ANIES'])?floatval($result['1-ANIES']):0;
+	$paslon2 = isset($result['2-PRABOWO'])?floatval($result['2-PRABOWO']):0;
+	$paslon3 = isset($result['3-GANJAR'])?floatval($result['3-GANJAR']):0;
+	
+	if(!empty($suaramasuk)){
+		$opensearchTest = new Opensearch();
+		$opensearchTest->init(OS_DEV_URL,OS_DEV_USERNAME,OS_DEV_PASSWORD,true);
+		
+		$opensearchTBO = new Opensearch();
+		$opensearchTBO->init(OS_TBO_URL,OS_TBO_USERNAME,OS_TBO_PASSWORD,true);
+
+		$arrValue = array();
+		$arrValue['id'] = $id;
+		$arrValue['paslon1'] = $paslon1;
+		$arrValue['paslon2'] = $paslon2;
+		$arrValue['paslon3'] = $paslon3;
+		$arrValue['suaramasuk'] = $suaramasuk;
+		$arrValue['persensuaramasuk'] = $persensuaramasuk;
+		$arrValue['timestamp'] = $timestamp;
+		$arrValue['created_date'] = date("Y-m-d H:i:s");
+
+		$responseInsert = $opensearchTest->insert("widget_quickcount_pilpres2024", $arrValue);
+		$responseInsert = $opensearchTBO->insert("widget_quickcount_pilpres2024", $arrValue);
+
+		echo "<pre>";
+		print_r($responseInsert);
+		print_r($arrValue);
+		echo "</pre>"; 
+		
+		unset($opensearchTest);
+		unset($opensearchTBO);
+	}
+} else {
+	echo "Error HTTP Code ".$http_code." = ".$result['detail'];
+}	
+
+echo '<br>Execution time in seconds: ' . (microtime(true) - $time_start) . "<br>";
+echo '\n'.date("Y-m-d H:i:s");
+?>

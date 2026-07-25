@@ -1,0 +1,190 @@
+<?php
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+//error_reporting(0);
+
+$time_start = time();
+
+define("DOC_ROOT","/var/www/html/web-cron/");
+
+require_once DOC_ROOT."vendor/autoload.php";
+include DOC_ROOT."config/config.php";
+include DOC_ROOT."lib/Opensearch.php";
+
+define("AUTH_CREDENTIAL_PROD", DOC_ROOT."google_analytic/tribunnews-17d8f@appspot.gserviceaccount.json");
+
+/* 
+Running in command
+- sudo -u www-data /usr/bin/php7.4 /var/www/html/web-cron/tribunnews/widget/searchconsole_topqueries.php jabar populer
+*/
+
+$site = isset($_SERVER["argv"][1])?$_SERVER["argv"][1]:"jabar";
+if(isset($_GET['site'])){
+	$site = $_GET['site'];
+}	
+
+$tipe = isset($_SERVER["argv"][2])?$_SERVER["argv"][2]:"latest";
+if(isset($_GET['tipe'])){
+	$tipe = $_GET['tipe'];
+}	
+
+$startDate = isset($_SERVER["argv"][3])?$_SERVER["argv"][3]:date("Y-m-d", strtotime('-5 days'));
+if(isset($_GET['start']) && !empty($_GET['start'])){
+	$startDate = $_GET['start'];
+} else {
+	$startDate = date("Y-m-d", strtotime('-5 days'));
+}	
+
+$endDate = isset($_SERVER["argv"][3])?$_SERVER["argv"][3]:date("Y-m-d", strtotime('-2 days'));
+if(isset($_GET['end']) && !empty($_GET['end'])){
+	$endDate = $_GET['end'];
+} else {
+	$endDate = date("Y-m-d", strtotime('-5 days'));
+}	
+
+$siteUrl = "https://".$site.".tribunnews.com/";
+if($site == "all") $siteUrl = "sc-domain:tribunnews.com";
+$encodedSiteUrl = rawurlencode($siteUrl);
+
+$client = new Google_Client();
+$client->setAuthConfig(AUTH_CREDENTIAL_PROD);
+$client->addScope('https://www.googleapis.com/auth/webmasters.readonly');
+
+$httpClient = $client->authorize();
+
+$requestBody = json_encode([
+    "startDate" => $startDate,
+    "endDate"   => $endDate,
+    "dimensions" => ["query"],
+    "rowLimit"   => 10
+]);
+
+$response = $httpClient->post(
+    "https://searchconsole.googleapis.com/webmasters/v3/sites/$encodedSiteUrl/searchAnalytics/query",
+    [
+        'headers' => ['Content-Type' => 'application/json'],
+        'body'    => $requestBody
+    ]
+);
+
+if($response->getStatusCode() == 200){
+	// Ambil hasil
+	$body = (string) $response->getBody();
+	$data = json_decode($body, true);
+	
+	$items = isset($data['rows'])?$data['rows']:array();
+
+	echo $site."<br>";
+	echo $startDate."<br>";
+	echo $endDate."<br>";
+	
+	$arrKeywords = array();
+	if(count($items) > 0){
+		echo "<table border='1'>";
+		echo "<th>Top Queries</th><th>Click</th><th>Impressions</th>";
+		
+		foreach($items as $key => $row){
+			$tagTitle = trim($row['keys'][0]);
+
+			$clicks = intval($row['clicks']);
+			$impressions = intval($row['impressions']);
+			
+			echo "<tr><td>".$tagTitle."</td><td>".$clicks."</td><td>".$impressions."</td></tr>";
+			
+			array_push($arrKeywords, $tagTitle);
+		}
+		
+		echo "</table>";
+		echo "<hr>";
+	}
+	
+	if(count($arrKeywords) > 0){
+		$opensearchAllNetwork = new Opensearch();
+		$opensearchAllNetwork->init(OS_ALLNETWOORK_URL,OS_ALLNETWOORK_USERNAME,OS_ALLNETWOORK_PASSWORD,true);
+		
+		foreach($arrKeywords as $tag){
+			echo "Keyword = <strong>".$tag."</strong><br>";
+			
+			$start = 0;
+			$limit = 10;
+			if($tipe == "populer"){
+				$where = array();
+
+				array_push($where,array("match" => array("title" => $tag)));
+				array_push($where,array("exists" => array("field" => "pageviews")));
+			
+				$hoursNow = date('G');
+				$dateToday = date("Y-m-d H:i:s"); 
+				/* if($hoursNow < 10){
+					$timeHoursAgo = strtotime('-24 hours', strtotime($dateToday));
+				} else {
+					$timeHoursAgo = strtotime('-18 hours', strtotime($dateToday));
+				} */
+				$timeHoursAgo = strtotime('-3 days', strtotime($dateToday));
+				
+				$timeNow = strtotime("now");
+				$startDate = date('Y-m-d H:i:s', $timeHoursAgo);
+				$endDate = date('Y-m-d H:i:s', $timeNow);
+				array_push($where,array("range" => array("publish_date" => array("gte" => $startDate, "lte" =>$endDate))));	
+				
+				$query = array();
+				if(count($where) > 0){
+					$query = array("bool" =>
+								array("must" =>
+									$where
+								)
+						);
+				}
+
+				$fields = array("domain_id","domain","alias","title","written_date","pageviews");
+				$sort = array("pageviews" => array("order" => "desc"));
+				$response = $opensearchAllNetwork->find("tribunnetwork-articles",$query,$fields,$sort,$start,$limit);
+			} else {	
+				$query = array("match_phrase" => array("title" => $tagTitle));
+				//$query = array("match" => array("title" => $tagTitle));
+				//$query = array("match" => array("title" => array("query" => $tagTitle, "minimum_should_match" => "90%")));
+				
+				$fields = array("domain_id","domain","alias","title","written_date","pageviews");
+				$sort = array("written_date" => array("order" => "desc"));
+				$response = $opensearchAllNetwork->find("tribunnetwork-articles",$query,$fields,$sort,$start,$limit);
+			}
+			
+			if($response['status']){
+				$dataMatch = isset($response['data'])?$response['data']:array();
+
+				if(count($dataMatch) > 0){
+					echo "<table border='1'>";
+					echo "<th>Judul</th><th>Network</th><th>Written Date</th><th>Link</th><th>Pageview</th>";
+					
+					foreach($dataMatch as $val){
+						$row = $val['_source'];
+						$pageviews = isset($row['pageviews'])?$row['pageviews']:0;
+						$url = "https://".$row['domain'].".tribunnews.com/".$row['alias'];
+						if($row['domain'] == "tribunnews") $url = "https://www.tribunnews.com/".$row['alias'];
+						
+						echo "<tr><td>".$row['title']."</td><td>".$row['domain']."</td><td>".$row['written_date']."</td><td><a href='".$url."'>Link</a></td><td>".$pageviews."</td></tr>";
+					}
+					echo "</table>";
+					echo "<hr>";
+					
+				}
+			} else {
+				echo "<table border='1'>";
+				echo "<th>Judul</th><th>Network</th><th>Written Date</th><th>Link</th><th>Pageview</th>";
+				echo "<tr><td colspan='5' align='center'>Tidak ada artikel</td></tr>";
+				echo "</table>";
+				echo "<hr>";
+			}
+		}	
+		
+		unset($opensearchAllNetwork);
+	}	
+} else {
+	$body = (string) $response->getBody();
+	$data = json_decode($body, true);
+	
+	echo "Error ".$response->getStatusCode()." ".$data['error']['message']."<br>\n";
+}
+
+echo "\nExecution time in seconds: ". (microtime(true) - $time_start) . "\n";
+?>

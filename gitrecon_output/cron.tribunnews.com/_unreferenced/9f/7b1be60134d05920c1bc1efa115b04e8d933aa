@@ -1,0 +1,89 @@
+<?php
+/* ini_set('display_errors',1);
+error_reporting(E_ALL); */
+error_reporting(0);
+
+$time_start = time();
+
+define("DOC_ROOT","/var/www/html/web-cron/");
+
+require_once "vendor/autoload.php";
+include DOC_ROOT."config/config.php";
+include DOC_ROOT."lib/Opensearch.php";
+include DOC_ROOT."lib/Google_analytic.php";
+
+define("AUTH_CREDENTIAL_PROD", DOC_ROOT."google_analytic/tribunnews-17d8f@appspot.gserviceaccount.json");
+define("AUTH_CREDENTIAL_STAG", DOC_ROOT."google_analytic/tribunnews-17d8f@appspot.gserviceaccount.json");
+define("AUTH_CREDENTIAL_DEV", DOC_ROOT."google_analytic/angular-cosmos-220903.iam.gserviceaccount.json");
+
+/* 
+Running in command
+- sudo -u cron /usr/bin/php7.4 /var/www/html/web-cron/google_analytic/insert_topic_tribunnews.php > /home/cron/log_cron/insert_ga_topic_tribunnews.txt
+*/
+
+$google_analytic = new Google_analytic(AUTH_CREDENTIAL_PROD);
+
+$applicationName = "Tribunnews Top Topic";
+$viewId = "182427400"; //tribunnews desktop & mobile
+//$viewId = "152697781";
+$google_analytic->initializeAnalytics($applicationName,$viewId);
+$analytics = $google_analytic->getReportTopTopicTribunnews();
+
+$dataPopuler = array();
+$total = 0;
+
+if($analytics['status']){
+	$dataPopuler = $google_analytic->printResultTopTopicTribunnews($analytics);
+	
+	if(count($dataPopuler) > 0){
+		$opensearchTest = new Opensearch();
+		$opensearchTest->init(ES_TEST_URL,"","",false);
+		
+		$opensearch = new Opensearch();
+		$opensearch->init(OS_URL,OS_USERNAME,OS_PASSWORD,true);
+		
+		//Delete
+		$condition = array("match_phrase" => array("mode" => "topik"));
+		$response1 = $opensearch->deleteMany("tribunnews-populer-ga-tagtopic",$condition);
+		//$response1 = $opensearchTest->deleteMany("tribunnews-populer-ga-tagtopic",$condition);
+
+		//Insert
+		$rank = 1;
+		$dataTopicPopuler = isset($dataPopuler['topic'])?$dataPopuler['topic']:array();
+		foreach($dataTopicPopuler as $title){
+			if(!empty($title)){
+				$title = strip_tags(trim($title));
+				$alias = "topik-".$google_analytic->url_title($title);
+
+				$arrPopuler = array();
+				$arrPopuler['id'] = $alias;
+				$arrPopuler['title'] = $title;
+				$arrPopuler['mode'] = "topik";
+				$arrPopuler['rank'] = $rank;
+				$arrPopuler['section'] = 'home';
+				
+				$responseInsert = $opensearch->insert("tribunnews-populer-ga-tagtopic", $arrPopuler);
+				//$responseInsert = $opensearchTest->insert("tribunnews-populer-ga-tagtopic", $arrPopuler);
+				
+				/* echo "<pre>";
+				print_r($responseInsert);
+				print_r($arrPopuler);
+				echo "</pre>"; */
+				
+				if($responseInsert['status']){
+					$total++;
+					$rank++;
+				} else {
+					$error_reason = isset($responseInsert['error_reason'])?$responseInsert['error_reason']:"";
+				} 
+			}	
+		}			
+	}
+	
+	unset($opensearch);
+}
+
+echo "Total : ".$total."\n";
+
+echo "\nExecution time in seconds: ". (microtime(true) - $time_start) . "\n";
+?>

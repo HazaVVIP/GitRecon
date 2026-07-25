@@ -1,0 +1,7 @@
+<?php
+define('LIST_DAERAH_CLUSTER', array("flores","depok","mataraman","mataram","bekasi","babel","pantura","sulbar","tangerang","metrobanjar","serambiummah","bengkulu","gorontalo","prohaba","sultra","gayo","bandung","toraja","priangan","jatimtimur","muria","sorong","papuabarat"));
+define('LIST_DAERAH_NEW', array("padang","kalteng","palembang","solo","jogja","medan","sumsel","jakarta","pontianak","suryamalang","manado","jatim","lampung"));
+
+define('LIST_TBO_CLUSTER', array("style","wow","newsmaker","trends"));
+define('LIST_COMMERCE_CLUSTER', array("travel","shopping"));
+?>

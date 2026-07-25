@@ -1,0 +1,78 @@
+<?php
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+ini_set("memory_limit", "-1");
+set_time_limit(0);
+
+$time_start = time();
+
+define("DOC_ROOT","/var/www/html/web-cron/");
+
+include DOC_ROOT."config/config.php";
+include DOC_ROOT."lib/Opensearch.php";
+
+$dateStart = isset($_GET['start'])?$_GET['start']:"";
+$dateEnd = isset($_GET['end'])?$_GET['end']:"";
+
+if(empty($dateStart)){	
+	$dateStart = date("Y-m-d", strtotime('-1 days'));
+}
+
+if(empty($dateEnd)){	
+	$dateEnd = date("Y-m-d", strtotime('-1 days'));
+}
+
+echo $dateStart." - ".$dateEnd."<br>";
+
+
+//OS	
+$condition 	= array (
+				'bool' => 
+				array (
+				  'filter' => 
+				  array (
+					0 => 
+					array (
+					  'range' => 
+					  array (
+						'publish_date' => 
+						array (
+						  'gte' => ''.$dateStart.' 00:00:00',
+						  'lte' => ''.$dateEnd.' 23:59:59',
+						),
+					  ),
+					),
+				  ),
+				),
+			  );	
+			  
+$opensearch = new Opensearch();
+$opensearch->init(OS_TNEWSWIKI_URL,OS_TNEWSWIKI_USERNAME,OS_TNEWSWIKI_PASSWORD,true);
+
+$response = $opensearch->count_total('tribunnewswiki-articles',$condition);
+
+$totalOs = 0;
+if($response['status']){
+	$totalOs = isset($response['total'])?$response['total']:0;
+}
+
+
+$opensearchTBO = new Opensearch();
+$opensearchTBO->init(OS_TBO_URL,OS_TBO_USERNAME,OS_TBO_PASSWORD,true);
+
+$responseTBO = $opensearch->count_total('tribunnewswiki-articles',$condition);
+
+$totalOsTBO = 0;
+if($responseTBO['status']){
+	$totalOsTBO = isset($responseTBO['total'])?$responseTBO['total']:0;
+}
+
+
+unset($opensearch);
+unset($opensearchTBO);
+
+echo "OS Tnewswiki Total : ".$totalOs."<br>";
+echo "OS VPC TBO Total : ".$totalOsTBO."<br>";
+
+echo '<br>Execution time in seconds: ' . (microtime(true) - $time_start) . "<br>";
+?>

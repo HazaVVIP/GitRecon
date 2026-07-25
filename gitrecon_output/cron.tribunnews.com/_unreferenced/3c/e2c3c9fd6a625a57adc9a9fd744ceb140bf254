@@ -1,0 +1,241 @@
+<?php
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+
+$time_start = time();
+
+define("DOC_ROOT","/var/www/html/web-cron/");
+
+include DOC_ROOT."config/config.php";
+include DOC_ROOT."lib/Opensearch.php";
+
+$api_key = YOUTUBE_KEY;
+$channelId = YOUTUBE_CHANNEL_ID;
+$max = 6;
+$total = 0;
+$total_update = 0;
+
+$opensearch = new Opensearch();
+$opensearch->init(OS_DEV_URL, OS_DEV_USERNAME, OS_DEV_PASSWORD, true);
+
+$index = "tribunnews-video_streaming";
+$videolist = array();
+
+try 
+{
+    $apiUrl = "https://www.googleapis.com/youtube/v3/search?part=snippet&channelId=".$channelId."&eventType=live&order=date&maxResults=".$max."&type=video&key=".$api_key;
+    $opts = array(
+        'http'=>array(
+            'method'=>"GET",
+            'timeout' => 5,
+            'header'=>"Accept-language: en\r\n"
+        ),
+        'ssl'  => array (
+            'verify_peer'      => false,
+            'verify_peer_name' => false,
+          )
+        );
+    $context = stream_context_create($opts);
+    $apiData = @file_get_contents($apiUrl, false, $context);
+
+    if($apiData === FALSE) 
+    {
+        throw new Exception("Failed to fetch data from YouTube API");
+	} 
+    else 
+    {
+        $videolist = json_decode($apiData);
+
+        $where = array();
+        $startDate = date('Y-m-d 00:00:00');
+        $endDate = date('Y-m-d 23:59:59');
+
+        array_push($where,array("range" => array("video_published_at" => array("gte" => $startDate, "lte" =>$endDate))));
+        $query = array("bool" =>
+                        array("must" =>
+                            $where
+                        )
+                );
+
+        $fields = array("video_id");
+        $start = 0;
+        $limit = 6;
+        $sort = array("video_published_at" => array("order" => "desc"));
+        $response = $opensearch->find($index, $query, $fields, $sort, $start, $limit);
+
+        if ($response['status'] == 1) {
+            $response_data = isset($response['data']) ? $response['data'] : array();
+            $youtubeVideoIds = array_map(function ($item) {
+                return $item->id->videoId;
+            }, $videolist->items);
+
+            if (count($response_data) > 0) {
+                foreach ($response_data as $item) {
+                    $video_id = $item['_source']['video_id'];
+                    if (!in_array($video_id, $youtubeVideoIds)) {
+                        $arrUpdate = array('video_live' => 0);
+                        $where = array(array("term" => array("video_id" => $video_id)));
+                        $response_update = $opensearch->updateOne($index, $video_id, $arrUpdate);
+
+                        if ($response_update['status'] == 1) {
+                            echo "<pre>";
+                            echo "Successfully updated video_live to 0 for video_id: " . $video_id;
+                            echo "</pre>";
+                        } else {
+                            echo "<pre>";
+                            print_r($response_update);
+                            echo "</pre>";
+                        }
+                    }
+                }
+            } else {
+                // Jika tidak ada data di response_data, lakukan insert semua data dari YouTube
+                foreach ($videolist->items as $key => $value) {
+                    $arrYoutubeInsert['id'] = time();
+                    $arrYoutubeInsert['video_id'] = $value->id->videoId;
+                    $arrYoutubeInsert['video_title'] = $value->snippet->title;
+                    $arrYoutubeInsert['video_description'] = $value->snippet->description;
+                    $arrYoutubeInsert['video_thumbnail'] = $value->snippet->thumbnails->high->url;
+                    $arrYoutubeInsert['video_channel_title'] = $value->snippet->channelTitle;
+                    $arrYoutubeInsert['video_live'] = 1;
+                    $arrYoutubeInsert['video_published_at'] = date('Y-m-d H:i:s', strtotime($value->snippet->publishedAt));
+                    $arrYoutubeInsert['video_insert_at'] = date('Y-m-d H:i:s');
+
+                    $response_insert_os = $opensearch->insert($index, $arrYoutubeInsert);
+
+                    if ($response_insert_os['status'] == 1) {
+                        echo "<pre>";
+                        echo "Success insert data to opensearch. Data ke: " . $key;
+                        echo "</pre>";
+                        echo "<pre>";
+                        print_r($response_insert_os);
+                        echo "</pre>";
+                    } else {
+                        echo "<pre>";
+                        print_r($response_insert_os);
+                        print_r($arrYoutubeInsert);
+                        echo "</pre>";
+                    }
+                }
+            }
+
+            // Insert data dari YouTube yang belum ada di OpenSearch
+            foreach ($videolist->items as $key => $value) {
+                $video_id = $value->id->videoId;
+                $video_exists = false;
+
+                foreach ($response_data as $item) {
+                    if ($item['_source']['video_id'] == $video_id) {
+                        $video_exists = true;
+                        break;
+                    }
+                }
+
+                if (!$video_exists) {
+                    $arrYoutubeInsert['id'] = time();
+                    $arrYoutubeInsert['video_id'] = $value->id->videoId;
+                    $arrYoutubeInsert['video_title'] = $value->snippet->title;
+                    $arrYoutubeInsert['video_description'] = $value->snippet->description;
+                    $arrYoutubeInsert['video_thumbnail'] = $value->snippet->thumbnails->high->url;
+                    $arrYoutubeInsert['video_channel_title'] = $value->snippet->channelTitle;
+                    $arrYoutubeInsert['video_live'] = 1;
+                    $arrYoutubeInsert['video_published_at'] = date('Y-m-d H:i:s', strtotime($value->snippet->publishedAt));
+                    $arrYoutubeInsert['video_insert_at'] = date('Y-m-d H:i:s');
+
+                    $response_insert_os = $opensearch->insert($index, $arrYoutubeInsert);
+
+                    if ($response_insert_os['status'] == 1) {
+                        echo "<pre>";
+                        echo "Success insert data to opensearch. Data ke: " . $key;
+                        echo "</pre>";
+                        echo "<pre>";
+                        print_r($response_insert_os);
+                        echo "</pre>";
+                    } else {
+                        echo "<pre>";
+                        print_r($response_insert_os);
+                        print_r($arrYoutubeInsert);
+                        echo "</pre>";
+                    }
+                }
+            }
+        } else {
+            // Jika tidak ada response dari OpenSearch, masukkan semua data dari YouTube
+            foreach ($videolist->items as $key => $value) {
+                $arrYoutubeInsert['id'] = time();
+                $arrYoutubeInsert['video_id'] = $value->id->videoId;
+                $arrYoutubeInsert['video_title'] = $value->snippet->title;
+                $arrYoutubeInsert['video_description'] = $value->snippet->description;
+                $arrYoutubeInsert['video_thumbnail'] = $value->snippet->thumbnails->high->url;
+                $arrYoutubeInsert['video_channel_title'] = $value->snippet->channelTitle;
+                $arrYoutubeInsert['video_live'] = 1;
+                $arrYoutubeInsert['video_published_at'] = date('Y-m-d H:i:s', strtotime($value->snippet->publishedAt));
+                $arrYoutubeInsert['video_insert_at'] = date('Y-m-d H:i:s');
+
+                $response_insert_os = $opensearch->insert($index, $arrYoutubeInsert);
+
+                if ($response_insert_os['status'] == 1) {
+                    echo "<pre>";
+                    echo "Success insert data to opensearch. Data ke: " . $key;
+                    echo "</pre>";
+                    echo "<pre>";
+                    print_r($response_insert_os);
+                    echo "</pre>";
+                } else {
+                    echo "<pre>";
+                    print_r($response_insert_os);
+                    print_r($arrYoutubeInsert);
+                    echo "</pre>";
+                }
+            }
+        }
+	}
+}
+catch(Exception $e)
+{
+	$apierror = $e->getMessage();
+}
+
+//$arrYoutubeInsert = array();
+
+// foreach($videolist->items as $key => $value)
+// {
+//     $arrYoutubeInsert['id'] = time();
+//     $arrYoutubeInsert['video_id'] = $value->id->videoId;
+//     $arrYoutubeInsert['video_title'] = $value->snippet->title;
+//     $arrYoutubeInsert['video_description'] = $value->snippet->description;
+//     $arrYoutubeInsert['video_thumbnail'] = $value->snippet->thumbnails->high->url;
+//     $arrYoutubeInsert['video_channel_title'] = $value->snippet->channelTitle;
+//     $arrYoutubeInsert['video_live'] = 1;
+//     $arrYoutubeInsert['video_published_at'] = $value->snippet->publishedAt;
+//     $arrYoutubeInsert['video_insert_at'] = date('Y-m-d H:i:s');
+
+//     $response_insert_os = $opensearch->insert($index, $arrYoutubeInsert);
+
+//     if($response_insert_os['status'] == 1)
+//     { 
+//         echo "<pre>";
+//         echo "Success insert data to opensearch. Data ke: ".$total;
+//         echo "</pre>";
+//         echo "<pre>";
+//         print_r($response_insert_os);
+//         echo "</pre>";
+//     }
+//     else
+//     {
+//         echo "<pre>";
+//         print_r($response_insert_os);
+//         print_r($arrYoutubeInsert);
+//         echo "</pre>";
+//     }
+
+//     $total++;
+// }
+
+// echo '<pre>';
+// print_r($arrYoutubeInsert);
+// echo '</pre>';
+
+echo '<br>Total data: '.$total;
+echo '<br>Execution time in seconds: ' . (microtime(true) - $time_start) . "<br>";
+?>

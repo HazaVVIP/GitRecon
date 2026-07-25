@@ -1,0 +1,28 @@
+<?php
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+
+$time_start = time();
+
+define("DOC_ROOT","/var/www/html/web-cron/");
+
+include DOC_ROOT."config/config.php";
+include DOC_ROOT."lib/Opensearch.php";
+include DOC_ROOT."lib/Writelog.php";
+
+$api_key = 'AIzaSyC3KtwEDGp4AY9oUW9hZpWWBL6OiujTwsk';
+$channelId = 'UCmxAIW7RDDC88EPk4ry16Kg';
+
+try 
+{
+
+}
+catch(Exception $e)
+{
+	$apierror = $e->getMessage();
+}
+
+echo "Total : ".$total."<br>";
+echo '<br>Execution time in seconds: ' . (microtime(true) - $time_start) . "<br>";
+
+?>

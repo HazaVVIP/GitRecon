@@ -1,0 +1,378 @@
+<?php
+ini_set("display_errors",1);
+error_reporting(E_ALL);
+
+
+$time_start = time();
+
+define("DOC_ROOT","/var/www/html/web-cron/");
+
+include DOC_ROOT."config/config.php";
+include DOC_ROOT."lib/Opensearch.php";
+
+$api_key = YOUTUBE_KEY;
+$channelId = YOUTUBE_CHANNEL_ID;
+$max = 10;
+$total = 0;
+$total_update = 0;
+
+$opensearch = new Opensearch();
+$opensearch->init(OS_DEV_URL, OS_DEV_USERNAME, OS_DEV_PASSWORD, true);
+
+$index = "tribunnews-video_streaming";
+$videolist = array();
+
+try 
+{
+    $condition = array("match_phrase" => array("video_live" => "1"));
+    $fields = array("id", "video_id");
+    $response = $opensearch->find($index, $condition, $fields);
+
+    if($response['status'] == 1)
+    {
+        foreach($response['data'] as $key => $value)
+        {
+            $video_id = $value['_source']['video_id'];
+            $live_broadcast = 0;
+
+            $apiUrl = "https://www.googleapis.com/youtube/v3/videos?part=snippet&id=".$video_id."&key=".$api_key;
+            $opts = array(
+                'http'=>array(
+                    'method'=>"GET",
+                    'timeout' => 5,
+                    'header'=>"Accept-language: en\r\n"
+                ),
+                'ssl'  => array (
+                    'verify_peer'      => false,
+                    'verify_peer_name' => false,
+                  )
+                );
+            $context = stream_context_create($opts);
+            $apiDataList = @file_get_contents($apiUrl, false, $context);
+
+            if($apiDataList === FALSE) 
+            {
+                throw new Exception("Failed to fetch data from YouTube API");
+            } 
+            else 
+            {
+                $videolist = json_decode($apiDataList);
+
+                if(isset($videolist->items[0]->snippet->liveBroadcastContent) && $videolist->items[0]->snippet->liveBroadcastContent === "live")
+                {
+                    $live_broadcast = 1;
+                }
+
+                if($live_broadcast == 0)
+                {
+                    $arrYoutubeUpdate = array();
+                    $arrYoutubeUpdate['video_live'] = 0;
+                    $response = $opensearch->updateOne($index, $value['_source']['id'], $arrYoutubeUpdate);
+
+                    if($response['status'] == 1)
+                    {
+                        $total_update++;
+                    }
+                }
+            }
+        }
+    }
+}
+catch(Exception $e)
+{
+	$apierror = $e->getMessage();
+}
+
+try 
+{
+    $apiUrl = "https://www.googleapis.com/youtube/v3/search?part=snippet&channelId=".$channelId."&order=date&maxResults=".$max."&eventType=live&type=video&key=".$api_key;
+    $opts = array(
+        'http'=>array(
+            'method'=>"GET",
+            'timeout' => 5,
+            'header'=>"Accept-language: en\r\n"
+        ),
+        'ssl'  => array (
+            'verify_peer'      => false,
+            'verify_peer_name' => false,
+          )
+        );
+    $context = stream_context_create($opts);
+    $apiData = @file_get_contents($apiUrl, false, $context);
+
+    if($apiData === FALSE) 
+    {
+        throw new Exception("Failed to fetch data from YouTube API");
+	} 
+    else 
+    {
+        $condition = array();
+        $fields = array('id');
+        $sort = array("id" => "desc");
+        $start = 0;
+        $limit = 1;
+        $response_os = $opensearch->find($index,$condition,$fields,$sort,$start,$limit);
+
+        $id = 1;
+        if($response_os['status']){
+            $id = isset($response_os['data'][0]['_id'])?intval($response_os['data'][0]['_id']):0;
+        }
+
+        $videoDetail = json_decode($apiData);
+
+        foreach($videoDetail->items as $key => $value)
+        {
+            if (!preg_match("/\[?portrait\]?/i", $value->snippet->title))
+            {
+                $video_id = $value->id->videoId;
+                $live_broadcast = (isset($value->snippet->liveBroadcastContent) && $value->snippet->liveBroadcastContent === "live") ? 1 : 0;
+                
+                $condition = array("match_phrase" => array("video_id" => $video_id));
+                $fields = array("id", "video_live", "video_alias");
+                $response = $opensearch->findOne($index, $condition, $fields);
+
+                if($response['status'] == 0) 
+                {
+                    $descriptions = '';
+                    $video_tags = '';
+                    $video_program = '';
+
+                    $apiUrlDetail = "https://www.googleapis.com/youtube/v3/videos?part=snippet&id=".$video_id."&key=".$api_key;
+                    $opts = array(
+                        'http'=>array(
+                            'method'=>"GET",
+                            'timeout' => 5,
+                            'header'=>"Accept-language: en\r\n"
+                        ),
+                        'ssl'  => array(
+                            'verify_peer'      => false,
+                            'verify_peer_name' => false,
+                        )
+                    );
+                    $context = stream_context_create($opts);
+                    $api_data = @file_get_contents($apiUrlDetail, false, $context);
+
+                    if ($api_data === FALSE) {
+                        throw new Exception("Failed to fetch data from YouTube API");
+                    } else {
+                        $video_detail = json_decode($api_data);
+
+                        //$descriptions = get_description($video_detail->items[0]->snippet->description);
+                        $descriptions = get_description_new($video_detail->items[0]->snippet->description);
+                        $video_tags = get_tag_string($descriptions);
+                        if(empty($video_tags)){
+                            $video_tags = extract_tag($video_detail->items[0]->snippet->tags);
+                        }
+                        $video_program = get_program($video_detail->items[0]->snippet->description);
+                        $video_editor = get_editor($video_detail->items[0]->snippet->description);
+                    }
+
+                    $video_title = utf8_encode(trim($value->snippet->title));
+                    $video_title = preg_replace('/[^(\x20-\x7F)]*/','', $video_title);
+                    $video_title = str_replace("'","",$video_title);
+                    $video_title = utf8_encode(trim($video_title));
+                    
+                    $video_alias = url_title($value->snippet->title, '-', TRUE);
+                    
+                    $video_tags = utf8_encode(trim($video_tags));
+                    $video_tags = preg_replace('/[^\x20-\x7F|:]/', '', $video_tags);
+                    $video_tags = str_replace("'", "\'", $video_tags);
+
+                    $arrYoutubeInsert = array();
+                    $arrYoutubeInsert['id'] = $id;
+                    $arrYoutubeInsert['video_id'] = $video_id;
+                    $arrYoutubeInsert['video_title'] = $video_title;
+                    $arrYoutubeInsert['video_alias'] = $video_alias;
+                    $arrYoutubeInsert['video_description'] = $descriptions;
+                    $arrYoutubeInsert['video_thumbnail'] = isset($value->snippet->thumbnails->medium->url)?$value->snippet->thumbnails->medium->url:"";
+                    $arrYoutubeInsert['video_channel_title'] = isset($value->snippet->channelTitle)?$value->snippet->channelTitle:"";
+                    $arrYoutubeInsert['video_live'] = $live_broadcast;
+                    $arrYoutubeInsert['video_tag'] = $video_tags;
+                    $arrYoutubeInsert['video_program_name'] = $video_program;
+                    $arrYoutubeInsert['video_editor'] = $video_editor;
+                    $arrYoutubeInsert['video_published_at'] = date('Y-m-d H:i:s', strtotime($value->snippet->publishedAt));
+                    $arrYoutubeInsert['video_insert_at'] = date('Y-m-d H:i:s');
+
+                    // echo "<pre>";
+                    // print_r($arrYoutubeInsert);
+                    // echo "</pre>";
+
+                    echo "<pre>";
+                    print_r($response['data']);
+                    echo "</pre>";
+
+                    if($video_alias != $response['data']['_source']['video_alias'])
+                    {
+                        // $response_insert_os = $opensearch->insert($index, $arrYoutubeInsert);
+
+                        // if ($response_insert_os['status'] == 1) {
+                        //     $id++;
+                        // }
+                    }
+                    else 
+                    {
+                        // $response_update = $opensearch->updateOne($index, $id, $arrYoutubeUpdate);
+
+                        // if ($response_update['status'] == 1) {
+                        //     $id++;
+                        // }
+                    }
+                    
+                    $total++;
+                }
+            }
+        }
+	}
+}
+catch(Exception $e)
+{
+	$apierror = $e->getMessage();
+}
+
+function url_title($str, $separator = '-', $lowercase = FALSE)
+{
+    if ($separator === 'dash')
+    {
+        $separator = '-';
+    }
+    elseif ($separator === 'underscore')
+    {
+        $separator = '_';
+    }
+
+    $q_separator = preg_quote($separator, '#');
+
+    $trans = array(
+        '&.+?;'            => '', 
+        '[^\w\d _-]'       => '', 
+        '\s+'              => $separator, 
+        '('.$q_separator.')+' => $separator  
+    );
+
+    $str = strip_tags($str);
+
+    foreach ($trans as $key => $val)
+    {
+        $str = preg_replace('#'.$key.'#i', $val, $str);
+    }
+
+    if ($lowercase === TRUE)
+    {
+        $str = strtolower($str);
+    }
+
+    return trim(trim($str, $separator));
+}
+
+function get_description($description)
+{
+    $result = "";
+    $startPos = strpos($description, "TRIBUN-VIDEO.COM -");
+
+    if ($startPos !== false) 
+    {
+        $startPos += strlen("TRIBUN-VIDEO.COM - ");
+        $result = substr($description, $startPos);
+        
+        $endPos = strpos($result, "\n\n");
+        if ($endPos !== false) 
+        {
+            $result = substr($result, 0, $endPos);
+        }
+        return $result;
+    } 
+    else 
+    {
+        return $result;
+    }
+}
+
+function get_description_new($description)
+{
+    $result = "";
+	if(!empty($description)){
+		$startPos = strpos($description, "TRIBUN-VIDEO.COM -");
+
+		if ($startPos !== false) 
+		{
+			$startPos += strlen("TRIBUN-VIDEO.COM - ");
+			$result = substr($description, $startPos);
+			$result = preg_replace("/[\r\n]/","<p>",$result);
+			$result = "<p><strong>TRIBUN-VIDEO.COM</strong> - ".$result;
+			$result = str_replace("<p><p>","</p><p>",$result);
+			return $result;
+		} 
+		else 
+		{
+			return $result;
+		}
+	} else {
+		return $result;
+	}
+}
+
+function get_tag_string($description) {
+	$keywords = "";
+	
+	/* Match hashtags */
+	preg_match_all('/#(\w+)/', $description, $matches);
+
+	/* Add all matches to array */
+	foreach ($matches[1] as $match) {
+		$keywords .= $match . ', ';
+	}
+	
+	if(!empty($keywords)){
+		$keywords = rtrim(trim($keywords), ',');
+		$keywords = substr($keywords, 0, -1); 
+	}	
+
+	return $keywords;
+}
+
+function extract_tag($tags)
+{
+    $tagsString = implode(", ", $tags);
+    return $tagsString;
+}
+
+function get_program($string)
+{
+    $program = ""; 
+	$programPos = strpos($string, "Program:");
+
+    if ($programPos !== false) {
+        $parts = explode("Program:", $string);
+
+        $program = trim($parts[1]);
+
+        $program = explode("\n", $program)[0];
+        $program = trim($program);
+    }
+	return $program;
+}
+
+function get_editor($string)
+{
+    $editor = "";
+    $editorPos = strpos($string, "Editor Video:");
+
+    if ($editorPos !== false) {
+        $parts = explode("Editor Video:", $string);
+
+        $editor = trim($parts[1]);
+
+        $editor = explode("\n", $editor)[0];
+        $editor = trim($editor);
+    } 
+	
+	return $editor;
+}
+
+file_get_contents('https://api.tribunnews.com/tcache/update_custom_memcache/live_stream_os', false);
+
+echo '<br>Total data: '.$total;
+echo '<br>Total data updated: '.$total_update;
+echo '<br>Execution time in seconds: ' . (microtime(true) - $time_start) . "<br>";
+echo '<br>Last time executed at: '.date('Y-m-d H:i:s');
+?>

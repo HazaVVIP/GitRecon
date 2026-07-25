@@ -1,0 +1,355 @@
+<?php
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+
+$time_start = time();
+
+define("DOC_ROOT","/var/www/html/web-cron/");
+
+//require_once DOC_ROOT."vendor/autoload.php";
+include DOC_ROOT."config/config.php";
+include DOC_ROOT."lib/Opensearch.php";
+
+//use LanguageDetection\Language;
+
+/* 
+Running in command
+- sudo -u www-data /usr/bin/php7.4 /var/www/html/web-cron/tribunnews/widget/googletrends_rss.php
+*/
+
+$tipe = isset($_SERVER["argv"][1])?$_SERVER["argv"][1]:"latest";
+if(isset($_GET['tipe'])){
+	$tipe = $_GET['tipe'];
+}	
+
+$daerah = isset($_SERVER["argv"][2])?$_SERVER["argv"][2]:"";
+if(isset($_GET['daerah'])){
+	$daerah = $_GET['daerah'];
+}
+
+$user_agents = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:102.0) Gecko/20100101 Firefox/102.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36 Edg/114.0.1823.51",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 12_6_1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_4_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Safari/605.1.15",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:109.0) Gecko/20100101 Firefox/109.0",
+    "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:103.0) Gecko/20100101 Firefox/103.0",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.5672.92 Safari/537.36",
+    "Mozilla/5.0 (Linux; Android 12; Pixel 6 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.5735.196 Mobile Safari/537.36",
+    "Mozilla/5.0 (Linux; Android 11; SM-A505F) AppleWebKit/537.36 (KHTML, like Gecko) SamsungBrowser/17.0 Chrome/96.0.4664.45 Mobile Safari/537.36",
+    "Mozilla/5.0 (Android 10; Mobile; rv:102.0) Gecko/102.0 Firefox/102.0",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/114.0.5735.124 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (iPad; CPU OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (iPad; CPU OS 15_7_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/114.0.5735.134 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.5481.100 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 6.3; Win64; x64; rv:104.0) Gecko/20100101 Firefox/104.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_4) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36 Brave/114.1.52.122",
+    "Mozilla/5.0 (Linux; Android 11; CPH2083) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/94.0.4606.71 Mobile Safari/537.36 OPR/61.1.3076.56626",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.5735.199 Safari/537.36 OPR/100.0.4815.76",
+];
+$random_user_agent = $user_agents[array_rand($user_agents)];
+
+$paramGeo = "ID";
+$province = "";
+if(!empty($daerah)){
+	$province = getProvinceInEnglish($daerah,"Indonesia");
+	$paramGeo = getProvinceCode($province);
+}	
+
+$url_google_trends_rss = "https://trends.google.com/trending/rss?geo=".$paramGeo;
+
+/* echo $daerah."<br>";
+echo $province."<br>";
+echo $url_google_trends_rss."<br>"; */
+
+$options = array(
+  'http'=>array(
+	'method'=>"GET",
+	'header'=>"Accept-language: en\r\n" .
+			  "User-Agent: ".$random_user_agent."\r\n",
+	'timeout'=> 3
+  )
+);
+$context = stream_context_create($options);
+$results = file_get_contents($url_google_trends_rss, false, $context);
+
+$pTags= array();
+$pArticles= array();
+
+if($results != false){
+	$opensearchAllNetwork = new Opensearch();
+	$opensearchAllNetwork->init(OS_ALLNETWOORK_URL,OS_ALLNETWOORK_USERNAME,OS_ALLNETWOORK_PASSWORD,true);
+	
+	//$ld = new Language(['id','en']);
+		
+	//Tag & Article
+	$dom = new DOMDocument('1.0', 'UTF-8');
+	$dom->preserveWhiteSpace = false; 
+	$dom->loadXml($results);
+	$array = DOMtoArray($dom);
+	
+	if(count($array) > 0){
+		$items = isset($array['rss']['channel']['item'])?$array['rss']['channel']['item']:array();
+		
+		if(count($items) > 0){
+			$geo = "Indonesia";
+			$geoAdd = "";
+			if(empty($daerah)) $geoAdd = $daerah;
+			echo "Sumber : <a href='".$url_google_trends_rss."' target='_blank'>Google Trends RSS</a> : ".$geo." ".$geoAdd."<br><br>";
+			
+			foreach($items as $key => $item){
+				$tagTitle = trim($item['title']);
+				
+				$title = isset($item['ht:news_item'][0]['ht:news_item_title'])?trim($item['ht:news_item'][0]['ht:news_item_title']):"";
+				$link = isset($item['ht:news_item'][0]['ht:news_item_url'])?trim($item['ht:news_item'][0]['ht:news_item_url']):"";
+				$source = isset($item['ht:news_item'][0]['ht:news_item_source'])?trim($item['ht:news_item'][0]['ht:news_item_source']):"";
+				
+				$title = str_replace(array("? Halaman all","..."),array("",""), $title);
+				$link = str_replace(array("?page=all","?page=1","?page=2","?page=3","?page=4"),array("","","","",""),$link);
+				
+				if(!empty($title) && !empty($link)){
+					//$result2 = $ld->detect($title)->bestResults()->close();
+					//$lang2 = key($result2);
+					
+					//if($lang2 == "id"){
+						$pTags[] = ["title" => $tagTitle];
+						
+						$pArticles[] = ["title" => $title, "link" => $link, "source" => $source];
+						
+						echo "Keyword = <strong>".$tagTitle."</strong><br>";
+						
+						/* echo "<table border='1'>";
+						echo "<th>Judul</th><th>Source</th><th>Link</th>";
+						echo "<tr><td>".$title."</td><td>".$source."</td><td><a href='".$link."'>Link</a></td></tr>";
+						echo "</table>";
+						echo "<br>"; */
+						
+						$start = 0;
+						$limit = 10;
+						if($tipe == "populer"){
+							$where = array();
+
+							array_push($where,array("match" => array("title" => $tagTitle)));
+							array_push($where,array("exists" => array("field" => "pageviews")));
+						
+							$hoursNow = date('G');
+							$dateToday = date("Y-m-d H:i:s"); 
+							/* if($hoursNow < 10){
+								$timeHoursAgo = strtotime('-24 hours', strtotime($dateToday));
+							} else {
+								$timeHoursAgo = strtotime('-18 hours', strtotime($dateToday));
+							} */
+							$timeHoursAgo = strtotime('-3 days', strtotime($dateToday));
+							
+							$timeNow = strtotime("now");
+							$startDate = date('Y-m-d H:i:s', $timeHoursAgo);
+							$endDate = date('Y-m-d H:i:s', $timeNow);
+							array_push($where,array("range" => array("publish_date" => array("gte" => $startDate, "lte" =>$endDate))));	
+							
+							$query = array();
+							if(count($where) > 0){
+								$query = array("bool" =>
+											array("must" =>
+												$where
+											)
+									);
+							}
+
+							$fields = array("domain_id","domain","alias","title","written_date","pageviews");
+							$sort = array("pageviews" => array("order" => "desc"));
+							$response = $opensearchAllNetwork->find("tribunnetwork-articles",$query,$fields,$sort,$start,$limit);
+						} else {	
+							$query = array("match_phrase" => array("title" => $tagTitle));
+							//$query = array("match" => array("title" => $tagTitle));
+							//$query = array("match" => array("title" => array("query" => $tagTitle, "minimum_should_match" => "90%")));
+							
+							$fields = array("domain_id","domain","alias","title","written_date","pageviews");
+							$sort = array("written_date" => array("order" => "desc"));
+							$response = $opensearchAllNetwork->find("tribunnetwork-articles",$query,$fields,$sort,$start,$limit);
+						}
+						
+						if($response['status']){
+							$dataMatch = isset($response['data'])?$response['data']:array();
+
+							if(count($dataMatch) > 0){
+								echo "<table border='1'>";
+								echo "<th>Judul</th><th>Network</th><th>Written Date</th><th>Link</th><th>Pageview</th>";
+								
+								foreach($dataMatch as $val){
+									$row = $val['_source'];
+									$pageviews = isset($row['pageviews'])?$row['pageviews']:0;
+									$url = "https://".$row['domain'].".tribunnews.com/".$row['alias'];
+									if($row['domain'] == "tribunnews") $url = "https://www.tribunnews.com/".$row['alias'];
+									
+									echo "<tr><td>".$row['title']."</td><td>".$row['domain']."</td><td>".$row['written_date']."</td><td><a href='".$url."'>Link</a></td><td>".$pageviews."</td></tr>";
+								}
+								echo "</table>";
+								echo "<hr>";
+								
+							}
+						} else {
+							echo "<table border='1'>";
+							echo "<th>Judul</th><th>Network</th><th>Written Date</th><th>Link</th><th>Pageview</th>";
+							echo "<tr><td colspan='5' align='center'>Tidak ada artikel</td></tr>";
+							echo "</table>";
+							echo "<hr>";
+						}
+					//}
+				}
+			}
+		}
+		
+	}
+	//End Tag & Article
+	
+	unset($opensearchAllNetwork);
+	
+	/* echo "<pre>";
+	print_r($pTags);
+	print_r($pArticles);
+	echo "</pre>"; */
+}
+
+echo "\nExecution time in seconds: ". (microtime(true) - $time_start) . "\n";		
+
+
+function DOMtoArray($root) {
+	$result = array();
+
+	if ($root->hasAttributes()) {
+		$attrs = $root->attributes;
+		foreach ($attrs as $attr) {
+			$result['@attributes'][$attr->name] = $attr->value;
+		}
+	}
+
+	if ($root->hasChildNodes()) {
+		$children = $root->childNodes;
+		if ($children->length == 1) {
+			$child = $children->item(0);
+			if (in_array($child->nodeType,[XML_TEXT_NODE,XML_CDATA_SECTION_NODE])) {
+				$result['_value'] = $child->nodeValue;
+				return count($result) == 1
+					? $result['_value']
+					: $result;
+			}
+
+		}
+		$groups = array();
+		foreach ($children as $child) {
+			if (!isset($result[$child->nodeName])) {
+				$result[$child->nodeName] = DOMtoArray($child);
+			} else {
+				if (!isset($groups[$child->nodeName])) {
+					$result[$child->nodeName] = array($result[$child->nodeName]);
+					$groups[$child->nodeName] = 1;
+				}
+				$result[$child->nodeName][] = DOMtoArray($child);
+			}
+		}
+	}
+	return $result;
+}
+
+function getProvinceInEnglish($input,$country="indonesia") {
+	$default  = "Jakarta";
+	
+	if (strtolower($country) !== "indonesia") {
+		return $default;
+	}
+	
+	$provinsi = [
+		'Aceh' => 'Aceh',
+		'Sumatera Utara' => 'North Sumatra',
+		'Sumatera Barat' => 'West Sumatra',
+		'Riau' => 'Riau',
+		'Kepulauan Riau' => 'Riau Islands',
+		'Jambi' => 'Jambi',
+		'Bengkulu' => 'Bengkulu',
+		'Sumatera Selatan' => 'South Sumatra',
+		'Kepulauan Bangka Belitung' => 'Bangka Belitung Islands',
+		'Lampung' => 'Lampung',
+		'DKI Jakarta' => 'Jakarta',
+		'Jawa Barat' => 'West Java',
+		'Banten' => 'Banten',
+		'Jawa Tengah' => 'Central Java',
+		'DI Yogyakarta' => 'Yogyakarta',
+		'Jawa Timur' => 'East Java',
+		'Bali' => 'Bali',
+		'Nusa Tenggara Barat' => 'West Nusa Tenggara',
+		'Nusa Tenggara Timur' => 'East Nusa Tenggara',
+		'Kalimantan Barat' => 'West Kalimantan',
+		'Kalimantan Tengah' => 'Central Kalimantan',
+		'Kalimantan Selatan' => 'South Kalimantan',
+		'Kalimantan Timur' => 'East Kalimantan',
+		'Kalimantan Utara' => 'North Kalimantan',
+		'Sulawesi Utara' => 'North Sulawesi',
+		'Gorontalo' => 'Gorontalo',
+		'Sulawesi Tengah' => 'Central Sulawesi',
+		'Sulawesi Barat' => 'West Sulawesi',
+		'Sulawesi Selatan' => 'South Sulawesi',
+		'Sulawesi Tenggara' => 'Southeast Sulawesi',
+		'Maluku' => 'Maluku',
+		'Maluku Utara' => 'North Maluku',
+		'Papua' => 'Papua',
+		'Papua Barat' => 'West Papua',
+		'Papua Pegunungan' => 'Highland Papua',
+		'Papua Tengah' => 'Central Papua',
+		'Papua Selatan' => 'South Papua',
+		'Papua Barat Daya' => 'Southwest Papua'
+	];
+
+	foreach ($provinsi as $id => $en) {
+		if (strcasecmp($input, $id) === 0 || strcasecmp($input, $en) === 0) {
+			return $en;
+		}
+	}
+
+	return $default;
+}
+
+function getProvinceCode($province) {
+    $map = [
+        'Aceh'              => 'ID-AC',
+		'North Sumatra'     => 'ID-SU',
+		'West Sumatra'     	=> 'ID-SB',
+		'Riau'              => 'ID-RI',
+		'Riau Islands'    	=> 'ID-KR',
+		'Jambi'             => 'ID-JA',
+		'Bengkulu'          => 'ID-BE',
+		'South Sumatra'   	=> 'ID-SS',
+		'Bangka Belitung'   => 'ID-BB',
+        'Lampung'           => 'ID-LA',
+        'Jakarta'       	=> 'ID-JK',
+		'West Java'        	=> 'ID-JB',
+        'Banten'            => 'ID-BT',
+        'Central Java'      => 'ID-JT',
+		'Yogyakarta'        => 'ID-YO',
+		'East Java'        	=> 'ID-JI',
+		'Bali'              => 'ID-BA',
+		'West Nusa Tenggara'=> 'ID-NB',
+		'East Nusa Tenggara'=> 'ID-NT',
+        'West Kalimantan'  	=> 'ID-KB',
+		'Central Kalimantan'=> 'ID-KT',
+        'South Kalimantan'	=> 'ID-KS',
+        'East Kalimantan'  	=> 'ID-KI',
+		'North Kalimantan'  => 'ID-KU',
+        'Gorontalo'         => 'ID-GO',
+        'Central Sulawesi'  => 'ID-ST',
+        'Southeast Sulawesi'=> 'ID-SG',
+        'North Sulawesi'    => 'ID-SA',
+		'South Sulawesi '  	=> 'ID-SN',
+		'West Sulawesi'    	=> 'ID-SR',
+		'North Maluku'      => 'ID-MU',
+        'Maluku'            => 'ID-MA',
+        'Papua'             => 'ID-PA',
+        'West Papua'       	=> 'ID-PB',
+    ];
+
+    $province = ucwords(strtolower($province));
+
+    return $map[$province] ?? 'ID';
+}
+?>

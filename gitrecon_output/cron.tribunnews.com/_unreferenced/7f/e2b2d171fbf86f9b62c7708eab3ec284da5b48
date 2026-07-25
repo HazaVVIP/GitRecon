@@ -1,0 +1,33 @@
+<?php 
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+//error_reporting(0);
+
+$time_start = time();
+
+include "/var/www/html/web-cron/config/config.php";
+include_once "/var/www/html/web-cron/booking/model/model_transaction.php";
+
+    //load model class
+    $model_transaction  = new model_transaction();
+
+    $getDataExpired     = $model_transaction->get_invoice_expired();
+    $totalDataExpired   = mysqli_num_rows($getDataExpired);
+
+    var_dump($getDataExpired, $totalDataExpired);exit;
+
+    if ($totalDataExpired > 0) {
+        $result = mysqli_fetch_assoc($getDataExpired);
+        foreach ($result as $row) {
+            $dataExpired = array();
+            $dataExpired['status_paid']        = 'expired';
+            $dataExpired['transaction_status'] = '4';
+
+            $this->db->where('kode_invoice', $row['id_user']);
+            $rs = $this->db->update('tbl_transaksi', $dataExpired);
+        }
+    }
+
+    echo "\nExecution time in seconds: ". (microtime(true) - $time_start) . "\n";
+
+?>

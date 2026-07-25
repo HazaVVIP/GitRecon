@@ -1,0 +1,189 @@
+<?php 
+include_once "/var/www/html/web-cron/config/config_db_tjb.php";
+
+class model_cron{
+
+    private $conn_db_tjb;
+    public function __construct()
+    {
+        $this->conn_db_tjb = new config_db_tjb();
+    }
+
+	function get_id_post_by_date($start_date, $end_date) {
+		$con = $this->conn_db_tjb->conn_to_db_tjb_prod();
+        $sql = "SELECT id FROM post WHERE DATE(date_publish) BETWEEN '".$start_date."' AND '".$end_date."'";
+        $result = mysqli_query($con, $sql);	
+        mysqli_close($con);
+		return $result;
+	}
+
+	function get_post_by_array_id($arr_id) {
+		$con = $this->conn_db_tjb->conn_to_db_tjb_prod();
+		$string_id = implode(',', $arr_id);
+		$where = "WHERE a.id IN (".$string_id.")";
+		$sql = "SELECT a.id, a.title, a.user_id, a.status, a.price, a.type, a.condition, a.nego,
+					a.map, a.description, a.date_created, a.date_publish, a.username, a.name, a.email, a.telephone,
+					a.video, a.image, a.image_files, a.meta, a.tp_toplist, a.tp_meta, a.sold, a.is_commerce,
+					a.category, c.title as category_title, c.alias as category_alias,
+					a.subcategory, sc.title as subcategory_title, sc.alias as subcategory_alias,
+					a.location, l.title as location_title, l.alias as location_alias,
+					a.sublocation, sl.title as sublocation_title, sl.alias as sublocation_alias,
+					a.kecamatan, k.title as kecamatan_title, k.alias as kecamatan_alias,
+					a.merk, merk.title as merk_title, merk.alias as merk_alias,
+					a.model, model.title as model_title, model.alias as model_alias,
+					pr.premium_1, pr.premium_7h, pr.premium_3h,
+					pr.premium_2, pr.premium_3, pr.premium_4,
+					pr.date_paid as premium_date_paid, pr.status as premium_status
+				FROM post a
+					LEFT JOIN category c ON a.category = c.id
+					LEFT JOIN subcategory sc ON a.subcategory = sc.id
+					LEFT JOIN location l ON a.location = l.id
+					LEFT JOIN sublocation sl ON a.sublocation = sl.id
+					LEFT JOIN kecamatan k ON a.kecamatan = k.id
+					LEFT JOIN merk merk on a.merk = merk.id
+					LEFT JOIN model model on a.model = model.id
+					LEFT JOIN payment pr on a.id = pr.id_post
+				".$where;
+		$result = mysqli_query($con, $sql);	
+        mysqli_close($con);
+		return $result;
+	}
+
+	function get_id_articles_by_date($start_date, $end_date) {
+		$con = $this->conn_db_tjb->conn_to_db_tjb_prod();
+		$where = "WHERE a.date_publish BETWEEN '".$start_date." 00:00:00' AND '".$end_date." 23:59:59'";
+		$sql = "SELECT a.id FROM blog_article a ".$where;
+		$result = mysqli_query($con, $sql);	
+		mysqli_close($con);
+		return $result;
+	}
+	
+	function get_articles_by_array_id($arr_id) {
+		$con = $this->conn_db_tjb->conn_to_db_tjb_prod();
+		$string_id = implode(',', $arr_id);
+		$where = "WHERE a.id IN (".$string_id.")";
+		$sql = "SELECT a.id, a.title, a.main_content, a.content, a.image, a.teaser, 
+					a.date_publish, a.writter, a.source_title, a.source_link, a.status, a.hit,
+					a.category, b.title as category_title, b.alias as category_alias,
+					a.subcategory, c.title as subcategory_title, c.alias as subcategory_alias
+				FROM blog_article a
+				LEFT JOIN blog_category b ON a.category = b.id
+				LEFT JOIN blog_category c ON a.subcategory = c.id
+				".$where;
+		$result = mysqli_query($con, $sql);	
+        mysqli_close($con);
+		return $result;
+	}
+
+	function get_list_administrator() {
+		$con = $this->conn_db_tjb->conn_to_db_tjb_prod();
+		$sql = "SELECT id_user FROM administrator ORDER BY id_user ASC";
+		$result = mysqli_query($con, $sql);	
+        mysqli_close($con);
+		return $result;
+	}
+
+	function get_rpt_category($start_date, $end_date, $str_user_admin) {
+		$con = $this->conn_db_tjb->conn_to_db_tjb_prod();
+		$sql = "SELECT a.category, b.alias, count(a.id) as total, 
+				(
+				SELECT count(x.id) as total FROM post x WHERE x.category = a.category AND x.status = '1' AND x.is_commerce = 0 AND x.date_created BETWEEN '".$start_date." 00:00:00' AND '".$end_date." 23:59:59' 
+				) as total_publish,
+				(
+				SELECT count(x.id) as total FROM post x WHERE x.category = a.category AND x.status = '1' AND x.is_commerce = 0 AND x.date_created BETWEEN '".$start_date." 00:00:00' AND '".$end_date." 23:59:59' AND x.user_id NOT IN (".$str_user_admin.")
+				) as total_real_publish,
+				(
+				SELECT count(x.id) as total FROM post x WHERE x.category = a.category AND x.status <> '1' AND x.is_commerce = 0 AND x.date_created BETWEEN '".$start_date." 00:00:00' AND '".$end_date." 23:59:59' 
+				) as total_unpublish,
+				(
+				SELECT count(x.id) as total FROM post x WHERE x.category = a.category AND x.status <> '1' AND x.is_commerce = 0 AND x.date_created BETWEEN '".$start_date." 00:00:00' AND '".$end_date." 23:59:59' AND x.user_id NOT IN (".$str_user_admin.")
+				) as total_real_unpublish,
+				(
+				SELECT count(x.id) as total FROM post x WHERE x.category = a.category AND x.status = '0' AND x.is_commerce = 0 AND x.date_created BETWEEN '".$start_date." 00:00:00' AND '".$end_date." 23:59:59' 
+				) as total_pending,
+				(
+				SELECT count(x.id) as total FROM post x WHERE x.category = a.category AND x.status = '0' AND x.is_commerce = 0 AND x.date_created BETWEEN '".$start_date." 00:00:00' AND '".$end_date." 23:59:59' AND x.user_id NOT IN (".$str_user_admin.")
+				) as total_real_pending,
+				(
+				SELECT count(x.id) as total FROM post x WHERE x.category = a.category AND x.status = '2' AND x.is_commerce = 0 AND x.date_created BETWEEN '".$start_date." 00:00:00' AND '".$end_date." 23:59:59' 
+				) as total_expired,
+				(
+				SELECT count(x.id) as total FROM post x WHERE x.category = a.category AND x.status = '2' AND x.is_commerce = 0 AND x.date_created BETWEEN '".$start_date." 00:00:00' AND '".$end_date." 23:59:59' AND x.user_id NOT IN (".$str_user_admin.")
+				) as total_real_expired,
+				(
+				SELECT count(x.id) as total FROM post x WHERE x.category = a.category AND x.status = '3' AND x.is_commerce = 0 AND x.date_created BETWEEN '".$start_date." 00:00:00' AND '".$end_date." 23:59:59' 
+				) as total_delete,
+				(
+				SELECT count(x.id) as total FROM post x WHERE x.category = a.category AND x.status = '3' AND x.is_commerce = 0 AND x.date_created BETWEEN '".$start_date." 00:00:00' AND '".$end_date." 23:59:59' AND x.user_id NOT IN (".$str_user_admin.")
+				) as total_real_delete
+				FROM post a 
+				INNER JOIN category b ON a.category = b.id 
+				WHERE a.date_created BETWEEN '".$start_date." 00:00:00' AND '".$end_date." 23:59:59'
+				GROUP BY a.category ORDER BY category ASC";
+		$result = mysqli_query($con, $sql);	
+		mysqli_close($con);
+		return $result;
+	}
+
+	function get_rpt_category_premium($start_date, $end_date) {
+		$con = $this->conn_db_tjb->conn_to_db_tjb_prod();
+		$sql = "SELECT b.category, c.alias, count(a.post_premium_id) as total FROM post_premium a 
+				INNER JOIN post b ON a.post_id = b.id 
+				INNER JOIN category c ON b.category = c.id 
+				WHERE a.date_request BETWEEN '".$start_date." 00:00:00' AND '".$end_date." 23:59:59'
+				GROUP BY b.category ORDER BY b.category ASC";
+		$result = mysqli_query($con, $sql);	
+		mysqli_close($con);
+		return $result;
+	}
+
+	function check_iklan_premium($date)
+	{
+		$con = $this->conn_db_tjb->conn_to_db_tjb_prod();
+        $sql = "SELECT pp.post_premium_id, pp.post_id, pp.user_id, pp.invoice, pp.product_json, pp.date_request, pp.date_expired, 
+		s.email_user, sd.product_id, p.product_package_id, p.product_title, p2.title, ipp.premium_name FROM post_premium pp 
+		LEFT JOIN post p2 ON p2.id = pp.post_id 
+		LEFT JOIN settlement s ON s.invoice = pp.invoice
+		LEFT JOIN settlement_detail sd on sd.settlement_id = s.settlement_id
+		LEFT JOIN product p on sd.product_id = p.product_id 
+		LEFT JOIN iklan_premium_package ipp on ipp.id_premium_package = p.product_package_id 
+		WHERE DATE(pp.date_request) = '".$date."'";
+        $result = mysqli_query($con, $sql);	
+        mysqli_close($con);
+		return $result;
+	}
+
+	public function get_data_voucher_pending_active($date_now)
+	{   
+        $con = $this->conn_db_tjb->conn_to_db_tjb_prod();
+		$sql = "SELECT id_voucher, campaign_name, voucher_code, status_voucher, daily_balance, start_date, end_date, is_deleted
+		FROM voucher_promo 
+		WHERE DATE(start_date) <= '".$date_now."' and is_deleted = 0 and status_voucher = 'pending'
+		ORDER BY id_voucher ASC";
+		$result = mysqli_query($con, $sql);	
+        mysqli_close($con);
+		return $result;
+	}
+
+	public function get_data_voucher_active_expired($date_now)
+	{
+        $con = $this->conn_db_tjb->conn_to_db_tjb_prod();
+		$sql = "SELECT id_voucher, campaign_name, voucher_code, status_voucher, daily_balance, start_date, end_date, is_deleted
+		FROM voucher_promo 
+		WHERE DATE_ADD(end_date, INTERVAL 1 DAY) <= '".$date_now."' and is_deleted = 0 and status_voucher = 'active'
+		ORDER BY id_voucher ASC";
+		$result = mysqli_query($con, $sql);	
+        mysqli_close($con);
+		return $result;
+	}
+
+	function update_status_voucher($id_voucher,$status_voucher)
+	{
+        $con = $this->conn_db_tjb->conn_to_db_tjb_prod();
+        $sql = "UPDATE voucher_promo SET status_voucher = '".$status_voucher."', modified_by = 1, modified_date='".date('Y-m-d H:i:s')."' WHERE id_voucher = ".$id_voucher;
+        $result = mysqli_query($con, $sql);	
+        mysqli_close($con);
+		return $result;
+	}
+}
+?>

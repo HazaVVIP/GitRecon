@@ -1,0 +1,301 @@
+<?php
+
+    function GetFieldOSPopularClassified() {
+        return array("id","title","image","price","date_publish","date_created","category","category_alias","category_title",
+			"location","location_alias","location_title","sublocation","sublocation_alias","sublocation_title","status","type","nego",
+			"subcategory","subcategory_alias","subcategory_title","is_commerce");
+    }
+
+    function IterationDataPopularClassified($dataEs=array()) 
+    {
+        return [
+            'id' => intval($dataEs['_source']['id']),
+            'title' =>  $dataEs['_source']['title'],
+            'price' => $dataEs['_source']['price'],
+            'date_publish' => $dataEs['_source']['date_publish'],
+            'date_created' => $dataEs['_source']['date_created'],
+            'image' => $dataEs['_source']['image'],
+            'category' => intval($dataEs['_source']['category']),
+            'category_alias' => $dataEs['_source']['category_alias'],
+            'category_title' => $dataEs['_source']['category_title'],
+            'subcategory' => intval($dataEs['_source']['subcategory']),
+            'subcategory_alias' => $dataEs['_source']['subcategory_alias'],
+            'subcategory_title' => $dataEs['_source']['subcategory_title'],
+            'location' => intval($dataEs['_source']['location']),
+            'location_alias' => $dataEs['_source']['location_alias'],
+            'subcategory_title' => $dataEs['_source']['subcategory_title'],
+            'sublocation' => intval($dataEs['_source']['sublocation']),
+            'sublocation_alias' => $dataEs['_source']['sublocation_alias'],
+            'sublocation_title' => $dataEs['_source']['sublocation_title'],
+            'type' => intval($dataEs['_source']['type']),
+            'nego' => intval($dataEs['_source']['nego']),
+            'pageviews' => intval($populer['pageviews']),
+            'is_commerce' => intval($dataEs['_source']['is_commerce']),
+            'data_sources' => 'new',
+        ];
+    }
+
+    function GetFieldOSPopularArticles() {
+        return array("id","title","main_content","image","category","category_alias",
+        "category_title","subcategory","subcategory_alias","subcategory_title","date_publish","writter","writter_alias");
+    }
+
+    function IterationDataPopularBlog($dataEs=array()) 
+    {
+        return [
+            'id' => intval($dataEs['_source']['id']),
+            'title' =>  $dataEs['_source']['title'],
+            'date_publish' => $dataEs['_source']['date_publish'],
+            'main_content' => $dataEs['_source']['main_content'],
+            'image' => $dataEs['_source']['image'],
+            'category' => intval($dataEs['_source']['category']),
+            'category_alias' => $dataEs['_source']['category_alias'],
+            'category_title' => $dataEs['_source']['category_title'],
+            'subcategory' => intval($dataEs['_source']['subcategory']),
+            'subcategory_alias' => $dataEs['_source']['subcategory_alias'],
+            'subcategory_title' => $dataEs['_source']['subcategory_title'],
+            'writter' => $dataEs['_source']['writter'],
+            'writter_alias' => $dataEs['_source']['writter_alias'],
+            'pageviews' => intval($populer['pageviews']),
+            'data_sources' => 'new',
+        ];
+    }
+    
+    function IterationDataSyncRdsEsWeb($rows=array()) 
+    {
+        return [
+            'id' => intval($rows->id ?? 0),
+            'title' => $rows->title ?? "",
+            'user_id' => intval($rows->user_id ?? 0),
+            'status' => intval($rows->status ?? 0),
+            'price' => intval($rows->price ?? 0),
+            'type' => intval($rows->type ?? 0),
+            'condition' => intval($rows->condition ?? 0),
+            'nego' => intval($rows->nego ?? 0),
+            'map' => $rows->map ?? "",
+            'description' => $rows->description ?? "",
+            'date_created' => $rows->date_created ?? 0,
+            'date_publish' => $rows->date_publish ?? 0,
+            'username' => $rows->username ?? "",
+            'name' => $rows->name ?? "",
+            'email' => $rows->email ?? "",
+            'telephone' => $rows->telephone ?? "",
+            'video' => $rows->video ?? "",
+            'image' => $rows->image ?? "",
+            'image_files' => $rows->image_files ?? "",
+            'meta' => $rows->meta ?? "",
+            'tp_toplist' => intval($rows->tp_toplist ?? 0),
+            'tp_meta' => $rows->tp_meta ?? "",
+            'sold' => intval($rows->sold ?? 0),
+            'category' => intval($rows->category ?? 0),
+            'category_title' => $rows->category_title ?? "",
+            'category_alias' => $rows->category_alias ?? "",
+            'subcategory' => intval($rows->subcategory ?? 0),
+            'subcategory_title' => $rows->subcategory_title ?? "",
+            'subcategory_alias' => $rows->subcategory_alias ?? "",
+            'location' => intval($rows->location ?? 0),
+            'location_title' => $rows->location_title ?? "",
+            'location_alias' => $rows->location_alias ?? "",
+            'sublocation' => intval($rows->sublocation ?? 0),
+            'sublocation_title' => $rows->sublocation_title ?? "",
+            'sublocation_alias' => $rows->sublocation_alias ?? "",
+            'merk' => intval($rows->merk ?? 0),
+            'merk_title' => $rows->merk_title ?? "",
+            'merk_alias' => $rows->merk_alias ?? "",
+            'model' => intval($rows->model ?? 0),
+            'model_title' => $rows->model_title ?? "",
+            'model_alias' => $rows->model_alias ?? "",
+            'premium_1' => intval($rows->premium_1 ?? 0),
+            'premium_7h' => intval($rows->premium_7h ?? 0),
+            'premium_3h' => intval($rows->premium_3h ?? 0),
+            'premium_2' => intval($rows->premium_2 ?? 0),
+            'premium_3' => intval($rows->premium_3 ?? 0),
+            'premium_4' => intval($rows->premium_4 ?? 0),
+            'premium_date_paid' => ($rows->premium_date_paid ?? "1970-01-01 00:00:00") === "0000-00-00 00:00:00" ? "1970-01-01 00:00:00" : $rows->premium_date_paid,
+            'premium_status' => intval($rows->premium_status ?? 0),
+            'kecamatan' => intval($rows->kecamatan ?? 0),
+            'kecamatan_title' => $rows->kecamatan_title ?? "",
+            'kecamatan_alias' => $rows->kecamatan_alias ?? "",
+            'is_commerce' => intval($rows->is_commerce ?? 0),
+        ];
+    }
+
+    function IterationDataSyncRdsEsBlog($row=array()) 
+    {
+        return [
+            'id' => intval($row->id ?? 0),
+            'title' => $row->title ?? "",
+            'main_content' => $row->main_content ?? "",
+            'content' => $row->content ?? "",
+            'image' => $row->image ?? "",
+            'category' => intval($row->category ?? 0),
+            'category_title' => $row->category_title ?? "",
+            'category_alias' => $row->category_alias ?? "",
+            'subcategory' => intval($row->subcategory ?? 0),
+            'subcategory_title' => $row->subcategory_title ?? "",
+            'subcategory_alias' => $row->subcategory_alias ?? "",
+            'teaser' => $row->teaser ?? "",
+            'date_publish' => $row->date_publish ?? 0,
+            'writter' => $row->writter ?? "",
+            'writter_alias' => isset($row->writter) ? url_title(strtolower($row->writter)) : "",
+            'source_title' => $row->source_title ?? "",
+            'source_link' => $row->source_link ?? "",
+            'status' => intval($row->status ?? 0),
+            'hit' => intval($row->hit ?? 0),
+        ];
+    }
+
+    function IterationRptIklanCat($row=array(), $date_start="")
+    {
+        $tot_iklan_real = $row->total_real_publish + $row->total_real_unpublish + $row->total_real_pending + $row->total_real_expired + $row->total_real_delete;
+    
+        $data_insert = [
+            'id' => $row->category . "-" . $date_start,
+            'dt' => $date_start . " 00:00:00",
+            'category' => intval($row->category),
+            'category_alias' => $row->alias,
+            'tot_iklan' => intval($row->total),
+            'tot_iklan_real' => intval($tot_iklan_real),
+            'tot_iklan_publish' => intval($row->total_publish),
+            'tot_iklan_real_publish' => intval($row->total_real_publish),
+            'tot_iklan_unpublish' => intval($row->total_unpublish),
+            'tot_iklan_real_unpublish' => intval($row->total_real_unpublish),
+            'tot_iklan_pending' => intval($row->total_pending),
+            'tot_iklan_real_pending' => intval($row->total_real_pending),
+            'tot_iklan_expired' => intval($row->total_expired),
+            'tot_iklan_real_expired' => intval($row->total_real_expired),
+            'tot_iklan_delete' => intval($row->total_delete),
+            'tot_iklan_real_delete' => intval($row->total_real_delete),
+        ];
+
+        return $data_insert;
+    }
+    
+    function IterationRptIklanCatPrem($premium, $start_date) {
+
+        $category = $premium->category;
+        $alias = $premium->alias;
+        $tot_iklan_premium = $premium->total;
+        
+        $id = $category."-".$start_date;
+        $dataUpdate = array();
+        $dataUpdate['id'] = $id;
+        $dataUpdate['dt'] = $start_date." 00:00:00";
+        $dataUpdate['category'] = intval($category);
+        $dataUpdate['category_alias'] = $alias;
+        $dataUpdate['tot_iklan_premium'] = intval($tot_iklan_premium);
+
+        return $dataUpdate;
+    }
+
+    function IterationCronIklanPrem($row_data) {
+
+        return array(
+            'package_id' => $row_data['product_package_id'],
+            'package_name' => $row_data['premium_name'],
+            'invoice' => $row_data['invoice'],
+            'email_user' => $row_data['email_user'],
+            'judul_iklan' => $row_data['title'],
+            'paket_iklan' => $row_data['premium_name']." ".$row_data['product_title'],
+            'periode_tayang' => convert_date_indo(date('Y-m-d', strtotime($row_data['date_request'])))." - ".convert_date_indo(date('Y-m-d', strtotime($row_data['date_expired']))),
+            'date_request' => $row_data['date_request'],
+            'date_expired' => $row_data['date_expired']
+        );
+    }
+
+    function url_title($string) {
+        // Replace spaces with dashes
+        $string = str_replace(' ', '-', $string);
+        
+        // Remove special characters
+        $string = preg_replace('/[^A-Za-z0-9\-]/', '', $string);
+        
+        // Convert to lowercase
+        $string = strtolower($string);
+        
+        return $string;
+    }
+
+    function get_total_by_sso($start_at="", $is_social="") {
+
+        $res_total = 0;
+        
+        $urlApiSsoSocial = "https://apis.kompas.com/api/sso/users?src=tribunjualbeli&from=".$start_at."&to=".$start_at.$is_social;
+		$opts = array('http' => array(
+                    'method'  => "GET",
+                    'header'  => "Authorization: Basic ".base64_encode("admin:asdf!jkl123")."\r\n"
+                ));
+
+		$context = stream_context_create($opts);
+		$response = file_get_contents($urlApiSsoSocial, false, $context);
+		$status_response_header = isset($http_response_header[0])?$http_response_header[0]:"";
+
+        if(empty($status_response_header)) {
+            return $res_total;
+		}
+
+        preg_match('{HTTP\/\S*\s(\d{3})}', $status_response_header, $match);
+        $http_code = isset($match[1])?$match[1]:"";
+
+		if(!$response && $http_code != 200) {
+            return $res_total;
+		}
+
+        // $arrMessage = explode($http_code, $status_response_header);
+        // $http_message = isset($arrMessage[1])?trim($arrMessage[1]):"";
+
+        $result = json_encode(json_decode($response), JSON_PRETTY_PRINT);
+        $arrResult = json_decode($result, TRUE);
+        $res_total = isset($arrResult['total'])?$arrResult['total']:0;
+        return $res_total;
+
+    }
+    
+    function convert_date_indo($tanggal)
+    {
+        $bulan = array (
+            1 => 'Januari',
+            2 =>'Februari',
+            3 => 'Maret',
+            4 => 'April',
+            5 => 'Mei',
+            6 => 'Juni',
+            7 => 'Juli',
+            8 => 'Agustus',
+            9 => 'September',
+            10 => 'Oktober',
+            11 =>'November',
+            12 => 'Desember'
+        );
+        $split = explode('-', $tanggal);
+        return $split[2] . ' ' . $bulan[ (int)$split[1] ] . ' ' . $split[0];
+    }
+
+    function http_client($url, $data=array(), $method="GET") {
+
+        $auth = base64_encode(''.API_TJB_AUTH_USERNAME.':'.API_TJB_AUTH_PASSWORD.'');
+        $data_send = http_build_query($data); 
+
+        $opts = array(
+            'http'=>array(
+                'method' => "".$method."",
+                'timeout' => 5,
+                'header' => "Accept-language: en\r\n" .
+                            "Authorization: Basic ".$auth."\r\n" .
+                            "Api-Key: ".API_TJB_AUTH_KEY."\r\n" .
+                            "Content-Length: " . strlen($data_send) . "\r\n",
+                            'content' => $data_send
+            ),
+            'ssl'  => array (
+                'verify_peer'      => false,
+                'verify_peer_name' => false,
+            )
+        );
+
+        $context = stream_context_create($opts);
+        $response = @file_get_contents($url, false, $context);
+
+        return $response;
+    }
+
+?>

@@ -1,0 +1,62 @@
+<?php
+$apiKey = 'Cv0MJN118spv8FC1nmUYYc4PQGj1RiwR';
+$city = 'Jakarta';
+$state = 'Jakarta';
+$country = 'Indonesia';
+
+$url = "https://api.airvisual.com/v2/city?city={$city}&state={$state}&country={$country}&key={$apiKey}";
+
+$options = array(
+  'http'=>array(
+	'method'=>"GET",
+	'header'=>"Accept-language: en\r\n" .
+			  "User-Agent: Mozilla/5.0 (iPad; U; CPU OS 3_2 like Mac OS X; en-us) AppleWebKit/531.21.10 (KHTML, like Gecko) Version/4.0.4 Mobile/7B334b Safari/531.21.102011-10-16 20:23:10\r\n"
+  )
+);
+$context = stream_context_create($options);
+$response = file_get_contents($url, false, $context);
+
+$http_code = "";
+$http_message = "";
+$status_response_header = isset($http_response_header[0])?$http_response_header[0]:"";
+if(!empty($status_response_header)){
+	preg_match('{HTTP\/\S*\s(\d{3})}', $status_response_header, $match);
+	$http_code = isset($match[1])?$match[1]:"";
+	$arrMessage = explode($http_code, $status_response_header);
+	$http_message = isset($arrMessage[1])?trim($arrMessage[1]):"";
+}
+
+echo $http_code."<br>";
+
+if($response === FALSE){
+	echo "Gagal mengambil data: ".$url;
+} else {
+	$data = json_decode($response, true);
+	if (isset($data['status']) && $data['status'] === 'success') {
+		$current = $data['data']['current'];
+
+		// Data kualitas udara
+		$aqi_us = $current['pollution']['aqius'];
+		$aqi_main_pollutant = $current['pollution']['mainus'];
+		$time = $current['pollution']['ts'];
+
+		// Data cuaca
+		$temperature = $current['weather']['tp']; // dalam Celsius
+		$humidity = $current['weather']['hu']; // dalam persen
+		$wind_speed = $current['weather']['ws']; // dalam m/s
+
+		echo "📍 Jakarta, Indonesia\n";
+		echo "Waktu: {$time}\n";
+		echo "AQI (US): {$aqi_us}\n";
+		echo "Polutan utama: {$aqi_main_pollutant}\n";
+		echo "Suhu: {$temperature}°C\n";
+		echo "Kelembapan: {$humidity}%\n";
+		echo "Kecepatan angin: {$wind_speed} m/s\n";
+
+	} else {
+		echo "Gagal mengambil data: ";
+		echo $data['data']['message'] ?? 'Tidak diketahui';
+	}
+}	
+		
+?>

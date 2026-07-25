@@ -1,0 +1,356 @@
+<?php
+/* ini_set('display_errors',1);
+error_reporting(E_ALL); */
+error_reporting(0);
+
+$time_start = time();
+
+define("DOC_ROOT","/var/www/html/web-cron/");
+
+/* 
+Running in command
+- sudo -u cron /usr/bin/php7.4 /var/www/html/web-cron/daerah/daerah_cluster_sync_rds_os.php depok
+*/
+
+include DOC_ROOT."config/config.php";
+include DOC_ROOT."lib/Opensearch.php";
+
+$daerah = isset($_SERVER["argv"][1])?$_SERVER["argv"][1]:"";
+if(isset($_GET['daerah'])){
+	$daerah = $_GET['daerah'];
+}
+$date = isset($_SERVER["argv"][2])?$_SERVER["argv"][2]:"";
+if(isset($_GET['date'])){
+	$date = $_GET['date'];
+}
+
+if(!empty($daerah)){
+	if(!empty($date)){
+		$dateStart = $date;
+		$dateEnd = $date;
+	} else {	
+		$dateStart = date("Y-m-d", strtotime('-1 days'));
+		$dateEnd = date("Y-m-d", strtotime('-1 days'));
+	}
+
+	echo $daerah."<br>";
+	echo $dateStart." - ".$dateEnd."<br>";
+	
+	$dateStart = $dateStart.' 00:00:00';
+	$dateEnd = $dateEnd.' 23:59:59';
+		
+	//OS
+	$fields = array('domain_id');
+	$sort = array("publish_date" => "asc");
+	$start = 0;
+	$limit = 1000;
+	
+	$where = array();
+	array_push($where,array("match_phrase" => array("domain" => $daerah)));
+	array_push($where,array("range" => array("publish_date" => array("gte" => $dateStart, "lte" =>$dateEnd))));
+
+	$condition = array("bool" =>
+						array(
+							"must" => $where,
+						)
+			);
+	
+	$opensearchAllNetwork = new Opensearch();
+	$opensearchAllNetwork->init(OS_ALLNETWOORK_URL,OS_ALLNETWOORK_USERNAME,OS_ALLNETWOORK_PASSWORD,true);
+	$response_osallnetwork = $opensearchAllNetwork->find('tribunnetwork-articles',$condition,$fields,$sort,$start,$limit);
+	$totalOsNetwork = 0;
+	$arrIDOsNetwork = array();
+	if($response_osallnetwork['status']){
+		$totalOsNetwork = isset($response_osallnetwork['total_row'])?$response_osallnetwork['total_row']:0;
+		$dataOsNetwork = isset($response_osallnetwork['data'])?$response_osallnetwork['data']:array();
+		
+		if(count($dataOsNetwork) > 0){
+			foreach($dataOsNetwork as $rowosnetwork){
+				array_push($arrIDOsNetwork, intval($rowosnetwork['_source']['domain_id']));
+			}
+		}
+	}
+
+	echo "Total OS Network : ".$totalOsNetwork."<br>";
+	
+	////
+	
+	$fields = array('id');
+	$sort = array("publish_date" => "asc");
+	$start = 0;
+	$limit = 1000;
+	$where = array();
+	array_push($where,array("range" => array("publish_date" => array("gte" => $dateStart, "lte" =>$dateEnd))));
+
+	$condition = array("bool" =>
+						array(
+							"must" => $where,
+						)
+			);
+	
+	$opensearch = new Opensearch();
+	$index = $daerah.".tribundaerah-articles";
+	$opensearch->init(OS_DAERAH_CLUSTER_URL,OS_DAERAH_CLUSTER_USERNAME,OS_DAERAH_CLUSTER_PASSWORD,true);
+	$response_os = $opensearch->find($index,$condition,$fields,$sort,$start,$limit);
+	$totalOs = 0;
+	$arrIDOs = array();
+	if($response_os['status']){
+		$totalOs = isset($response_os['total_row'])?$response_os['total_row']:0;
+		$dataOs = isset($response_os['data'])?$response_os['data']:array();
+		
+		if(count($dataOs) > 0){
+			foreach($dataOs as $rowos){
+				array_push($arrIDOs, intval($rowos['_source']['id']));
+			}
+		}
+	}
+
+	echo "Total OS : ".$totalOs."<br>";
+	
+	
+	//RDS
+	$con = mysqli_connect(RDS_DAERAH_NEW_HOST,RDS_DAERAH_NEW_USERNAME,RDS_DAERAH_NEW_PASSWORD,$daerah);
+	if (mysqli_connect_errno()) {
+		echo "Failed to connect to MySQL: " . mysqli_connect_error();
+		exit();
+	}
+
+	$arrID = array();
+	$arrID = array_diff($arrIDOs, $arrIDOsNetwork);
+	$totalSyncOs = 0;
+
+	echo "<pre>";
+	print_r($arrID);
+	echo "</pre>";
+	
+	if(count($arrID) > 0){
+		foreach($arrID as $id){
+			$sqlRow = "SELECT a.id, a.title, a.alias, a.subtitle, a.foto_type, a.foto_name, a.foto_caption, a.foto_source,
+			a.introtext, a.fulltexts, a.section_id, a.category_id, a.publish, a.frontpage_section, a.frontpage_category,
+			a.editor_by, a.written_by, a.written_date, a.publish_date, a.source, a.youtube,
+			a.related_id, a.quote, a.quote_by, a.modified_date,
+			b.username as editor, b.fullname as editor_fullname,
+			c.username as writter, c.fullname as writter_fullname,
+			d.alias as section, d.title as s_title, d.status as sstatus,
+			e.alias as c_alias, e.title as c_title,
+			f.name_source, f.url_source
+			FROM articles a
+			LEFT JOIN users b ON a.editor_by = b.id
+			LEFT JOIN users c ON a.written_by = c.id
+			LEFT JOIN sections d ON a.section_id = d.id
+			LEFT JOIN categories e ON a.category_id = e.id
+			LEFT JOIN source_news f ON a.source = f.id
+			WHERE a.id = ".$id;
+			$resultRow = mysqli_query($con, $sqlRow);
+			$post = mysqli_fetch_array($resultRow, MYSQLI_ASSOC);
+			
+			$id = isset($post['id'])?intval($post['id']):0;
+			
+			if(!empty($id)){
+				$title 						= isset($post['title'])?$post['title']:"";
+				$alias 						= isset($post['alias'])?$post['alias']:"";
+				$subtitle 					= isset($post['subtitle'])?$post['subtitle']:"";
+				$subtitle_alias 			= !empty($subtitle)?str_replace(" ","-",strtolower($subtitle)):"";
+				$foto_type 					= isset($post['foto_type'])?$post['foto_type']:"";
+				$foto_name 					= isset($post['foto_name'])?$post['foto_name']:"";
+				$foto_caption 				= isset($post['foto_caption'])?$post['foto_caption']:"";
+				$foto_position 				= "left";
+				$foto_source 				= isset($post['foto_source'])?$post['foto_source']:"";
+				$introtext 					= isset($post['introtext'])?(string) $post['introtext']:"";
+				$fulltexts 					= isset($post['fulltexts'])?$post['fulltexts']:"";
+				$section_id 				= isset($post['section_id'])?intval($post['section_id']):0;
+				$category_id 				= isset($post['category_id'])?intval($post['category_id']):0;
+				$publish 					= isset($post['publish'])?intval($post['publish']):0;
+				$frontpage_section 			= isset($post['frontpage_section'])?intval($post['frontpage_section']):0;
+				$frontpage_category 		= isset($post['frontpage_category'])?intval($post['frontpage_category']):0;
+				$written_by 				= isset($post['written_by'])?intval($post['written_by']):0;
+				$editor_by 					= isset($post['editor_by'])?intval($post['editor_by']):0;
+				$editor_video_by 			= isset($post['editor_video_by'])?$post['editor_video_by']:"";
+				$written_date 				= isset($post['written_date'])?$post['written_date']:"";
+				$publish_date 				= isset($post['publish_date'])?$post['publish_date']:"";
+				$source 					= isset($post['source'])?intval($post['source']):0;
+				$livereport 				= 0;
+				$youtube 					= isset($post['youtube'])?$post['youtube']:"";
+				$related_id 				= isset($post['related_id'])?$post['related_id']:"";
+				$editor 					= isset($post['editor'])?$post['editor']:"";
+				$editor_fullname 			= isset($post['editor_fullname'])?$post['editor_fullname']:"";
+				$editor_id 					= isset($post['editor_id'])?intval($post['editor_id']):0;
+				$hit 						= 0;
+				$section 					= isset($post['section'])?$post['section']:"";
+				$writter 					= isset($post['writter'])?$post['writter']:"";
+				$writter_fullname 			= isset($post['writter_fullname'])?$post['writter_fullname']:"";
+				$writter_id 				= isset($post['writter_id'])?intval($post['writter_id']):0;
+				$sstatus 					= isset($post['sstatus'])?intval($post['sstatus']):0;
+				$c_title 					= isset($post['c_title'])?$post['c_title']:"";
+				$c_alias 					= isset($post['c_alias'])?$post['c_alias']:"";
+				$s_title 					= isset($post['s_title'])?$post['s_title']:"";
+				$name_source 				= isset($post['name_source'])?$post['name_source']:"";
+				$url_source 				= isset($post['url_source'])?$post['url_source']:"";
+				$quote_by 					= isset($post['quote_by'])?intval($post['quote_by']):0;
+				$arrFotoName 				= explode("/",$foto_name);
+				$foto_cross_domain 			= isset($arrFotoName[1])?1:0;
+				$modified_date 				= isset($post['modified_date'])?$post['modified_date']:null;
+				$index_year 				= isset($post['publish_date'])?date("Y",strtotime($post['publish_date'])):"";
+				
+				if(!mb_check_encoding($title, 'UTF-8')){
+					$title = mb_convert_encoding ($title, 'UTF-8');
+					$title = str_replace("?","",$title);
+				}
+				/* if(!mb_check_encoding($subtitle, 'UTF-8')){
+					$subtitle = mb_convert_encoding ($subtitle, 'UTF-8');
+					$subtitle = str_replace("?"," ",$subtitle);
+				} */
+				if(!mb_check_encoding($introtext, 'UTF-8')){
+					$introtext = mb_convert_encoding ($introtext, 'UTF-8');
+					$introtext = str_replace("?","",$introtext);
+				}
+				if(!mb_check_encoding($foto_caption, 'UTF-8')){
+					$foto_caption = mb_convert_encoding ($foto_caption, 'UTF-8');
+					$foto_caption = str_replace("?","",$foto_caption);
+				}
+				if(!mb_check_encoding($foto_source, 'UTF-8')){
+					$foto_source = mb_convert_encoding ($foto_source, 'UTF-8');
+					$foto_source = str_replace("?"," ",$foto_source);
+				}
+				if(!mb_check_encoding($fulltexts, 'UTF-8')){
+					$fulltexts = mb_convert_encoding ($fulltexts, 'UTF-8');
+				} 
+				if($modified_date == "0000-00-00 00:00:00"){
+					$modified_date = null;
+				}
+				
+				$sqlRow = "SELECT c.id as tagging_id, c.title as tagging_title, c.alias as tagging_alias
+				FROM articles a
+				LEFT JOIN tag_related b ON a.id = b.related_id
+				LEFT JOIN tag c ON b.tag_id = c.id
+				WHERE a.id = ".$id." AND b.related_type = 'articles'";
+				$resultRow = mysqli_query($con, $sqlRow);
+				
+				$arrTaging = array();
+				while($post = mysqli_fetch_array($resultRow, MYSQLI_ASSOC))
+				{
+					$tagging_title = isset($post['tagging_title'])?$post['tagging_title']:"";
+					if(!mb_check_encoding($tagging_title, 'UTF-8')){
+						$tagging_title = mb_convert_encoding ($tagging_title, 'UTF-8');
+						$tagging_title = str_replace("?","",$tagging_title);
+					}
+					
+					$tagging_alias = isset($post['tagging_alias'])?$post['tagging_alias']:"";
+					if(!mb_check_encoding($tagging_alias, 'UTF-8')){
+						$tagging_alias = mb_convert_encoding ($tagging_alias, 'UTF-8');
+						$tagging_alias = str_replace("?","",$tagging_alias);
+					}
+					
+					$arrTag = array();
+					$arrTag['id'] = intval($post['tagging_id']);
+					$arrTag['title'] = $tagging_title;
+					$arrTag['alias'] = $tagging_alias;
+					
+					array_push($arrTaging, $arrTag);
+				}
+				
+				$arrInsert = array();
+				$arrInsert['id'] = $id;
+				$arrInsert['title'] = $title;
+				$arrInsert['alias'] = $alias;
+				$arrInsert['subtitle'] = $subtitle;
+				$arrInsert['subtitle_alias'] = $subtitle_alias;
+				$arrInsert['foto_type'] = $foto_type;
+				$arrInsert['foto_name'] = $foto_name;
+				$arrInsert['foto_cross_domain'] = $foto_cross_domain;
+				$arrInsert['foto_caption'] = $foto_caption;
+				$arrInsert['foto_position'] = $foto_position;
+				$arrInsert['foto_source'] = $foto_source;
+				$arrInsert['introtext'] = $introtext;
+				$arrInsert['fulltexts'] = $fulltexts;
+				$arrInsert['section_id'] = $section_id;
+				$arrInsert['category_id'] = $category_id;
+				$arrInsert['publish'] = $publish;
+				$arrInsert['frontpage_section'] = $frontpage_section;
+				$arrInsert['frontpage_category'] = $frontpage_category;
+				$arrInsert['written_by'] = $written_by;
+				$arrInsert['editor_by'] = $editor_by;
+				$arrInsert['editor_video_by'] = $editor_video_by;
+				$arrInsert['written_date'] = $written_date;
+				$arrInsert['publish_date'] = $publish_date;
+				$arrInsert['source'] = $source;
+				$arrInsert['livereport'] = $livereport;
+				$arrInsert['youtube'] = $youtube;
+				$arrInsert['related_id'] = $related_id;
+				$arrInsert['editor'] = $editor;
+				$arrInsert['editor_fullname'] = $editor_fullname;
+				$arrInsert['editor_id'] = $editor_id;
+				$arrInsert['hit'] = $hit;
+				$arrInsert['section'] = $section;
+				$arrInsert['writter'] = $writter_id;
+				$arrInsert['writter_username'] = $writter;
+				$arrInsert['writter_fullname'] = $writter_fullname;
+				$arrInsert['writter_id'] = $writter_id;
+				$arrInsert['sstatus'] = $sstatus;
+				$arrInsert['c_title'] = $c_title;
+				$arrInsert['c_alias'] = $c_alias;
+				$arrInsert['s_title'] = $s_title;
+				$arrInsert['name_source'] = $name_source;
+				$arrInsert['url_source'] = $url_source;
+				$arrInsert['quote_by'] = $quote_by;
+				$arrInsert['modified_date'] = $modified_date;
+				$arrInsert['index_year'] = $index_year;
+				if(count($arrTaging) > 0){
+					$arrInsert['tagging'] = $arrTaging;
+				}
+				
+				$allnetwork_id = microtime(true);
+				$allnetwork_id = str_replace(".","",$allnetwork_id);
+				$allnetwork_id = intval($allnetwork_id);
+				$arrInsert['allnetwork_id'] = $allnetwork_id;
+				
+				if(isset($arrInsert['title']) && !empty($arrInsert['title'])){
+					$whereAllNetwork = array();
+				
+					array_push($whereAllNetwork,array("match_phrase" => array("domain_id" => $id)));
+					array_push($whereAllNetwork,array("match_phrase" => array("domain" => $daerah)));
+					
+					$queryAllNetwork = array("bool" =>
+									array("must" =>
+										$whereAllNetwork
+									)
+							);
+					$fields = array("id");
+					$responseCheck = $opensearchAllNetwork->findOne("tribunnetwork-articles",$queryAllNetwork,$fields);
+					
+					if(!$responseCheck['status']){
+						$arrInsertAllNetwork = array();
+						$arrInsertAllNetwork = $arrInsert;
+						$arrInsertAllNetwork['domain_id'] = $id;
+						$arrInsertAllNetwork['domain'] = $daerah;
+						$arrUpdateAllNetwork['lastupdate_date'] = date('Y-m-d H:i:s');
+						$arrUpdateAllNetwork['content_status'] = 2;
+						unset($arrInsertAllNetwork['id']);
+						unset($arrInsertAllNetwork['frontpage_section']);
+						unset($arrInsertAllNetwork['frontpage_category']);
+						unset($arrInsertAllNetwork['quote_by']);
+						unset($arrInsertAllNetwork['hit']);
+						unset($arrInsertAllNetwork['allnetwork_id']);
+						$arrInsertAllNetwork['id'] = $allnetwork_id;
+						
+						$responseInsertOsAllNetwork = $opensearchAllNetwork->insert("tribunnetwork-articles", $arrInsertAllNetwork);
+						
+						$totalSyncOs++; 
+						
+						sleep(1);
+					}	
+				}	
+			}	
+		}
+	}
+	
+	
+	echo "Total SYNC OS ke OS Network : ".$totalSyncOs."<br>";
+	
+	mysqli_close($con);
+	unset($opensearch);
+	unset($opensearchAllNetwork);
+}	
+
+echo '<br>Execution time in seconds: ' . (microtime(true) - $time_start) . "<br>";
+?>

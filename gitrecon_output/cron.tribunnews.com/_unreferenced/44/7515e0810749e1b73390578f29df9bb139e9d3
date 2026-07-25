@@ -1,0 +1,13 @@
+<?php
+define('PATH_ROOT', $_SERVER['DOCUMENT_ROOT']);
+
+echo PATH_ROOT; die;
+
+//ES
+define('ES_URL', 'https://search-tribunnews-es-prod-fsbuac6mkv54gt6wfk7b7xta3a.ap-southeast-1.es.amazonaws.com');
+
+//OS
+define('OS_URL', 'https://search-tribunnews-es-prod-fsbuac6mkv54gt6wfk7b7xta3a.ap-southeast-1.es.amazonaws.com');
+define('OS_USERNAME', 'https://search-tribunnews-es-prod-fsbuac6mkv54gt6wfk7b7xta3a.ap-southeast-1.es.amazonaws.com');
+define('OS_PASSWORD', 'https://search-tribunnews-es-prod-fsbuac6mkv54gt6wfk7b7xta3a.ap-southeast-1.es.amazonaws.com');
+?>

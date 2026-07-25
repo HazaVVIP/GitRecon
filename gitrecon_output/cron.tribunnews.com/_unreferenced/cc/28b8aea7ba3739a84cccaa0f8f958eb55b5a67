@@ -1,0 +1,5 @@
+<?php
+define('LIST_DAERAH_CLUSTER', array("flores","depok","mataraman","mataram","bekasi","babel","pantura","sulbar","tangerang","metrobanjar","serambiummah","bengkulu","gorontalo","prohaba","sultra","gayo","bandung","toraja","priangan","jatimtimur","muria","sorong"));
+
+define('LIST_TBO_CLUSTER', array("style","travel","wow","newsmaker","shopping"));
+?>

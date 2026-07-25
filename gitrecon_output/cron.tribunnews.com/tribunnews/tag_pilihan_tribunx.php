@@ -1,0 +1,272 @@
+<?php
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+
+$time_start = time();
+
+define("DOC_ROOT","/var/www/html/web-cron/");
+
+include DOC_ROOT."config/config.php";
+include DOC_ROOT."config/other_config.php";
+include DOC_ROOT."lib/Opensearch.php";
+
+
+$arrTagBlackList = array("Lainnya","viral","berita viral hari ini","lowongan kerja swasta","BREAKING NEWS","kebakaran","Berita Viral","TribunKaltim.co","Tribun-medan.com","SURYA.co.id","surabaya.tribunnews.com","Tribunsumsel.com","TribunJatim.com","Tribun Jatim","tribunjateng.com","Banjarmasinpost.co.id","POS-KUPANG.COM","Serambinews.com","Tribunjambi.com","Tribun Flores.com","tribunmedan.id","Serambinews","Tribun Madura","TribunKaltara.com","Tribunlampung.co.id","Tribunjogja.com","Pos Kupang Hari Ini","TribunFlores.com","Tribun Bali","TRIBUN-BALI.COM");
+$arrTagSearch  = array("Timnas Indonesia","timnas Indonesia vs Filipina","gempa","gempa hari ini","magnitudo","Berita kriminal","sedot lemak","kurikulum merdeka","tribun video","romantis");
+$arrTagReplace = array("timnas Indonesia","Timnas Indonesia vs Filipina","Gempa","Gempa Hari Ini","Magnitudo","berita kriminal","Sedot lemak","Kurikulum Merdeka","Tribun Video","Romantis");
+
+$opensearchAllNetwork = new Opensearch();
+$opensearchAllNetwork->init(OS_ALLNETWOORK_URL,OS_ALLNETWOORK_USERNAME,OS_ALLNETWOORK_PASSWORD,true);
+
+$opensearchTBO = new Opensearch();
+$opensearchTBO->init(OS_TBO_URL,OS_TBO_USERNAME,OS_TBO_PASSWORD,true);
+
+$opensearchDev = new Opensearch();
+$opensearchDev->init(OS_DEV_URL,OS_DEV_USERNAME,OS_DEV_PASSWORD,true,true);
+
+$arrMustNot = array();
+array_push($arrMustNot,array("match" => array("domain" => "shopping")));
+array_push($arrMustNot,array("match" => array("domain" => "tribunnewswiki")));
+array_push($arrMustNot,array("match" => array("domain" => "video")));
+
+$arrMust = array();
+$hoursNow = date('G');
+$dateToday = date("Y-m-d H:i:s"); 
+if($hoursNow > 12){
+	$timeHoursAgo = strtotime('-10 hours', strtotime($dateToday));
+} else {
+	$timeHoursAgo = strtotime('-12 hours', strtotime($dateToday));
+}
+$timeNow = strtotime("now");
+$startDate = date('Y-m-d H:i:s', $timeHoursAgo);
+$endDate = date('Y-m-d H:i:s', $timeNow);
+array_push($arrMust,array("range" => array("publish_date" => array("gte" => $startDate, "lte" =>$endDate))));	
+array_push($arrMust,array("terms" => array("content_status" => array(1,2))));
+
+$query = array("bool" =>
+				array(
+					"must" => $arrMust,
+					"must_not" => $arrMustNot
+				)
+	);
+
+$fields = array('tagging','pageviews');
+$start = 0;
+$limit = 300;
+$sort = array("pageviews" => array("order" => "desc"));
+$response_os_allnetwork = $opensearchAllNetwork->find("tribunnetwork-articles",$query,$fields,$sort,$start,$limit);	
+
+$totalOsAllNetwork = 0;
+$arrTagPopuler = array();
+if($response_os_allnetwork['status']){
+	$totalOsAllNetwork = isset($response_os_allnetwork['total_row'])?$response_os_allnetwork['total_row']:0;
+	$dataOsAllNetwork = isset($response_os_allnetwork['data'])?$response_os_allnetwork['data']:array();
+	
+	if(count($dataOsAllNetwork) > 0){
+		foreach($dataOsAllNetwork as $rowosallnetwork){
+			$tagging = isset($rowosallnetwork['_source']['tagging'])?$rowosallnetwork['_source']['tagging']:"";
+			
+			if(count($tagging) > 0){
+				foreach($tagging as $arrTag){
+					$tag_title = isset($arrTag['title'])?trim($arrTag['title']):"";
+					if(!empty($tag_title) && !in_array($tag_title, $arrTagBlackList)){
+						array_push($arrTagPopuler,$tag_title);
+					}
+				}
+			}
+			
+			
+		}
+	}
+} 
+
+
+$arrTagPopulerCount = array_count_values($arrTagPopuler);
+arsort($arrTagPopulerCount);
+
+$iix = 1;
+$arrTagUnique = array();
+foreach($arrTagPopulerCount as $tag => $total){
+	if($iix < 21){
+		array_push($arrTagUnique,$tag);
+		$iix++;
+	} else {
+		break;
+	}		
+}
+
+
+
+$arrTagPilihan = array();
+$arrArticles = array();
+$arrSubtitleUnique = array();
+if(count($arrTagUnique)>0){
+	$id = 1;
+	foreach($arrTagUnique as $idx => $val){
+		$arrMustNot = array();
+		array_push($arrMustNot,array("match" => array("domain" => "shopping")));
+		array_push($arrMustNot,array("match" => array("domain" => "tribunnewswiki")));
+		array_push($arrMustNot,array("match" => array("domain" => "video")));
+		
+		$val_unique = strtolower($val);
+		
+		if(!in_array($val_unique, $arrSubtitleUnique)){
+			$arrMust = array();
+			array_push($arrMust,array(
+								"nested" => array(
+									"path" => "tagging",
+									"query" => array(
+										"bool" => array(
+											"must" => array("match_phrase" => array("tagging.title" => $val))
+											)
+									)
+								)
+							  ));
+			
+			$hoursNow = date('G');
+			$dateToday = date("Y-m-d H:i:s"); 
+			$timeHoursAgo = strtotime('-24 hours', strtotime($dateToday));
+			$timeNow = strtotime("now");
+			$startDate = date('Y-m-d H:i:s', $timeHoursAgo);
+			$endDate = date('Y-m-d H:i:s', $timeNow);
+			array_push($arrMust,array("range" => array("publish_date" => array("gte" => $startDate, "lte" =>$endDate))));
+			array_push($arrMust,array("terms" => array("content_status" => array(1,2))));
+			
+			$query = array("bool" =>
+								array(
+									"must" => $arrMust,
+									"must_not" => $arrMustNot
+								)
+						);
+			$fields = array('id','domain_id','domain','title','alias','publish_date','pageviews');
+			$sort = array("publish_date" => array("order" => "desc"), "pageviews" => array("order" => "desc"));
+			$start = 0;
+			$limit = 5;
+			$response = $opensearchAllNetwork->find("tribunnetwork-articles",$query,$fields,$sort,$start,$limit);
+			
+			$y=0;
+			if($response['status']){
+				$totalArticle = isset($response['total_row'])?$response['total_row']:0;
+				$dataArticle = isset($response['data'])?$response['data']:array();
+				
+				if($totalArticle >= 5){
+					if($y > 1) break;
+					
+					$articles = array();
+					foreach($dataArticle as $idy => $rows){
+						$row = $rows['_source'];
+						
+						$articles[$y]['id'] = $row['domain_id'];
+						$articles[$y]['domain'] = $row['domain'];
+						$articles[$y]['alias'] = $row['alias'];
+						$articles[$y]['title'] = $row['title'];
+						$articles[$y]['publish_date'] = $row['publish_date'];
+						
+						$y++;
+						
+						array_push($arrArticles,$articles);
+					}
+
+					if(count($articles) > 0) { 
+						array_push($arrTagPilihan,array('id'=>$id, 'tag'=>$val,'articles'=>$articles)); 
+						array_push($arrSubtitleUnique,$val_unique);
+						$id++;
+					}	
+				}
+			}
+		}
+	}
+}
+
+if(count($arrTagPilihan)){
+	$maxID = 20;
+	foreach($arrTagPilihan as $topil){
+		$id = intval($topil['id']);
+		$tag = $topil['tag'];
+		$articles = $topil['articles'];
+		
+		if($id > $maxID) break;
+		
+		$condition = array("match" => array("id" => $id));
+		$fields = array('articles');
+		$response1 = $opensearchTBO->findOne("tribunx-tagpilihan", $condition, $fields);
+
+		$arrArticleTopikPilihan = array();
+		
+		if(count($articles) > 0){
+			foreach($articles as $artc){
+				$articleid = $artc['id'];
+				$articledomain = $artc['domain'];
+				
+				$arrArct = array();
+				$arrArct['id'] = $articleid;
+				$arrArct['domain'] = $articledomain;
+				
+				array_push($arrArticleTopikPilihan,$arrArct);
+			}
+		}
+		
+		if($response1['status']){
+			if(count($arrArticleTopikPilihan) > 0){
+				$dataUpdate = array();
+				$dataUpdate['tag'] = $tag;
+				$dataUpdate['articles'] = $arrArticleTopikPilihan;
+				$dataUpdate['modified_date'] = date('Y-m-d H:i:s');
+				
+				$response2 = $opensearchTBO->updateOne('tribunx-tagpilihan',$id,$dataUpdate);
+				
+				$opensearchDev->updateOne('tribunx-topikpilihan',$id,$dataUpdate);
+				
+				echo $id."<br>";
+				echo "<pre>";
+				print_r($dataUpdate);
+				print_r($response2);
+				echo "</pre>";
+			}
+		} else {
+			if(count($arrArticleTopikPilihan)){
+				$dataInsert = array();
+				$dataInsert['id'] = intval($id);
+				$dataInsert['tag'] = $tag;
+				$dataInsert['articles'] = $arrArticleTopikPilihan;
+				$dataInsert['stat'] = 1;
+				$dataInsert['created_date'] = date('Y-m-d H:i:s');
+				$dataInsert['modified_date'] = date('Y-m-d H:i:s');
+				
+				$response2 = $opensearchTBO->insert('tribunx-tagpilihan',$dataInsert);
+				
+				$opensearchDev->insert('tribunx-topikpilihan',$dataInsert);
+				
+				echo $id."<br>";
+				echo "<pre>";
+				print_r($dataInsert);
+				print_r($response2);
+				echo "</pre>";
+			}
+		}	
+	}
+}
+
+unset($opensearchAllNetwork);
+unset($opensearchTBO);
+unset($opensearchDev);
+
+$opts = array(
+		  'http'=>array(
+			'method'=>"GET",
+			'header'=>"Accept-language: en\r\n" .
+					  "User-Agent: Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; Tribunbot/1.0; +http://tribunnews.com/bot.html) Chrome/W.X.Y.Z Safari/537.36\r\n",
+			'timeout' => 1
+		  ),
+		  'ssl'  => array (
+			'verify_peer'      => false,
+			'verify_peer_name' => false,
+		  )
+		);
+$context = stream_context_create($opts);
+
+file_get_contents('https://wilis.tribunnews.com/tcache/clhome', false, $context);
+file_get_contents('https://api.tribunnews.com/tcache/clhome', false, $context);
+
+echo '<br>Execution time in seconds: ' . (microtime(true) - $time_start) . "<br>";
+?>

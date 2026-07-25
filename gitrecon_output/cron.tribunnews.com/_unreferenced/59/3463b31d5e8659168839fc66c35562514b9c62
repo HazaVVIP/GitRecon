@@ -1,0 +1,43 @@
+<?php
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+
+define("DOC_ROOT","/var/www/html/web-cron/");
+
+include_once DOC_ROOT."config/config.php";
+include_once DOC_ROOT."lib/Opensearch.php";
+
+$opensearch = new Opensearch();
+$opensearch->init(OS_TBO_URL,OS_TBO_USERNAME,OS_TBO_PASSWORD,true);
+
+
+$index = 'schedule_pialadunia';
+$tables = array(
+		'id' => "long",
+		'schedule_date' => "date",
+		'schedule_str' => "text_keyword",
+		'match_name' => "text_keyword",
+		'stadium_name' => "text_keyword",
+		'negara_home' => "keyword",
+		'negara_home_eng' => "keyword",
+		'negara_home_short' => "keyword",
+		'negara_home_image' => "keyword",
+		'negara_home_score' => "integer",
+		'negara_away' => "keyword",
+		'negara_away_eng' => "keyword",
+		'negara_away_short' => "keyword",
+		'negara_away_image' => "keyword",
+		'negara_away_score' => "integer",
+		'created_date' => 'date',
+		'modified_date' => 'date_null',
+		'index_year' => 'date_only_year'
+	);
+$response = $opensearch->create($index,$tables);
+
+echo "<pre>";
+print_r($tables);
+print_r($response);
+echo "</pre>";
+
+unset($opensearch);
+?>

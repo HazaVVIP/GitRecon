@@ -1,0 +1,174 @@
+[
+    {
+		"id": 1,
+		"title": "Tawassul (Hadirah Al-Fatihah)",
+		"type": "dzikir_long",
+		"arab": "اَلْفَاتِحَةُ إِلَى حَضْرَةِ النَّبِيِّ الْمُصْطَفَى مُحَمَّدٍ صَلَّى اللَّهُ عَلَيْهِ وَسَلَّمَ، وَإِلَى أَرْوَاحِ آبَائِهِ وَإِخْوَانِهِ مِنَ النَّبِيِّينَ وَالْمُرْسَلِينَ، وَإِلَى أَرْوَاحِ آلِهِ وَأَصْحَابِهِ أَجْمَعِينَ، وَإِلَى أَرْوَاحِ التَّابِعِينَ وَتَابِعِ التَّابِعِينَ، وَإِلَى أَرْوَاحِ أَئِمَّةِ الْمُجْتَهِدِينَ، وَإِلَى أَرْوَاحِ الْأَوْلِيَاءِ وَالصَّالِحِينَ وَالشُّهَدَاءِ وَالصِّدِّيقِينَ، وَإِلَى أَرْوَاحِ مَشَايِخِنَا وَأُسَاتِذَتِنَا وَمَنْ لَهُ حَقٌّ عَلَيْنَا، وَإِلَى جَمِيعِ أَرْوَاحِ الْمُؤْمِنِينَ وَالْمُؤْمِنَاتِ وَالْمُسْلِمِينَ وَالْمُسْلِمَاتِ مِنْ مَشَارِقِ الْأَرْضِ إِلَى مَغَارِبِهَا، خُصُوصًا إِلَى رُوحِ مَنْ نَوَيْنَا لَهُ الْفَاتِحَةَ",
+		"latin": "Al-Fatihah ila hadhratin Nabi al-Musthafa Muhammad shallallahu ‘alaihi wa sallam, wa ila arwahi aba'ihi wa ikhwanihi minan nabiyyina wal mursalin, wa ila arwahi aalihi wa ashabihi ajma’in, wa ila arwahi at-tabi'in wa tabi'it tabi'in, wa ila arwahi a'immatil mujtahidin, wa ila arwahi al-awliya' wash shalihin wasy syuhada was shiddiqin, wa ila arwahi masyayikhina wa asatidzatina wa man lahu haqqun 'alaina, wa ila jami'i arwahi al-mu'minina wal mu'minat wal muslimina wal muslimat min masyariqil ardhi ila magharibihā, khususon ila ruhi man nawayna lahul fatihah",
+		"translation": "Menghadiahkan Al-Fatihah kepada Nabi Muhammad SAW, para nabi dan rasul, keluarga dan sahabat beliau, tabi'in, ulama mujtahid, para wali, orang saleh, syuhada, guru-guru kami, serta seluruh kaum muslimin dan muslimat di seluruh dunia, khususnya kepada yang diniatkan"
+	},
+	{
+		"id": 2,
+		"title": "Al-Fatihah",
+		"chapter_name_id": "Al-Fatihah",
+		"chapter_translation_id": "Pembukaan",
+		"type": "surah",
+		"chapter_id": 1,
+		"chapter_alias": "al-fatihah",
+		"note": "Dihadiahkan kepada Nabi Muhammad SAW, keluarga, sahabat, dan ahli kubur"
+    },
+    {
+		"id": 3,
+		"title": "Al-Ikhlas",
+		"chapter_name_id": "Al-Ikhlas",
+		"chapter_translation_id": "Ikhlas",
+		"type": "surah",
+		"chapter_id": 112,
+		"chapter_alias": "al-ikhlas",
+		"repeat": 3
+    },
+    {
+		"id": 4,
+		"title": "Al-Falaq",
+		"chapter_name_id": "Al-Falaq",
+		"chapter_translation_id": "Subuh",
+		"type": "surah",
+		"chapter_id": 113,
+		"chapter_alias": "al-falaq"
+    },
+    {
+		"id": 5,
+		"title": "An-Nas",
+		"chapter_name_id": "An-Nas",
+		"chapter_translation_id": "Manusia",
+		"type": "surah",
+		"chapter_id": 114,
+		"chapter_alias": "an-nas"
+    },
+    {
+		"id": 6,
+		"title": "Al-Fatihah (Ahli Kubur)",
+		"chapter_name_id": "Al-Fatihah",
+		"chapter_translation_id": "Pembukaan",
+		"type": "surah",
+		"chapter_id": 1,
+		"chapter_alias": "al-fatihah"
+    },
+	{
+		"id": 7,
+		"title": "Al-Baqarah 1-5",
+		"chapter_name_id": "Al-Baqarah",
+        "chapter_translation_id": "Sapi",
+		"type": "range_ayah",
+		"chapter_id": 2,
+		"chapter_alias": "al-baqarah",
+		"start": 1,
+		"end": 5
+	},
+	{
+		"id": 8,
+		"title": "Al-Baqarah 163",
+		"chapter_name_id": "Al-Baqarah",
+        "chapter_translation_id": "Sapi",
+		"type": "ayah",
+		"chapter_id": 2,
+		"chapter_alias": "al-baqarah",
+		"ayah": 163
+	},
+    {
+		"id": 9,
+		"title": "Ayat Kursi",
+		"chapter_name_id": "Al-Baqarah",
+		"chapter_translation_id": "Manusia",
+		"type": "ayah",
+		"chapter_id": 2,
+		"chapter_alias": "al-baqarah",
+		"ayah": 255
+    },
+    {
+		"id": 10,
+		"title": "Tasbih",
+		"type": "dzikir",
+		"arab": "سُبْحَانَ اللَّهِ",
+		"latin": "Subhanallah",
+		"translation": "Maha Suci Allah",
+		"repeat": 33
+    },
+    {
+		"id": 11,
+		"title": "Tahmid",
+		"type": "dzikir",
+		"arab": "الْحَمْدُ لِلَّهِ",
+		"latin": "Alhamdulillah",
+		"translation": "Segala puji bagi Allah",
+		"repeat": 33
+    },
+    {
+		"id": 12,
+		"title": "Takbir",
+		"type": "dzikir",
+		"arab": "اللَّهُ أَكْبَرُ",
+		"latin": "Allahu Akbar",
+		"translation": "Allah Maha Besar",
+		"repeat": 33
+    },
+    {
+		"id": 13,
+		"title": "Tahlil (Pendek)",
+		"type": "dzikir",
+		"arab": "لَا إِلٰهَ إِلَّا اللَّهُ",
+		"latin": "Lā ilāha illallāh",
+		"translation": "Tiada Tuhan selain Allah",
+		"repeat": 100
+    },
+    {
+		"id": 14,
+		"title": "Tahlil (Panjang)",
+		"type": "dzikir_long",
+		"arab": "لَا إِلٰهَ إِلَّا اللَّهُ وَحْدَهُ لَا شَرِيكَ لَهُ، لَهُ الْمُلْكُ وَلَهُ الْحَمْدُ، يُحْيِي وَيُمِيتُ وَهُوَ عَلَى كُلِّ شَيْءٍ قَدِيرٌ",
+		"latin": "Laa ilaaha illallahu wahdahu laa syariika lah, lahul mulku wa lahul hamdu, yuhyi wa yumiit wa huwa 'alaa kulli syai'in qadiir",
+		"translation": "Tiada Tuhan selain Allah Yang Maha Esa, tidak ada sekutu bagi-Nya, milik-Nya kerajaan dan pujian, Dia menghidupkan dan mematikan, dan Dia Maha Kuasa atas segala sesuatu"
+    },
+    {
+		"id": 15,
+		"title": "Istighfar",
+		"type": "dzikir",
+		"arab": "أَسْتَغْفِرُ اللَّهَ الْعَظِيمَ الَّذِي لَا إِلٰهَ إِلَّا هُوَ الْحَيُّ الْقَيُّومُ وَأَتُوبُ إِلَيْهِ",
+		"latin": "Astaghfirullahal 'azhim alladzi laa ilaaha illa huwal hayyul qayyuum wa atuubu ilaih",
+		"translation": "Aku memohon ampun kepada Allah Yang Maha Agung, tiada Tuhan selain Dia, Yang Maha Hidup dan terus-menerus mengurus makhluk-Nya, dan aku bertaubat kepada-Nya",
+		"repeat": 3
+    },
+    {
+		"id": 16,
+		"title": "Sholawat Nabi",
+		"type": "dzikir",
+		"arab": "اللَّهُمَّ صَلِّ عَلَىٰ سَيِّدِنَا مُحَمَّدٍ وَعَلَىٰ آلِ سَيِّدِنَا مُحَمَّدٍ",
+		"latin": "Allahumma shalli ala Muhammad...",
+		"translation": "Ya Allah limpahkan sholawat kepada Nabi Muhammad",
+		"repeat": 3
+    },
+    {
+		"id": 17,
+		"title": "Doa Tahlil (Doa Arwah Panjang)",
+		"type": "doa",
+		"arab": "اللَّهُمَّ اغْفِرْ لَهُمْ وَارْحَمْهُمْ وَعَافِهِمْ وَاعْفُ عَنْهُمْ وَأَكْرِمْ نُزُلَهُمْ وَوَسِّعْ مُدْخَلَهُمْ وَاغْسِلْهُمْ بِالْمَاءِ وَالثَّلْجِ وَالْبَرَدِ وَنَقِّهِمْ مِنَ الْخَطَايَا كَمَا نَقَّيْتَ الثَّوْبَ الْأَبْيَضَ مِنَ الدَّنَسِ وَأَبْدِلْهُمْ دَارًا خَيْرًا مِنْ دَارِهِمْ وَأَهْلًا خَيْرًا مِنْ أَهْلِهِمْ وَأَدْخِلْهُمُ الْجَنَّةَ وَأَعِذْهُمْ مِنْ عَذَابِ الْقَبْرِ وَمِنْ عَذَابِ النَّارِ",
+		"latin": "Allahummaghfir lahum warhamhum wa 'aafihim wa'fu 'anhum wa akrim nuzulahum wa wassi' mudkhalahum waghsilhum bil maa'i wats tsalji wal barad wa naqqihim minal khataya kama naqqaitats tsaubal abyadha minad danas wa abdilhum daaran khairan min daarihim wa ahlan khairan min ahlihim wa adkhilhumul jannah wa a'idz'hum min 'adzaabil qabr wa min 'adzaabin naar",
+		"translation": "Ya Allah ampunilah mereka, rahmatilah mereka, muliakan tempat tinggal mereka, lapangkan kubur mereka, bersihkan dari dosa, dan masukkan ke dalam surga"
+    },
+    {
+		"id": 18,
+		"title": "Doa Kirim Pahala",
+		"type": "doa",
+		"arab": "اللَّهُمَّ اجْعَلْ ثَوَابَ مَا قَرَأْنَاهُ وَنُورَهُ وَبَرَكَتَهُ وَرَحْمَتَهُ وَهُدَاهُ وَاصِلًا إِلَى أَرْوَاحِهِمْ",
+		"latin": "Allahumma aj'al tsawaba ma qara'nahu wa nurahu wa barakatahu wa rahmatahu wa hudahu wasilan ila arwahihim",
+		"translation": "Ya Allah jadikan pahala bacaan ini sampai kepada arwah yang dituju"
+    },
+    {
+		"id": 19,
+		"title": "Doa Penutup",
+		"type": "doa",
+		"arab": "رَبَّنَا تَقَبَّلْ مِنَّا إِنَّكَ أَنْتَ السَّمِيعُ الْعَلِيمُ وَتُبْ عَلَيْنَا إِنَّكَ أَنْتَ التَّوَّابُ الرَّحِيمُ",
+		"latin": "Rabbana taqabbal minna innaka antas sami'ul 'alim wa tub 'alaina innaka antat tawwabur rahim",
+		"translation": "Ya Tuhan kami, terimalah dari kami, sesungguhnya Engkau Maha Mendengar lagi Maha Mengetahui"
+    }
+]

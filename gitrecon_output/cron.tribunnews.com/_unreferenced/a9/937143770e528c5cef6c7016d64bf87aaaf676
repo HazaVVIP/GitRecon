@@ -1,0 +1,473 @@
+<?php
+set_time_limit(0); 
+ini_set('max_execution_time', 0);
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+
+$time_start = time();
+
+define("DOC_ROOT","/var/www/html/web-cron/");
+
+include DOC_ROOT."config/config.php";
+include DOC_ROOT."config/other_config.php";
+include DOC_ROOT."lib/Opensearch.php";
+include DOC_ROOT."lib/Writelog.php";
+
+//die('STOP');
+
+/* 
+Running in command
+- sudo -u www-data /usr/bin/php7.4 /var/www/html/web-cron/tribunnews/migration/allnetwork_rds_os.php aceh
+*/
+
+$domain = isset($_SERVER["argv"][1])?$_SERVER["argv"][1]:"";
+if(isset($_GET['domain'])){
+	$domain = $_GET['domain'];
+}
+
+$year = isset($_SERVER["argv"][2])?$_SERVER["argv"][2]:"2016";
+if(isset($_GET['year'])){
+	$year = $_GET['year'];
+}
+
+if(!empty($domain)){
+	if($domain != "jogja" || $domain != "pekanbaru" || $domain != "bangka" || $domain != "batam" || $domain != "jakarta"){
+	$temp_dir = (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') ? 'C:\Windows\Temp' : '/tmp';
+    $lock_file = $temp_dir . DIRECTORY_SEPARATOR . "cron_migration_" . $domain . "_" . $year . ".lock";
+	$lock_fp = fopen($lock_file, "w+");
+    
+    if (!$lock_fp || !flock($lock_fp, LOCK_EX | LOCK_NB)) {
+        echo "PERINGATAN: Proses migrasi untuk domain '$domain' tahun '$year' sedang berjalan. Skip eksekusi kali ini.\n";
+        if ($lock_fp) fclose($lock_fp);
+        exit();
+    }
+	}
+	
+	$writelog = new Writelog();
+	$writelog->Log(PATH_ROOT."/logs/","migration");
+	
+	$lastid = 0;
+	$totalSyncOs = 0;
+	$totalRds = 0;
+	$arrDataInsert = array();
+	
+	$filename = $domain."_lastid_articles.txt";
+	$filename_cached = PATH_ROOT . "/data/migration/".$filename;
+	$valueLog = file_get_contents($filename_cached);
+	if ($valueLog !== FALSE) {
+		$lastid = $valueLog;
+	}
+	
+	echo "domain : ".$domain."<br>";
+	echo "year : ".$year."<br>";
+	
+	//OS
+	$opensearchAllNetwork = new Opensearch();
+	$opensearchAllNetwork->init(OS_ALLNETWOORK_URL,OS_ALLNETWOORK_USERNAME,OS_ALLNETWOORK_PASSWORD,true);
+	
+	//RDS
+	if($domain == "tribunnews"){
+		$con = mysqli_connect(RDS_HOST,RDS_USERNAME,RDS_PASSWORD,"tribunnews");
+	} else {
+		if(in_array($domain, LIST_COMMERCE_CLUSTER)){
+			$con = mysqli_connect(RDS_TBO_HOST,RDS_TBO_USERNAME,RDS_TBO_PASSWORD,$domain);
+		} else if(in_array($domain, LIST_TBO_CLUSTER)){
+			$con = mysqli_connect(RDS_TBO_HOST,RDS_TBO_USERNAME,RDS_TBO_PASSWORD,$domain);
+		} else if(in_array($domain, LIST_DAERAH_NEW)){
+			$con = mysqli_connect(RDS_DAERAH_HOST,RDS_DAERAH_USERNAME,RDS_DAERAH_PASSWORD,$domain);
+		} else if(in_array($domain, LIST_DAERAH_CLUSTER)){
+			$con = mysqli_connect(RDS_DAERAH_NEW_HOST,RDS_DAERAH_NEW_USERNAME,RDS_DAERAH_NEW_PASSWORD,$domain);
+		} else { 
+			$daerah_rds = $domain;
+			$daerah_rds = str_replace("aceh","aceh2",$daerah_rds);
+			$daerah_rds = str_replace("jambi","jambi2",$daerah_rds);
+			$con = mysqli_connect(RDS_DAERAH_HOST,RDS_DAERAH_USERNAME,RDS_DAERAH_PASSWORD,$daerah_rds);
+		}
+	}
+	
+	if (mysqli_connect_errno()) {
+		echo "Failed to connect to MySQL: " . mysqli_connect_error();
+		if($domain != "jogja" || $domain != "pekanbaru" || $domain != "bangka" || $domain != "batam" || $domain != "jakarta"){
+		flock($lock_fp, LOCK_UN);
+        fclose($lock_fp);
+		}
+		exit();
+	}
+	
+	
+	$sqltotal = "SELECT count(a.id) as total
+		FROM articles a
+	    WHERE a.publish_date BETWEEN '".$year."-01-01 00:00:00' AND '".$year."-12-31 23:59:59'";
+	$resultTotal = mysqli_query($con, $sqltotal);
+	$rsTotalRds = mysqli_fetch_assoc($resultTotal);
+	$totalData = isset($rsTotalRds['total'])?$rsTotalRds['total']:0;
+	mysqli_free_result($resultTotal);
+	
+	//echo $sqltotal."<hr>";
+
+	$where = empty($lastid) ? "a.publish_date BETWEEN '".$year."-01-01' AND '".$year."-12-31'" : "a.id > $lastid";
+	$order_by = empty($lastid) ? "a.publish_date ASC" : "a.id ASC";
+	$limit = empty($lastid) ? 1 : 1200;
+		
+	if($domain == "tribunnews"){
+		$sql = "SELECT a.id, a.title, a.alias, a.alias_old, a.subtitle, a.keyword, a.foto_type, a.foto_name, a.foto_caption, a.foto_source,
+				a.introtext, a.fulltexts, a.section_id, a.category_id, a.publish, a.frontpage_section, a.frontpage_category,
+				a.editor_by, a.written_by, a.editor_video_by, a.written_date, a.publish_date, a.source, a.livereport, a.youtube,
+				a.related_id,
+				b.username as editor, b.fullname as editor_fullname,
+				c.username as writter, c.fullname as writter_fullname,
+				d.alias as section, d.title as s_title, d.status as sstatus,
+				e.alias as c_alias, e.title as c_title,
+				f.name_source, f.url_source, f.source_group
+				FROM articles a
+				LEFT JOIN users b ON a.editor_by = b.id
+				LEFT JOIN users c ON a.written_by = c.id
+				LEFT JOIN sections d ON a.section_id = d.id
+				LEFT JOIN categories e ON a.category_id = e.id
+				LEFT JOIN source_news f ON a.source = f.id
+				WHERE ".$where."
+				ORDER BY ".$order_by."
+				LIMIT ".$limit;
+	} else {
+		$sql = "SELECT a.id, a.title, a.alias, a.subtitle, a.foto_type, a.foto_name, a.foto_caption, a.foto_source,
+				a.introtext, a.fulltexts, a.section_id, a.category_id, a.publish, a.frontpage_section, a.frontpage_category,
+				a.editor_by, a.written_by, a.written_date, a.publish_date, a.source, a.youtube,
+				a.related_id, a.quote, a.quote_by, a.modified_date,
+				b.username as editor, b.fullname as editor_fullname,
+				c.username as writter, c.fullname as writter_fullname,
+				d.alias as section, d.title as s_title, d.status as sstatus,
+				e.alias as c_alias, e.title as c_title,
+				f.name_source, f.url_source
+				FROM articles a
+				LEFT JOIN users b ON a.editor_by = b.id
+				LEFT JOIN users c ON a.written_by = c.id
+				LEFT JOIN sections d ON a.section_id = d.id
+				LEFT JOIN categories e ON a.category_id = e.id
+				LEFT JOIN source_news f ON a.source = f.id
+				WHERE ".$where."
+				ORDER BY ".$order_by."
+				LIMIT ".$limit;
+	}
+	$result = mysqli_query($con, $sql);
+	$totalRds = mysqli_num_rows($result);
+	
+	//echo $sql."<hr>";
+	
+	if($totalRds > 0){
+		$idx = 1;
+		while($post = mysqli_fetch_assoc($result))
+		{
+			$id 						= isset($post['id'])?intval($post['id']):0;
+			$title 						= isset($post['title'])?$post['title']:"";
+			$alias 						= isset($post['alias'])?$post['alias']:"";
+			$alias_old 					= isset($post['alias_old'])?$post['alias_old']:"";
+			$subtitle 					= isset($post['subtitle'])?$post['subtitle']:"";
+			$subtitle_alias 			= !empty($subtitle)?str_replace(" ","-",strtolower($subtitle)):"";
+			$keyword 					= isset($post['keyword'])?$post['keyword']:"";
+			$foto_type 					= isset($post['foto_type'])?$post['foto_type']:"";
+			$foto_name 					= isset($post['foto_name'])?$post['foto_name']:"";
+			$foto_caption 				= isset($post['foto_caption'])?$post['foto_caption']:"";
+			$foto_source 				= isset($post['foto_source'])?$post['foto_source']:"";
+			$introtext 					= isset($post['introtext'])?$post['introtext']:"";
+			$fulltexts 					= isset($post['fulltexts'])?$post['fulltexts']:"";
+			$section_id 				= isset($post['section_id'])?intval($post['section_id']):0;
+			$category_id 				= isset($post['category_id'])?intval($post['category_id']):0;
+			$publish 					= isset($post['publish'])?intval($post['publish']):0;
+			$frontpage_section 			= isset($post['frontpage_section'])?intval($post['frontpage_section']):0;
+			$frontpage_category 		= isset($post['frontpage_category'])?intval($post['frontpage_category']):0;
+			$written_by 				= isset($post['written_by'])?intval($post['written_by']):0;
+			$editor_by 					= isset($post['editor_by'])?intval($post['editor_by']):0;
+			$editor_video_by 			= isset($post['editor_video_by'])?$post['editor_video_by']:"";
+			$written_date 				= isset($post['written_date'])?$post['written_date']:"";
+			$publish_date 				= isset($post['publish_date'])?$post['publish_date']:"";
+			$source 					= isset($post['source'])?intval($post['source']):0;
+			$livereport 				= isset($post['livereport'])?intval($post['livereport']):0;
+			$youtube 					= isset($post['youtube'])?$post['youtube']:"";
+			$related_id 				= isset($post['related_id'])?$post['related_id']:"";
+			$editor 					= isset($post['editor'])?$post['editor']:"";
+			$editor_fullname 			= isset($post['editor_fullname'])?$post['editor_fullname']:"";
+			$editor_id 					= isset($post['editor_id'])?intval($post['editor_id']):0;
+			$hit 						= 0;
+			$section 					= isset($post['section'])?$post['section']:"";
+			$writter 					= isset($post['writter'])?$post['writter']:"";
+			$writter_fullname 			= isset($post['writter_fullname'])?$post['writter_fullname']:"";
+			$writter_id 				= isset($post['writter_id'])?intval($post['writter_id']):0;
+			$sstatus 					= isset($post['sstatus'])?intval($post['sstatus']):0;
+			$c_title 					= isset($post['c_title'])?$post['c_title']:"";
+			$c_alias 					= isset($post['c_alias'])?$post['c_alias']:"";
+			$s_title 					= isset($post['s_title'])?$post['s_title']:"";
+			$name_source 				= isset($post['name_source'])?$post['name_source']:"";
+			$url_source 				= isset($post['url_source'])?$post['url_source']:"";
+			$source_group 				= isset($post['source_group'])?$post['source_group']:"";
+			$index_year 				= isset($post['publish_date'])?date("Y",strtotime($post['publish_date'])):"";
+
+			if($domain != "tribunnews"){
+				$arrFotoName 				= explode("/",$foto_name);
+				$foto_cross_domain 			= isset($arrFotoName[1])?1:0;
+				$foto_position 				= "left";
+				$quote_by 					= isset($post['quote_by'])?intval($post['quote_by']):0;
+			}
+			
+			$title = utf8($title, 'UTF-8');
+			$subtitle = utf8($subtitle, 'UTF-8');
+			$introtext = utf8($introtext, 'UTF-8');
+			$foto_caption = utf8($foto_caption, 'UTF-8');
+			$foto_source = utf8($foto_source, 'UTF-8');
+			$fulltexts = utf8($fulltexts, 'UTF-8');
+
+			$sqlRow = "SELECT c.id as tagging_id, c.title as tagging_title, c.alias as tagging_alias
+			FROM articles a
+			LEFT JOIN tag_related b ON a.id = b.related_id
+			LEFT JOIN tag c ON b.tag_id = c.id
+			WHERE a.id = ".$id." AND b.related_type = 'articles'";
+			$resultRow = mysqli_query($con, $sqlRow);
+			
+			$arrTaging = array();
+			while($post = mysqli_fetch_array($resultRow, MYSQLI_ASSOC))
+			{
+				$tagging_title = isset($post['tagging_title'])?$post['tagging_title']:"";
+				if(!mb_check_encoding($tagging_title, 'UTF-8')){
+					$tagging_title = mb_convert_encoding ($tagging_title, 'UTF-8');
+					$tagging_title = str_replace("?","",$tagging_title);
+				}
+				
+				$tagging_alias = isset($post['tagging_alias'])?$post['tagging_alias']:"";
+				if(!mb_check_encoding($tagging_alias, 'UTF-8')){
+					$tagging_alias = mb_convert_encoding ($tagging_alias, 'UTF-8');
+					$tagging_alias = str_replace("?","",$tagging_alias);
+				}
+				
+				$arrTag = array();
+				$arrTag['id'] = intval($post['tagging_id']);
+				$arrTag['title'] = $tagging_title;
+				$arrTag['alias'] = $tagging_alias;
+				
+				array_push($arrTaging, $arrTag);
+			}
+			
+			$arrLokasi = [];
+			$sqlRowLokasi = "SELECT id_article, provinsi, kota, longitude, latitude, full_lokasi, tipe, bahasa
+			FROM article_lokasi
+			WHERE id_article = ".$id;
+			$resultRowLokasi = mysqli_query($con, $sqlRowLokasi);
+			$postLokasi = mysqli_fetch_array($resultRowLokasi, MYSQLI_ASSOC);
+
+			$lokasi_id_article = $postLokasi['id_article'] ?? 0;
+			if(!empty($lokasi_id_article)){
+				$lokasi_provinsi = $postLokasi['provinsi'] ?? '';
+				$lokasi_kota = $postLokasi['kota'] ?? '';
+				$lokasi_longitude = $postLokasi['longitude'] ?? '';
+				$lokasi_latitude = $postLokasi['latitude'] ?? '';
+				$lokasi_full_lokasi = $postLokasi['full_lokasi'] ?? '';
+				$lokasi_full_tipe = $postLokasi['tipe'] ?? 0;
+				$lokasi_bahasa = $postLokasi['bahasa'] ?? '';
+				$arrLokasi[] = [
+							'latitude' => $lokasi_latitude,
+							'longitude' => $lokasi_longitude,
+							'provinsi' => $lokasi_provinsi ,
+							'kota' => $lokasi_kota,
+							'full_lokasi' => $lokasi_full_lokasi,
+							'id_article' => $lokasi_full_tipe,
+							'bahasa' => $lokasi_bahasa
+						];
+			}
+			
+			$arrInsert = array();
+			$arrInsert['id'] = $id;
+			$arrInsert['title'] = $title;
+			$arrInsert['alias'] = $alias;
+			$arrInsert['alias_old'] = $alias_old;
+			$arrInsert['subtitle'] = $subtitle;
+			$arrInsert['subtitle_alias'] = $subtitle_alias;
+			$arrInsert['keyword'] = $keyword;
+			$arrInsert['foto_type'] = $foto_type;
+			$arrInsert['foto_name'] = $foto_name;
+			$arrInsert['foto_caption'] = $foto_caption;
+			$arrInsert['foto_source'] = $foto_source;
+			$arrInsert['introtext'] = $introtext;
+			$arrInsert['fulltexts'] = $fulltexts;
+			$arrInsert['section_id'] = $section_id;
+			$arrInsert['category_id'] = $category_id;
+			$arrInsert['publish'] = $publish;
+			$arrInsert['frontpage_section'] = $frontpage_section;
+			$arrInsert['frontpage_category'] = $frontpage_category;
+			$arrInsert['written_by'] = $written_by;
+			$arrInsert['editor_by'] = $editor_by;
+			$arrInsert['editor_video_by'] = $editor_video_by;
+			$arrInsert['written_date'] = $written_date;
+			$arrInsert['publish_date'] = $publish_date;
+			$arrInsert['source'] = $source;
+			$arrInsert['livereport'] = $livereport;
+			$arrInsert['youtube'] = $youtube;
+			$arrInsert['related_id'] = $related_id;
+			$arrInsert['editor'] = $editor;
+			$arrInsert['editor_fullname'] = $editor_fullname;
+			$arrInsert['editor_id'] = $editor_id;
+			$arrInsert['hit'] = $hit;
+			$arrInsert['section'] = $section;
+			$arrInsert['writter'] = $writter_id;
+			$arrInsert['writter_username'] = $writter;
+			$arrInsert['writter_fullname'] = $writter_fullname;
+			$arrInsert['writter_id'] = $writter_id;
+			$arrInsert['sstatus'] = $sstatus;
+			$arrInsert['c_title'] = $c_title;
+			$arrInsert['c_alias'] = $c_alias;
+			$arrInsert['s_title'] = $s_title;
+			$arrInsert['name_source'] = $name_source;
+			$arrInsert['url_source'] = $url_source;
+			$arrInsert['source_group'] = $source_group;
+			if(count($arrTaging) > 0){
+				$arrInsert['tagging'] = $arrTaging;
+			}
+			if(count($arrLokasi) > 0){
+				$arrInsert['article_lokasi'] = $arrLokasi;
+			}
+			$arrInsert['index_year'] = $index_year;
+			
+			if($domain != "tribunnews"){
+				$arrInsert['foto_cross_domain'] = $foto_cross_domain;
+				$arrInsert['foto_position'] = $foto_position;
+				$arrInsert['quote_by'] = $quote_by;
+			}
+			
+			$allnetwork_id = microtime(true);
+			$allnetwork_id = str_replace(".","",$allnetwork_id);
+			$allnetwork_id = intval($allnetwork_id);
+			
+			if(!empty($publish_date)){
+				$base = strtotime($publish_date);
+				$micro = (int) (microtime(true) * 1000000);
+				$allnetwork_id = (int) ($base . substr($micro, -4));
+			}
+			
+			$allnetwork_id = $allnetwork_id + $idx; //
+			
+			$whereAllNetwork = array();
+			array_push($whereAllNetwork,array("match_phrase" => array("domain_id" => $id)));
+			array_push($whereAllNetwork,array("match_phrase" => array("domain" => $domain)));
+			
+			$condition = array("bool" =>
+							array("must" =>
+								$whereAllNetwork
+							)
+					);
+			$fields = array("id");
+			$response_two = $opensearchAllNetwork->findOne("tribunnetwork-articles", $condition,$fields);
+			
+			if($response_two['status']){
+				$allnetwork_id_exist = isset($response_two['data']['_source']['id'])?$response_two['data']['_source']['id']:0;
+				
+				if(!empty($allnetwork_id_exist)){
+					$allnetwork_id = $allnetwork_id_exist;
+				}
+			}
+			
+			$arrInsert['allnetwork_id'] = $allnetwork_id;
+			
+			if(isset($arrInsert['title']) && !empty($arrInsert['title'])){
+				$arrInsertAllNetwork = array();
+				$arrInsertAllNetwork = $arrInsert;
+				$arrInsertAllNetwork['domain_id'] = $id;
+				$arrInsertAllNetwork['domain'] = $domain;
+				$arrInsertAllNetwork['lastupdate_date'] = $arrInsert['publish_date'];
+				$arrInsertAllNetwork['content_status'] = 1;
+				unset($arrInsertAllNetwork['id']);
+				unset($arrInsertAllNetwork['alias_old']);
+				unset($arrInsertAllNetwork['frontpage_section']);
+				unset($arrInsertAllNetwork['frontpage_category']);
+				unset($arrInsertAllNetwork['livereport']);
+				unset($arrInsertAllNetwork['keyword']);
+				unset($arrInsertAllNetwork['hit']);
+				unset($arrInsertAllNetwork['allnetwork_id']);
+				$arrInsertAllNetwork['id'] = $allnetwork_id;
+				
+				/* echo "<pre>";
+				print_r($arrInsertAllNetwork);
+				echo "</pre>"; */
+				
+				$index_year_valid = (int) $index_year;
+				if($index_year_valid < 2017) array_push($arrDataInsert,$arrInsertAllNetwork);
+			
+				$idx++;
+	
+				$lastid = $id;
+			}
+		}	
+		
+		mysqli_free_result($result);
+	}
+	
+	if(count($arrDataInsert) > 0){
+		$responseInsertBulk = $opensearchAllNetwork->bulkInsert("tribunnetwork-articles", $arrDataInsert, 300, 'index');
+		if($responseInsertBulk['status']) $totalSyncOs = $responseInsertBulk['total'] ?? 0;
+		
+		/* echo "Insert";
+		echo "<pre>";
+		print_r($arrDataInsert);
+		//print_r($responseInsertBulk);
+		echo "</pre>"; */
+	}
+	
+	
+	$where = array();
+	array_push($where,array("range" => array("publish_date" => array("gte" => ''.$year.'-01-01 00:00:00', "lte" => ''.$year.'-12-31 23:59:59'))));	
+	array_push($where,array("match_phrase" => array("domain" => $domain)));
+	array_push($where,array("terms" => array("content_status" => array(1,2))));
+
+	$condition = array();
+	if(count($where) > 0){
+		$condition = array("bool" =>
+						array("must" =>
+							$where
+						)
+					);
+	}
+	$index = "tribunnetwork-articles";
+	$response_os_allnetwork = $opensearchAllNetwork->count_total($index,$condition);	
+
+	$totalOsAllNetwork = 0;
+	if($response_os_allnetwork['status']){
+		$totalOsAllNetwork = isset($response_os_allnetwork['total'])?$response_os_allnetwork['total']:0;
+	} 
+	
+	echo "TOTAL RDS : " . $totalData . "\n";
+	echo "TOTAL OS All Network : " . $totalOsAllNetwork . "\n";
+	echo "TOTAL MIGRASI : " . $totalSyncOs . "\n";
+	echo "LAST ID : " . $lastid . "\n";
+	if (!empty($lastid) && $totalRds > 0 && count($arrDataInsert) > 0) {
+		if (!$handle = fopen($filename_cached, 'w+')) {
+			die("Cannot open file $filename_cached");
+		}
+		if (fwrite($handle, $lastid) === FALSE) {
+			die("Cannot write to file $this->log_file");
+		}
+		
+		$loginfo = "TOTAL = ".$totalData." | TOTAL MIGRASI = ".$totalSyncOs." | LAST ID = ".$lastid."\n";
+		$writelog->doLogInfo($loginfo);
+	}
+	
+	$writelog->closeLog();
+	mysqli_close($con);
+	unset($opensearchAllNetwork);
+	
+	if($domain != "jogja" || $domain != "pekanbaru" || $domain != "bangka" || $domain != "batam" || $domain != "jakarta"){
+	flock($lock_fp, LOCK_UN);
+    fclose($lock_fp);
+    if (file_exists($lock_file)) @unlink($lock_file);
+	}
+}	
+
+echo '<br>Execution time in seconds: ' . (microtime(true) - $time_start) . "<br>";
+
+
+function utf8($text)
+{
+    if(empty($text))
+        return "";
+
+    if(!mb_check_encoding($text,'UTF-8'))
+        $text = mb_convert_encoding($text,'UTF-8');
+
+    return str_replace("?","",$text);
+}
+?>

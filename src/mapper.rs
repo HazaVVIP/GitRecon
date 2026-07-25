@@ -760,7 +760,22 @@ impl Mapper {
                 let threshold = ((sample_size as f64) * 0.3_f64).ceil() as usize;
                 accessible_count >= threshold.max(1)
             } else {
-                accessible_count > 0
+                if accessible_count > 0 {
+                    true
+                } else if !result.pack_sha1s.is_empty() {
+                    // Loose objects all failed, but packs are listed in
+                    // objects/info/packs.  Probe one pack .idx to confirm
+                    // objects are reachable via pack files (common on gc'd
+                    // repos where loose objects have been pruned).
+                    let probe_pack = &result.pack_sha1s[0];
+                    let idx_url = format!(
+                        "{}/objects/pack/pack-{}.idx", git_url, probe_pack
+                    );
+                    let resp = self.client.get(&idx_url).await;
+                    resp.ok() && !resp.body.is_empty()
+                } else {
+                    false
+                }
             }
         };
 

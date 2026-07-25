@@ -1,0 +1,30 @@
+<?php 
+include_once "/var/www/html/web-cron/config/config_db_cenderaloka.php";
+
+class model_cenderaloka 
+{
+    private $conn_db_cenderaloka;
+
+    public function __construct()
+    {
+        $this->conn_db_cenderaloka = new config_db_cenderaloka();
+    }
+
+    public function get_latest_product_dev()
+    {
+        $con = $this->conn_db_cenderaloka->conn_to_db_cenderaloka_dev();
+
+        $where = " WHERE p.status = '1' AND p.is_commerce = 1 AND ps.stok > 0 AND up.store_status > 0";
+		$sql = "SELECT p.id, p.status, p.title, p.price, p.alias, cat.alias as category_alias, 
+		p.image, p.image_files, p.date_created
+		FROM post p
+		LEFT JOIN category cat ON p.category = cat.id
+		INNER JOIN post_stok ps ON p.id = ps.post_id
+		LEFT JOIN user_profile up ON p.user_id = up.user_id
+		$where ORDER BY p.date_publish DESC LIMIT $start,$limit";
+
+        $result = mysqli_query($con, $sql);	
+        mysqli_close($con);
+        return $result;
+    }
+}

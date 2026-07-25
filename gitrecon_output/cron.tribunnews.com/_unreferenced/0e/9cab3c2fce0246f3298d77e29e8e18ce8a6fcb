@@ -1,0 +1,159 @@
+<?php
+define('PATH_ROOT', "/var/www/html/web-cron");
+
+define('API_TJB_URL', "https://apis.tribunjualbeli.com/");
+define('API_TJB_AUTH_USERNAME', "api-tjb");
+define('API_TJB_AUTH_PASSWORD', "ZH2J4M5N6P8R9SAUCVDWFYGZH3K4M5P7Q8RATBUCWEXFYH2J3K4N6P7Q9S");
+define('API_TJB_AUTH_KEY', "5N6P8R9SAUCVDWFYGZH3K4M5P7");
+
+//ES
+define('ES_URL', 'https://search-tribunnews-es-prod-fsbuac6mkv54gt6wfk7b7xta3a.ap-southeast-1.es.amazonaws.com');
+define('ES_DAERAH_URL', 'https://search-daerah-prod-aqiblt647far5hthtvjmbd4hoa.ap-southeast-1.es.amazonaws.com');
+define('ES_TEST_URL', 'https://search-tribunnews-es-mtkqj2e5hs2t3m4px7ikrnx2ry.ap-southeast-1.es.amazonaws.com');
+define('ES_ADS_URL', 'https://tidar.tribunnews.com');
+define('ES_ADS_USERNAME', 'ads-tribun');
+define('ES_ADS_PASSWORD', 'U11IMsM4JvqvxBSDvwY7esCkbT/QGghkKw5d3PQhPIQ');
+
+//OS
+define('OS_URL', 'https://leuser.tribunnews.com');
+define('OS_USERNAME', 'tunggulametung');
+define('OS_PASSWORD', 'cTCYgE8gVXgxiS7/BmIQKcL/1NUpCDslUYJsvLnkmj4');
+
+define('OS_DAERAH_URL', 'https://merbabu.tribunnews.com');
+define('OS_DAERAH_USERNAME', 'batikmadrim');
+define('OS_DAERAH_PASSWORD', '4kzYR/MT+onlOmifhA8YLJ2NIOvmYJa6R3RN1ZaGQng');
+
+define('OS_DAERAH_NEW_URL', 'https://pasaman.tribunnews.com');
+define('OS_DAERAH_NEW_USERNAME', 'dyahbalitung');
+define('OS_DAERAH_NEW_PASSWORD', 'npFnl1C4LUzwdmSXYfrM8aqZNDf_y1rr');
+
+define('OS_DAERAH_CLUSTER_URL', 'https://krakatau.tribunnews.com');
+define('OS_DAERAH_CLUSTER_USERNAME', 'kertarajasa');
+define('OS_DAERAH_CLUSTER_PASSWORD', 'CHT2l4oDRNvvcsFr0y_iSqSkHUffCDVn');
+
+define('OS_TBO_URL', 'https://vpc-tbo-es-prod-hwilcgdzfymcuqbv4dqzok3zzi.ap-southeast-1.es.amazonaws.com');
+define('OS_TBO_USERNAME', 'tribun-tbo');
+define('OS_TBO_PASSWORD', '!Bhu4St^chHp!W=N?zp@A%dB2Jdp#t$tk^xffKts47F3^Ntcuh');
+
+define('OS_TNEWSWIKI_URL', 'https://patuha.tribunnewswiki.com');
+define('OS_TNEWSWIKI_USERNAME', 'os-wiki');
+define('OS_TNEWSWIKI_PASSWORD', 'mSBj6OaPKAL0iYO4Aw_2Aa-zIuPBGHMpaOVZOTQLAa');
+
+define('OS_TBO_NEW_URL', 'https://seblat.tribun.co.id');
+define('OS_TBO_NEW_USERNAME', 'wasumurti');
+define('OS_TBO_NEW_PASSWORD', '_ifaCFHZPSE20fZi3ohBqHqPjYyrWeke');
+
+define('OS_TJB_URL', 'https://vpc-tjb-es-gdrocx7lt6fwfv4ymvhwzycciu.ap-southeast-1.es.amazonaws.com');
+define('OS_TJB_USERNAME', 'tribun-jualbeli');
+define('OS_TJB_PASSWORD', 'u6ysLhEUA#Fer4vh7DBxRSte3G9gdHC8HyM++Bfk4RU#P8Rv9g');
+
+define('OS_ADS_URL', 'https://dempo.tribunnews.com');
+define('OS_ADS_USERNAME', 'daksinapati');
+define('OS_ADS_PASSWORD', 't2YdwmcCah-1JtE59IH_GetdoBaoNm6z');
+
+define('OS_TNEWS_IMAGE_URL', 'https://masurai.tribun.co.id');
+define('OS_TNEWS_IMAGE_USERNAME', 'dharmawangsa');
+define('OS_TNEWS_IMAGE_PASSWORD', 'YJoICbiPpITk7S+IlnhYmuiuNjIQVpH5YGkwoDApDLk=');
+
+define('OS_DEV_URL', 'https://raung.tribun.co.id');
+define('OS_DEV_USERNAME', 'rakaipikatan');
+define('OS_DEV_PASSWORD', 'FkxNuAJ-q8QmI6ieiEfmc0WLr7Mw_ACv');
+
+//RDS
+define("RDS_HOST", "db-tnews-read-1.cttdtdmogujb.ap-southeast-1.rds.amazonaws.com");
+define("RDS_USERNAME", "tnews-api");
+define("RDS_PASSWORD", 'ji01$s$lSlwR8&odOWL=O77o$he0AXof1EbUt$ej');
+
+define('RDS_HOST_MASTER', 'db-tnews.cttdtdmogujb.ap-southeast-1.rds.amazonaws.com');
+define('RDS_USERNAME_MASTER', 'tnews-cron');
+define('RDS_PASSWORD_MASTER', 'FriwRafReW=XawespLD=#r?3uKEbRUDuvltHUTes');
+
+define('RDS_DAERAH_HOST', 'db-daerah-read-3.cttdtdmogujb.ap-southeast-1.rds.amazonaws.com');
+define('RDS_DAERAH_USERNAME', 'tdaerah-api');
+define('RDS_DAERAH_PASSWORD', 'zapr-?hofrefri!2iva?hld!Id-uXODRi2asephl');
+
+define('RDS_DAERAH_NEW_HOST', 'db-clusterdaerah-mysql8-read-1.cttdtdmogujb.ap-southeast-1.rds.amazonaws.com');
+define('RDS_DAERAH_NEW_USERNAME', 'itdaerah-api');
+define('RDS_DAERAH_NEW_PASSWORD', 'phU9ofUYewe4HL6TiyAphEqldEWRoDiPr3qA?EMu');
+
+define('RDS_TNEWSWIKI_HOST', 'db-tnewswikitravel-mysql8.cttdtdmogujb.ap-southeast-1.rds.amazonaws.com');
+define('RDS_TNEWSWIKI_USERNAME', 'twiki-appuse');
+define('RDS_TNEWSWIKI_PASSWORD', 'dbt12bunWikW1k-7ri3unD1g17alonlin3-app-u53r9102');
+
+define('RDS_TBO_HOST', 'db-tbo-mysql8-read-1.cttdtdmogujb.ap-southeast-1.rds.amazonaws.com');
+define('RDS_TBO_USERNAME', 'ittbo-web');
+define('RDS_TBO_PASSWORD', 's2est5NoRanik4P=AnLf8vecHUSwIChAST100GU5');
+
+//S3
+define("ACCESS_KEY_TRIBUNNEWS", "AKIARUZHWD7FHFVVLULE");
+define("SECRET_KEY_TRIBUNNEWS", "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");
+define("USE_SSL_SSL_TRIBUNNEWS", TRUE);
+define("BUCKET_S3_TRIBUNNEWS", 'tribun-2');
+
+//CDN
+define("CDN_1_URL_TRIBUNNEWS", 'https://asset-1.tstatic.net/');
+define("CDN_2_URL_TRIBUNNEWS", 'https://asset-2.tstatic.net/');
+define("CDN_3_URL_TRIBUNNEWS", 'https://asset-3.tstatic.net/');
+define("CDN_4_URL_TRIBUNNEWS", 'https://asset-4.tstatic.net/');
+define("CDN_5_URL_TRIBUNNEWS", 'https://asset-5.tstatic.net/');
+
+//MAIL CONFIG
+define("SMTP_USERNAME", "noreply@tribunjualbeli.com");
+define("SMTP_PASSWORD", "jualbeli24jam");
+define("SMTP_FROM", "noreply");
+
+//TJB CONFIG USE ONLY
+define("PATH_TJB_CRON_LOG", "/var/www/html/web-cron/tribunjualbeli/tjb_cron_logs/");
+define("PATH_TJB_MODEL", "/var/www/html/web-cron/tribunjualbeli/model/");
+define("MAX_DAY_CONFIRM_ORDER_SELLER", "4"); 
+define("MAX_HOUR_CONFIRM_ORDER_SELLER", "96"); 
+define("MAX_DAY_FINISH_ORDER_BUYER", "4");
+define("MAX_HOUR_FINISH_ORDER_BUYER", "96"); 
+
+//RDS TJB PRDO
+define("RDS_TJB_HOST_PROD", "db-tjb-read-2.cttdtdmogujb.ap-southeast-1.rds.amazonaws.com");
+define("RDS_TJB_USERNAME_PROD", "ittjb-web");
+define("RDS_TJB_PASSWORD_PROD", 'clkiPL!-OQavUyaX&VoToCr2sp&+pikoseCh9DrL');
+
+//RDS MASTER TJB PROD
+define("RDS_TJB_HOST_MASTER_PROD", "db-tjb.cttdtdmogujb.ap-southeast-1.rds.amazonaws.com");
+define("RDS_TJB_USERNAME_MASTER_PROD", "ittjb-cms");
+define("RDS_TJB_PASSWORD_MASTER_PROD", 'sp#trodrop5awOpridu_awavuF?Mefuye!ruBeB2');
+
+//RDS TJB DEV
+define("RDS_TJB_HOST_DEV", "tjb-dev-mysql-8.cuhyfpzt6xd5.ap-southeast-1.rds.amazonaws.com");
+define("RDS_TJB_USERNAME_DEV", "ittjb-web");
+define("RDS_TJB_PASSWORD_DEV", "clkiPL!-OQavUyaX&VoToCr2sp&+pikoseCh9DrL");
+
+//CONFIG SHIPPER TJB
+DEFINE("SHIPPER_BASE_URL_DEV", "https://merchant-api-sandbox.shipper.id/v3/"); //sandbox
+DEFINE("SHIPPER_API_KEY_DEV", "N9iahbzmzudngiPuevgHMQUwXaVt5uLDkQON6AEgdih7dIBbdwhSoPW3WJcvPZha"); //sandbox
+DEFINE("SHIPPER_WEB_URL_DEV", "https://sandbox.shipper.id/"); //sandbox
+
+DEFINE("SHIPPER_BASE_URL_PROD", "https://merchant-api.shipper.id/v3/"); //production
+DEFINE("SHIPPER_API_KEY_PROD", "cvrrWRL9WHAy2ZyMbEKuJwB0vtqWEJ7IugJql4RHpmn9egUzpD7qA6iceWSzUC"); //production
+DEFINE("SHIPPER_WEB_URL_PROD", "https://shipper.id/"); //production
+DEFINE("SHIPPER_API_TIMEOUT", 10);
+DEFINE("SHIPPER_LOG_STATUS", 1);
+
+//CONFIG S3 TJB
+DEFINE("accessKey","AKIARUZHWD7FLTNZQKHN");
+DEFINE("secretKey", "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");
+DEFINE("useSSL",TRUE);
+
+//CONFIG CDN TJB
+DEFINE("cdn_1_url", "https://asset-1.tstatic.net/");
+DEFINE("cdn_2_url", "https://t-2.tstatic.net/");
+DEFINE("cdn_url", "https://asset-3.tstatic.net/");
+DEFINE("cdn_tjb_url", "https://tjb.tstatic.net/");
+DEFINE("cdn_4_url", "https://t-4.tstatic.net/");
+DEFINE("cdn_5_url", "https://t-5.tstatic.net/");
+DEFINE("bucket_s3", "tribun-3");
+DEFINE("img_path","jualbeli/img/");
+
+//DATABASE BOOKING DEV
+define("PATH_BOOKING_MODEL", "/var/www/html/web-cron/booking/model/");
+define("BOOKING_HOST_DEV", "booking-development.cuhyfpzt6xd5.ap-southeast-1.rds.amazonaws.com");
+define("BOOKING_USERNAME_DEV", "web_booking");
+define("BOOKING_PASSWORD_DEV", 'Spodaph$dIJOcRoFRlsTltratiCh2crEC=AtRa*h');
+?>

@@ -1,0 +1,92 @@
+<?php
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+//error_reporting(0);
+ini_set("memory_limit", "-1");
+set_time_limit(0);
+
+$time_start = time();
+
+define("DOC_ROOT","/var/www/html/web-cron/");
+
+include DOC_ROOT."config/config.php";
+include DOC_ROOT."config/other_config.php";
+include DOC_ROOT."lib/Opensearch.php";
+
+$dateStart = isset($_GET['start'])?$_GET['start']:"";
+$dateEnd = isset($_GET['end'])?$_GET['end']:"";
+
+if(empty($dateStart)){	
+	$dateStart = date("Y-m-d", strtotime('-1 days'));
+}
+
+if(empty($dateEnd)){	
+	$dateEnd = date("Y-m-d", strtotime('-1 days'));
+}
+
+echo $dateStart." - ".$dateEnd."<br>";
+
+
+$opensearchAllNetwork = new Opensearch();
+$opensearchAllNetwork->init(OS_ALLNETWOORK_URL,OS_ALLNETWOORK_USERNAME,OS_ALLNETWOORK_PASSWORD,true);
+
+$index_name = "tribunnetwork-articles";
+
+$query = [
+    'bool' => [
+        'filter' => [
+            [
+                'range' => [
+                    'publish_date' => [
+                        'gte' => '2026-01-01 00:00:00',
+                        'lte' => '2026-01-31 23:59:59'
+                    ]
+                ]
+            ],
+            [
+                'nested' => [
+                    'path' => 'tagging',
+                    'query' => [
+                        'term' => [
+                            'tagging.alias.keyword' => 'meaningful'
+                        ]
+                    ]
+                ]
+            ]
+        ]
+    ]
+];
+			  
+
+$aggs = [
+    'by_domain' => [
+        'terms' => [
+            'field' => 'domain',
+            'size'  => 1000
+        ],
+        'aggs' => [
+            'by_editor' => [
+                'terms' => [
+                    'field' => 'editor_fullname.keyword',
+                    'size'  => 1000
+                ]
+            ]
+        ]
+    ]
+];
+
+$response = $opensearchAllNetwork->aggregations($index_name,$aggs,$query);
+
+if($response['status']){
+	$rows = isset($response['data']['date_hist_agg']['buckets'])?$response['data']['date_hist_agg']['buckets']:array();
+	
+	echo "<pre>";
+	print_r($rows);
+	echo "</pre>";
+}	
+
+unset($opensearchAllNetwork);
+
+
+echo '<br>Execution time in seconds: ' . (microtime(true) - $time_start) . "<br>";
+?>

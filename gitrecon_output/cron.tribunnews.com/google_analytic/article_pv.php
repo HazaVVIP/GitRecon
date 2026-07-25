@@ -1,0 +1,116 @@
+<?php
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+//error_reporting(0);
+
+define("DOC_ROOT","/var/www/html/web-cron/");
+
+include DOC_ROOT."config/config.php";
+include DOC_ROOT."config/other_config.php";
+include DOC_ROOT."lib/Opensearch.php";
+
+$subdomain = isset($_GET['cluster'])?$_GET['cluster']:"all";
+$dateStart = isset($_GET['start'])?$_GET['start']:date("Y-m-d");
+$dateEnd = isset($_GET['end'])?$_GET['end']:date("Y-m-d");
+$sortFilter = isset($_GET['sort'])?$_GET['sort']:"publish_date";
+$pageviews = isset($_GET['pageviews'])?intval($_GET['pageviews']):"";
+$export = isset($_GET['export'])?intval($_GET['export']):0;
+
+$opensearchAllNetwork = new Opensearch();
+$opensearchAllNetwork->init(OS_ALLNETWOORK_URL,OS_ALLNETWOORK_USERNAME,OS_ALLNETWOORK_PASSWORD,true);
+
+$where = array();
+$where_must_not = array();
+
+array_push($where,array("range" => array("publish_date" => array("gte" => ''.$dateStart.' 00:00:00', "lte" => ''.$dateEnd.' 23:59:59'))));	
+if($subdomain !== "all") array_push($where,array("match_phrase" => array("domain" => $subdomain)));
+if($pageviews !== "") { 
+	array_push($where_must_not,array("exists" => array("field" => "pageviews")));
+}
+
+if($pageviews !== "") { 
+	$query = array("bool" =>
+						array(
+							"must" => $where,
+							"must_not" => $where_must_not
+						)
+			);
+} else {
+	$query = array("bool" =>
+					array(
+						"must" => $where
+						)
+			);
+}			
+
+$fields = array("domain_id","domain","alias","title","publish_date","pageviews");	
+if($sortFilter === "pageviews"){
+	$sort = array("pageviews" => array("order" => "desc"));
+} else {
+	$sort = array("publish_date" => array("order" => "desc"));
+}	
+$start = 0;
+$limit = 5000;
+$response = $opensearchAllNetwork->find("tribunnetwork-articles",$query,$fields,$sort,$start,$limit);
+
+if($response['status']){
+	$totalArticle = isset($response['total_row'])?$response['total_row']:0;
+	$dataArticle = isset($response['data'])?$response['data']:array();
+	
+	if($totalArticle > 0){
+		if(count($dataArticle) > 0){
+			if($export == 1){
+				header('Content-Type: text/csv');
+				header('Content-Disposition: attachment; filename="article_pv.'.date("YmdHis").'.csv"');
+				
+				$output = fopen('php://output', 'w');
+				fputcsv($output, ['url', 'domain', 'publish_date', 'pageviews']);
+				
+				foreach($dataArticle as $val){
+					$row = $val['_source'];
+					
+					$domain = isset($row['domain'])?$row['domain']:"";
+					$publish_date = isset($row['publish_date'])?$row['publish_date']:"";
+					$pageviews = isset($row['pageviews'])?intval($row['pageviews']):0;
+					
+					$url = "https://".$row['domain'].".tribunnews.com/".$row['alias'];
+					if($row['domain'] == "jatimtimur") $url = "https://jatim-timur.tribunnews.com/".$row['alias'];
+					if($row['domain'] == "tribunnews") $url = "https://www.tribunnews.com/".$row['alias'];
+					
+					$arrArc = array();
+					$arrArc['url'] = $url;
+					$arrArc['domain'] = $domain;
+					$arrArc['publish_date'] = $publish_date;
+					$arrArc['pageviews'] = $pageviews;
+					
+					fputcsv($output, $arrArc);
+				}	
+				
+				fclose($output);
+				exit;
+			} else {
+				echo "<table border='1'>";
+				echo "<th>url</th><th>domain</th><th>publish_date</th><th>pageviews</th>";
+					
+				foreach($dataArticle as $val){
+					$row = $val['_source'];
+					
+					$domain = isset($row['domain'])?$row['domain']:"";
+					$publish_date = isset($row['publish_date'])?$row['publish_date']:"";
+					$pageviews = isset($row['pageviews'])?intval($row['pageviews']):0;
+					
+					$url = "https://".$row['domain'].".tribunnews.com/".$row['alias'];
+					if($row['domain'] == "jatimtimur") $url = "https://jatim-timur.tribunnews.com/".$row['alias'];
+					if($row['domain'] == "tribunnews") $url = "https://www.tribunnews.com/".$row['alias'];
+					
+					echo "<tr><td>".$url."</td><td>".$domain."</td><td>".$publish_date."</td><td>".$pageviews."</td></tr>";
+				}
+				
+				echo "</table>";
+			}	
+		}
+	}
+}	
+
+unset($opensearchAllNetwork);
+?>

@@ -1,0 +1,42 @@
+<?php
+$apiKey = 'bda7647c-53ce-4b2e-a0b7-3d24f2d60fee';
+$country = 'Indonesia';
+$city = 'Jakarta';
+
+$url = "https://api.airvisual.com/v2/city?city={$city}&state=Jakarta&country={$country}&key={$apiKey}";
+
+$ch = curl_init();
+curl_setopt($ch, CURLOPT_URL, $url);
+curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+$response = curl_exec($ch);
+$httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+curl_close($ch);
+
+echo $httpCode."<br>";
+echo $url."<br>";
+
+if ($httpCode === 200) {
+    $data = json_decode($response, true);
+	
+	echo "<pre>";
+	print_r($data);
+	echo "</pre>";
+	
+    if (isset($data['data'][0])) {
+        $weather = $data['data'][0];
+
+        echo "📍 Lokasi: " . $weather['location']['name'] . "\n";
+        echo "Waktu: " . $weather['observation_time'] . "\n";
+        echo "Suhu: " . $weather['temperature']['value'] . "°C\n";
+        echo "Kelembapan: " . $weather['humidity']['value'] . "%\n";
+        echo "Tekanan Udara: " . $weather['pressure']['value'] . " hPa\n";
+        echo "Awan: " . $weather['cloud_cover']['value'] . "%\n";
+        echo "Kecepatan Angin: " . $weather['wind']['speed']['value'] . " km/h\n";
+        echo "Arah Angin: " . $weather['wind']['direction']['value'] . "°\n";
+    } else {
+        echo "❌ Data tidak ditemukan untuk kota {$city}\n";
+    }
+} else {
+    echo "❌ HTTP Error Code: {$httpCode}\n";
+    echo "Response: {$response}\n";
+}

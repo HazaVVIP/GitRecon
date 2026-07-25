@@ -1,0 +1,44 @@
+<?php
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+
+define("DOC_ROOT","/var/www/html/web-cron/");
+
+include DOC_ROOT."config/config.php";
+include DOC_ROOT."lib/Opensearch.php";
+
+$opensearch = new Opensearch();
+$opensearch->init(OS_URL, OS_USERNAME, OS_PASSWORD, true);
+//$opensearch->init(OS_DEV_URL, OS_DEV_USERNAME, OS_DEV_PASSWORD, true);
+
+$index = 'video_live_nbs';
+$tables = array(
+		'id' => "keyword",
+		'video_name' => "text",
+		'video_slug' => "keyword",
+		'video_description' => "text_keyword",
+		'category_id' => "keyword",
+		'category_name' => "text",
+		'category_slug' => "keyword",
+		"video_total_view" => "integer",
+		"tags" => "nested_tagging_video_nbs",
+		"editor_id" => "keyword",
+		"editor_name" => "text",
+		"host_id" => "keyword",
+		"host_name" => "text",
+		"cover_url" => "text",
+		"video_hls_url" => "text",
+		"video_createdat" => "date",
+		"video_publishedat" => "date_null",
+		"video_updatedat" => "date_null",
+		"video_status" => "integer"
+	);
+$response = $opensearch->create($index,$tables);
+
+echo "<pre>";
+print_r($tables);
+print_r($response);
+echo "</pre>";
+
+unset($opensearch);
+?>

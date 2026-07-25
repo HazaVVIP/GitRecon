@@ -1,0 +1,433 @@
+<?php
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+//error_reporting(0);
+
+use \MongoDB\BSON\UTCDateTime;
+
+$time_start = time();
+
+define("DOC_ROOT","/var/www/html/web-cron/");
+
+require_once "./../../vendor/autoload.php";
+include DOC_ROOT."config/config.php";
+include DOC_ROOT."lib/Mongodb.php";
+include DOC_ROOT."lib/Opensearch.php";
+
+
+//MONGODB
+$mongodb = new Mongodb();
+$mongodb->connect(MONGODB_USER_HOST_PROD,MONGODB_USER_USERNAME_PROD,MONGODB_USER_PASSWORD_PROD,"tribunnews",true);
+
+$email = isset($_GET['email'])?$_GET['email']:"";
+$username = isset($_GET['username'])?$_GET['username']:"";
+
+$userId = 1668565;
+if(!empty($email)){
+	$condition = array("email" => $email);
+	$fields = array("_id","old_id");
+	$rsUserCheck = $mongodb->findOne("users",$condition,$fields);
+	
+	if($rsUserCheck){
+		$userId = $rsUserCheck->old_id;
+	}	
+}
+
+if(!empty($username)){
+	$condition = array("username" => $username);
+	$fields = array("_id","old_id");
+	$rsUserCheck = $mongodb->findOne("users",$condition,$fields);
+	
+	if($rsUserCheck){
+		$userId = $rsUserCheck->old_id;
+	}	
+}
+
+$collection = "users_history";
+$dateHistory = date("Ymd", strtotime('-3 days'));
+
+$query = [
+			"user_id" => intval($userId),
+			"dt" => ['$gte' => intval($dateHistory)]
+		];
+$fields = array("domain","article_id");
+$sort = array('created_at' => -1);
+$start = 0;
+$limit = 50;
+$rsArticleUserHistory = $mongodb->find($collection,$query,$fields,$sort,$start,$limit);
+
+$viewArticles   = [];
+if(count($rsArticleUserHistory) > 0){
+	foreach ($rsArticleUserHistory as $row) {
+		$rows = array();
+		$rows['id'] = $row->article_id;
+		$rows['domain'] = $row->domain;
+		array_push($viewArticles,$rows);
+	}
+}
+
+
+$query = [
+			"user_id" => intval($userId),
+			"dt" => ['$gte' => intval($dateHistory)]
+		];
+		
+$options = array();
+$options = [
+    'facet' => [
+        'topSections' => [
+            ['$group' => ['_id' => '$sec_alias', 'total' => ['$sum' => 1]]],
+            ['$sort' => ['total' => -1]],
+            ['$limit' => 5]
+        ],
+		'topSubtitle' => [
+            ['$group' => ['_id' => '$subtitle', 'total' => ['$sum' => 1]]],
+            ['$sort' => ['total' => -1]],
+            ['$limit' => 5]
+        ],
+        'topCategories' => [
+            ['$group' => ['_id' => '$cat_alias', 'total' => ['$sum' => 1]]],
+            ['$sort' => ['total' => -1]],
+            ['$limit' => 5]
+        ],
+        'topTags' => [
+            ['$unwind' => '$tag'],
+            ['$group' => ['_id' => '$tag.alias', 'total' => ['$sum' => 1]]],
+            ['$sort' => ['total' => -1]],
+            ['$limit' => 5]
+        ]
+    ]
+];
+$options['limit'] = 50;
+$options['sort'] = ['created_at' => -1];
+$resUserHistory = $mongodb->aggregate($collection, $query, $options);
+
+$topSections   = [];
+$topSubtitle   = [];
+$topCategories = [];
+$topTags       = [];
+
+if(count($resUserHistory) > 0){
+	$dataUserHistory = $resUserHistory[0];
+	
+	if (isset($dataUserHistory->topSections)) {
+        foreach ($dataUserHistory->topSections as $row) {
+            $topSections[] = [
+                'name'  => $row->_id,
+                'total' => $row->total
+            ];
+        }
+		
+		$grandTotal = array_sum(array_column($topSections, 'total'));
+		
+		foreach ($topSections as &$val) {
+			$val['percent'] = round(($val['total'] / $grandTotal) * 100, 2);
+		}
+    }
+	
+	if (isset($dataUserHistory->topSubtitle)) {
+        foreach ($dataUserHistory->topSubtitle as $row) {
+            if(!empty($row->_id)){
+				$topSubtitle[] = [
+					'name'  => $row->_id,
+					'total' => $row->total
+				];
+			}
+        }
+		
+		$grandTotalSubtitle = array_sum(array_column($topSubtitle, 'total'));
+		
+		foreach ($topSubtitle as &$valSub) {
+			$valSub['percent'] = round(($valSub['total'] / $grandTotalSubtitle) * 100, 2);
+		}
+    }
+	
+    if (isset($dataUserHistory->topCategories)) {
+        foreach ($dataUserHistory->topCategories as $row) {
+            if(!empty($row->_id)){
+				$topCategories[] = [
+					'name'  => $row->_id,
+					'total' => $row->total
+				];
+			}
+        }
+		
+		$grandTotalCategories = array_sum(array_column($topCategories, 'total'));
+		
+		foreach ($topCategories as &$valCat) {
+			$valCat['percent'] = round(($valCat['total'] / $grandTotalCategories) * 100, 2);
+		}
+    }
+
+    if (isset($dataUserHistory->topTags)) {
+        foreach ($dataUserHistory->topTags as $row) {
+            $topTags[] = [
+                'name'  => $row->_id,
+                'total' => $row->total
+            ];
+        }
+		
+		$grandTotalTags = array_sum(array_column($topTags, 'total'));
+		
+		foreach ($topTags as &$valTag) {
+			$valTag['percent'] = round(($valTag['total'] / $grandTotalTags) * 100, 2);
+		}
+    }
+}
+
+$viewArticles = array_slice($viewArticles, 20); 
+echo "<pre>";
+print_r([
+    'articles'   => $viewArticles,
+    'sections'   => $topSections,
+	'subtitle'   => $topSubtitle,
+    'categories' => $topCategories,
+	'tags'       => $topTags,
+]);
+echo "</pre>";
+
+
+
+//OPENSEARCH
+$opensearchAllNetwork = new Opensearch();
+$opensearchAllNetwork->init(OS_ALLNETWOORK_URL,OS_ALLNETWOORK_USERNAME,OS_ALLNETWOORK_PASSWORD,true);
+
+$arrMust = array();
+$arrShould = array();
+$arrMustNot = array();
+
+$timeNow = strtotime("now");
+$endDate = date('Y-m-d H:i:s', $timeNow);
+$arrMust[] = array(
+	"range" => array(
+		"publish_date" => array("lte" =>$endDate)
+	)
+);
+
+if (!empty($topSections)) {
+	$arrMustSection = array();
+	foreach($topSections as $key_sec => $sections){
+		if(isset($sections['percent']) && $sections['percent'] >= 60){
+			$arrMust[] = array(
+				"match_phrase" => array(
+					"section.keyword" => $sections['name']
+				)
+			);
+			
+			unset($topSections[$key_sec]);
+		} else if(isset($sections['percent']) && $sections['percent'] >= 30){
+			array_push($arrMustSection,$sections['name']);
+			
+			unset($topSections[$key_sec]);
+		}	
+	}	
+	
+	$topSections = array_values($topSections);
+
+	if(count($arrMustSection) > 1){
+		$arrMust[] = array(
+				"terms" => array(
+					"section.keyword" => $arrMustSection
+				)
+			);
+	}
+	
+	$values = array_column($topSections, 'name');
+	$arrShould[] = array(
+        "terms" => array(
+            "section.keyword" => $values,
+            "boost" => 1
+        )
+    );
+}
+
+/* if (!empty($topSubtitle)) {
+    $values = array_column($topSubtitle, 'name');
+    $arrShould[] = [
+        "terms" => [
+            "subtitle" => $values,
+            "boost" => 3
+        ]
+    ];
+}
+ */
+if (!empty($topCategories)) {
+    $values = array_column($topCategories, 'name');
+    $arrShould[] = [
+        "terms" => [
+            "c_alias.keyword" => $values,
+            "boost" => 5
+        ]
+    ];
+}
+
+if (!empty($topTags)) {
+    $values = array_column($topTags, 'name');
+    $arrShould[] = array(
+        "nested" => array(
+            "path" => "tagging",
+            "query" => array(
+                "terms" => array(
+                    "tagging.alias" => $values,
+                    "boost" => 5
+                )
+            )
+        )
+    );
+}
+
+if (!empty($viewArticles)) {
+	foreach($viewArticles as $val){
+		$arrMustNot[] = [
+			"bool" => [
+				"must" => [
+					["match_phrase" => ["id" => intval($val['id'])]],
+					["match_phrase" => ["domain" => $val['domain']]]
+				]
+			]
+		];
+	}
+	
+	/* $excludeIds = array_column($viewArticles, 'id');
+	if (!empty($excludeIds)) {
+        $arrMustNot[] = array(
+            "terms" => array(
+                "domain_id" => $excludeIds
+            )
+        );
+    }  */
+}
+
+$query = array(
+    "bool" => array(
+		"must" => $arrMust,
+        "should" => $arrShould,
+        "must_not" => $arrMustNot,
+        "minimum_should_match" => 1
+    )
+);
+$fields = array("domain_id","domain","alias","title","written_date","section","pageviews","tagging");	
+$sort = array("written_date" => array("order" => "desc"));
+//$sort = array("written_date" => array("order" => "desc"), "pageviews" => array("order" => "asc"));
+$start = 0;
+$limit = 20;
+$response = $opensearchAllNetwork->find("tribunnetwork-articles",$query,$fields,$sort,$start,$limit);
+
+echo "<pre>";
+//print_r($query);
+//print_r($response);
+echo "</pre>"; 
+
+if($response['status']){
+	$dataMatch = isset($response['data'])?$response['data']:array();
+	
+	if(count($dataMatch) > 0){
+		echo "<b>Rekomendasi Artikel</b><br>";
+		
+		echo "<table border='1'>";
+		echo "<th>Judul</th><th>Network</th><th>Section</th><th>Written Date</th><th>Pageview</th><th>Link</th>";
+		
+		/* echo "<pre>";
+		print_r($query);
+		echo "</pre>"; */
+		
+		foreach($dataMatch as $val){
+			$row = $val['_source'];
+			
+			/* echo "<pre>";
+			print_r($row);
+			echo "</pre>"; */
+			
+			$title = $row['title'];
+			
+			$url = "https://".$row['domain'].".tribunnews.com/".$row['alias'];
+			if($row['domain'] == "tribunnews") $url = "https://www.tribunnews.com/".$row['alias'];
+			
+			$pageviews = isset($row['pageviews'])?intval($row['pageviews']):0;
+			
+			echo "<tr><td>".$title."</td><td>".$row['domain']."</td><td>".$row['section']."</td><td>".$row['written_date']."</td><td>".$pageviews."</td><td><a href='".$url."'>Link</a></td></tr>";
+		}
+		echo "</table>";
+	}
+}
+
+
+/////////////////////////
+
+
+if (!empty($topSubtitle)) {
+	foreach($topSubtitle as $key_sub => $subtitle){
+		if(isset($subtitle['percent']) && $subtitle['percent'] >= 30){
+			$arrMust = array();
+			$arrMustNot = array();
+			
+			$arrMust[] = array(
+				"match_phrase" => array(
+					"subtitle.keyword" => $subtitle['name']
+				)
+			);
+
+			if (!empty($viewArticles)) {
+				foreach($viewArticles as $val){
+					$arrMustNot[] = [
+						"bool" => [
+							"must" => [
+								["match_phrase" => ["id" => intval($val['id'])]],
+								["match_phrase" => ["domain" => $val['domain']]]
+							]
+						]
+					];
+				}
+			}
+			
+			$query = array(
+				"bool" => array(
+					"must" => $arrMust,
+					"must_not" => $arrMustNot,
+				)
+			);
+			$fields = array("domain_id","domain","alias","title","written_date","section","pageviews","tagging");	
+			$sort = array("written_date" => array("order" => "desc"));
+			$start = 0;
+			$limit = 5;
+			$response = $opensearchAllNetwork->find("tribunnetwork-articles",$query,$fields,$sort,$start,$limit);
+			
+			/* echo "<pre>";
+			print_r($query);
+			print_r($response);
+			echo "</pre>"; */
+			
+			if($response['status']){
+				$dataMatch = isset($response['data'])?$response['data']:array();
+				
+				if(count($dataMatch) > 0){
+					echo "<hr><b>Rekomendasi Topik ".$subtitle['name']."</b><br>";
+					
+					echo "<table border='1'>";
+					echo "<th>Judul</th><th>Network</th><th>Section</th><th>Written Date</th><th>Pageview</th><th>Link</th>";
+					
+					foreach($dataMatch as $val){
+						$row = $val['_source'];
+
+						$title = $row['title'];
+						
+						$url = "https://".$row['domain'].".tribunnews.com/".$row['alias'];
+						if($row['domain'] == "tribunnews") $url = "https://www.tribunnews.com/".$row['alias'];
+						
+						$pageviews = isset($row['pageviews'])?intval($row['pageviews']):0;
+						
+						echo "<tr><td>".$title."</td><td>".$row['domain']."</td><td>".$row['section']."</td><td>".$row['written_date']."</td><td>".$pageviews."</td><td><a href='".$url."'>Link</a></td></tr>";
+					}
+					echo "</table>";
+				}
+			}
+		}
+	}	
+}
+
+$mongodb->close();
+unset($mongodb);
+unset($opensearchAllNetwork);
+
+echo '<br>Execution time in seconds: ' . (microtime(true) - $time_start) . "<br>";
+?>

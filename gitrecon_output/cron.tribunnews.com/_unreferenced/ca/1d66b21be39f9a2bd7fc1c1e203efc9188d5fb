@@ -1,0 +1,168 @@
+<?php
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+//error_reporting(0);
+
+$time_start = time();
+
+define("DOC_ROOT","/var/www/html/web-cron/");
+
+/* 
+Running in command
+- sudo -u cron /usr/bin/php7.4 /var/www/html/web-cron/daerah/migrasi_tagging_rds_os.php aceh
+*/
+
+include DOC_ROOT."config/config.php";
+include DOC_ROOT."lib/Opensearch.php";
+include DOC_ROOT."lib/Writelog.php";
+
+$daerah = isset($_SERVER["argv"][1])?$_SERVER["argv"][1]:"";
+if(isset($_GET['daerah'])){
+	$daerah = $_GET['daerah'];
+}
+
+if(!empty($daerah)){
+	echo $daerah."<br>";
+	
+	$writelog = new Writelog();
+	$writelog->Log(PATH_ROOT."/logs/","".$daerah."-tagging");
+	
+	$lastid = 0;
+	$total = 0;
+	$filename = PATH_ROOT . "/data/daerah/".$daerah."_lastid_tagging.txt";
+	$valueLog = file_get_contents($filename);
+	if ($valueLog !== FALSE) {
+		$lastid = $valueLog;
+	}
+	
+	$index = $daerah.".tribundaerah-articles";
+	
+	$opensearch = new Opensearch();
+	$opensearch->init(OS_DAERAH_URL,OS_DAERAH_USERNAME,OS_DAERAH_PASSWORD,true);
+	
+	if (empty($lastid)) {
+		$condition 	= array (
+						'bool' => 
+						array (
+						  'filter' => 
+						  array (
+							0 => 
+							array (
+							  'range' => 
+							  array (
+								'written_date' => 
+								array (
+								  'gte' => '2022-01-01 00:00:00',
+								  'lte' => '2022-01-01 23:59:59',
+								),
+							  ),
+							),
+						  ),
+						),
+					  );	
+		$fields = array('id');
+		$sort = array("id" => "asc");
+		$start = 0;
+		$limit = 1;
+		$response = $opensearch->find($index,$condition,$fields,$sort,$start,$limit);
+	} else {
+		$condition = array("range"=>array("id"=>array("gt"=>$lastid)));	
+		$fields = array('id');
+		$sort = array("id" => "asc");
+		$start = 0;
+		$limit = 500;
+		$response = $opensearch->find($index,$condition,$fields,$sort,$start,$limit);
+	}	
+	
+	//RDS
+	$daerah = str_replace("aceh","aceh2",$daerah);
+	$daerah = str_replace("jambi","jambi2",$daerah);
+	$con = mysqli_connect(RDS_DAERAH_HOST,RDS_DAERAH_USERNAME,RDS_DAERAH_PASSWORD,$daerah);
+	if (mysqli_connect_errno()) {
+		echo "Failed to connect to MySQL: " . mysqli_connect_error();
+		exit();
+	}
+	
+	$totalArticles = 0;
+	$totalSyncOs = 0;
+	if($response['status']){
+		$totalArticles = isset($response['total_row'])?$response['total_row']:0;
+		$arrArticles = isset($response['data'])?$response['data']:null;
+			
+		if($totalArticles > 0){
+			foreach($arrArticles as $idx => $article){
+				$id = isset($article['_source']['id'])?intval($article['_source']['id']):0;
+				
+				$sqlRow = "SELECT c.id as tagging_id, c.title as tagging_title, c.alias as tagging_alias
+				FROM articles a
+				LEFT JOIN tag_related b ON a.id = b.related_id
+				LEFT JOIN tag c ON b.tag_id = c.id
+				WHERE a.id = ".$id." AND b.related_type = 'articles'";
+				$resultRow = mysqli_query($con, $sqlRow);
+				
+				$arrTaging = array();
+				while($post = mysqli_fetch_array($resultRow, MYSQLI_ASSOC))
+				{
+					$tagging_title = isset($post['tagging_title'])?$post['tagging_title']:"";
+					if(!mb_check_encoding($tagging_title, 'UTF-8')){
+						$tagging_title = mb_convert_encoding ($tagging_title, 'UTF-8');
+						$tagging_title = str_replace("?","",$tagging_title);
+					}
+					
+					$tagging_alias = isset($post['tagging_alias'])?$post['tagging_alias']:"";
+					if(!mb_check_encoding($tagging_alias, 'UTF-8')){
+						$tagging_alias = mb_convert_encoding ($tagging_alias, 'UTF-8');
+						$tagging_alias = str_replace("?","",$tagging_alias);
+					}
+					
+					$arrTag = array();
+					$arrTag['id'] = intval($post['tagging_id']);
+					$arrTag['title'] = $tagging_title;
+					$arrTag['alias'] = $tagging_alias;
+					
+					array_push($arrTaging, $arrTag);
+				}
+				
+				if(count($arrTaging) > 0){
+					$dataUpdateOS = array();
+					$dataUpdateOS['tagging'] = $arrTaging;
+					
+					$responseUpdateOs = $opensearch->updateOne($index,$id,$dataUpdateOS);
+					
+					if($responseUpdateOs['status'] == 1){
+						$totalSyncOs++; 
+					} else {
+						echo "<pre>";
+						echo $id."<br>";
+						print_r($responseUpdateOs);
+						print_r($dataUpdateOS);
+						echo "</pre>";
+					}
+				}
+				
+				$lastid = $id;
+			}
+		}	
+		
+		echo "TOTAL MIGRASI : " . $totalSyncOs . "\n";
+		echo "LAST ID : " . $lastid . "\n";
+		if (!empty($lastid)) {
+			if (!$handle = fopen($filename, 'w+')) {
+				die("Cannot open file $filename");
+			}
+			if (fwrite($handle, $lastid) === FALSE) {
+				die("Cannot write to file $this->log_file");
+			}
+			
+			$loginfo = "TOTAL MIGRASI = ".$totalSyncOs." | LAST ID = ".$lastid."\n";
+			$writelog->doLogInfo($loginfo);
+		}
+	}
+	
+	mysqli_close($con);
+	$writelog->closeLog();
+	unset($opensearch);
+}	
+
+echo '<br>Execution time in seconds: ' . (microtime(true) - $time_start) . "<br>";
+?>

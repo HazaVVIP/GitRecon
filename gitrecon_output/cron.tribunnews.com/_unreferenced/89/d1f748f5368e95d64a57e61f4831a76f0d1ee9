@@ -1,0 +1,58 @@
+<?php 
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+define('TIMEZONE', 'Asia/Jakarta');
+date_default_timezone_set(TIMEZONE);
+//error_reporting(0);
+
+$time_start = time();
+
+include "/var/www/html/web-cron/config/config.php";
+include_once "/var/www/html/web-cron/booking/model/model_transaction.php";
+
+$dbname = "booking";
+$servername = "t-booking.cttdtdmogujb.ap-southeast-1.rds.amazonaws.com";
+$username = "cms-booking";
+$password = "=JmMbD5Yb_3&!avTNWg35*JjfJeT4NMzUs?S8a+G";
+
+$conn = new mysqli($servername, $username, $password, $dbname);
+//load model class
+
+$now = new DateTime();
+$mins = $now->getOffset() / 60;
+$sgn = ($mins < 0 ? -1 : 1);
+$mins = abs($mins);
+$hrs = floor($mins / 60);
+$mins -= $hrs * 60;
+$offset = sprintf('%+d:%02d', $hrs*$sgn, $mins);
+$conn->query("SET time_zone='$offset';");
+$dateNow    = $now->format('Y-m-d H:i:s');
+
+$model_transaction  = new model_transaction();
+
+$getDataExpired     = $model_transaction->get_invoice_expired($dateNow);
+$totalDataExpired   = mysqli_num_rows($getDataExpired);
+
+if ($totalDataExpired > 0) {
+    $result    = array();
+    while ($dataEx =  mysqli_fetch_assoc($getDataExpired))
+    {
+        $result[] = $dataEx;
+    }
+
+    foreach ($result as $row) {
+        $kodeInvoice    = $row['kode_invoice'];
+        $sql = "UPDATE tbl_transaksi SET status_paid='expire', transaction_status='4' WHERE kode_invoice='$kodeInvoice' ";
+        $results = $conn->query($sql);
+        if ($results === FALSE) {
+            die(mysqli_error());
+        }
+    }
+}else{
+    echo "No data updated";
+    exit;
+}
+
+echo "\nExecution time in seconds: ". (microtime(true) - $time_start) . "\n";
+
+?>

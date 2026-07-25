@@ -1,0 +1,16 @@
+<?php
+define('PATH_ROOT', "/var/www/html/cron");
+
+//ES
+define('ES_URL', 'https://search-tribunnews-es-prod-fsbuac6mkv54gt6wfk7b7xta3a.ap-southeast-1.es.amazonaws.com');
+
+//OS
+define('OS_URL', 'https://leuser.tribunnews.com');
+define('OS_USERNAME', 'tunggulametung');
+define('OS_PASSWORD', 'cTCYgE8gVXgxiS7/BmIQKcL/1NUpCDslUYJsvLnkmj4');
+
+//RDS
+define('RDS_HOST', 'db-tnews-read-3.cttdtdmogujb.ap-southeast-1.rds.amazonaws.com');
+define('RDS_USERNAME', 'tnews-apiuse');
+define('RDS_PASSWORD', 't12bun7n3w5-7ri3unD1g17alonlin3-ap1-user2019');
+?>

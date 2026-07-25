@@ -1,0 +1,16 @@
+<?php 
+/* ini_set('display_errors',1);
+error_reporting(E_ALL); */
+error_reporting(0);
+
+$time_start = time();
+
+require_once "vendor/autoload.php";
+include DOC_ROOT."config/config.php";
+include_once PATH_TJB_MODEL."model_settlement.php";
+
+$filename = PATH_TJB_CRON_LOG . "lastfailed_order_seller_id.txt";
+
+echo $filename;
+
+?>

@@ -1,0 +1,204 @@
+<?php
+
+	ini_set('display_errors', 1);
+	error_reporting(E_ALL);
+	//error_reporting(0);
+
+	define("DOC_ROOT", "/var/www/html/web-cron/");
+
+	require_once "vendor_new/autoload.php";
+	include DOC_ROOT . "config/config.php";
+	include DOC_ROOT . "lib/Opensearch.php";
+	include DOC_ROOT . "lib/Google_analytic4dev.php";
+
+	define("AUTH_CREDENTIAL_PROD", DOC_ROOT . "google_analytic/tribunnews-17d8f@appspot.gserviceaccount.json");
+	define("AUTH_CREDENTIAL_STAG", DOC_ROOT . "google_analytic/google-analytic-dev@stone-goal-266105.iam.gserviceaccount.json");
+	define("LOGGING", DOC_ROOT . "tjb/log/insert_iklan_tribunjualbeli_ga4.txt");
+
+	class Main
+	{	
+		private $propertyId;
+		private $populer_data;
+		private $total;
+		private $time_start;
+		private $topIklanTribunJualBeli;
+
+		public function __construct()
+		{
+			$this->propertyId = '325528828';
+			$this->populer_data = array();
+			$this->total = 0;
+			$this->time_start = 0;
+			$this->topIklanTribunJualBeli =  new TopIklanTribunJualBeli();
+		}
+
+		public function InitTopIklanTribunJualBeli__()
+		{
+			$google_analytic = new Google_analytic4(AUTH_CREDENTIAL_STAG);
+
+			$google_analytic->initializeAnalytics($this->propertyId);
+
+			$analytics = (object) $google_analytic->getTopIklanTribunjualbeli();
+
+			if ($analytics->status == false) {
+				$this->topIklanTribunJualBeli->logMessage("STOP processing insert top iklan. Status = false", "ERROR");
+				exit();
+			}
+
+			if ($analytics->status == true && count($analytics->data) > 0) {
+
+				$this->topIklanTribunJualBeli->logMessage("Processing insert top iklan with data count: " . count($analytics->data));
+
+				// $response = $topIklanTribunJualBeli->insertTopIklanTribunJualBeli($analytics->data);
+
+				// $this->populer_data = isset($response['data']) ? $response['data'] : array();
+
+				// $this->total = count($this->populer_data);
+			}
+
+			// $this->topIklanTribunJualBeli->deleteAllIklanPopulerGA();
+
+			$response_data = json_encode(array('total_procced' => $this->total, 'source_data' => count($analytics->data), 'execution_time' => microtime(true) - $this->time_start));
+
+			$this->topIklanTribunJualBeli->logMessage($response_data);
+			
+			$this->InitReadLogMessages();
+			exit();
+		}
+
+		public function InitReadLogMessages() {
+			
+			$read = $this->topIklanTribunJualBeli->readLogMessages(LOGGING);
+			echo $read;
+		}
+	}
+
+	class TopIklanTribunJualBeli
+	{
+		private $opensearch;
+
+		public function __construct()
+		{
+			$this->opensearch = new Opensearch();
+			$this->opensearch->init(OS_DEV_URL, OS_DEV_USERNAME, OS_DEV_PASSWORD, true);
+		}
+
+		public function deleteAllIklanPopulerGA()
+		{
+			$dateToday = date("Y-m-d");
+
+			$dateDaysAgo = strtotime('-31 day', strtotime($dateToday));
+
+			$startDateDaysAgo = date('Y-m-d 00:00:00', $dateDaysAgo);
+
+			$endDateDaysAgo = date('Y-m-d 23:59:59', $dateDaysAgo);
+
+			$condition = array("range" => array("date_publish" => array("gte" => $startDateDaysAgo, "lte" => $endDateDaysAgo)));
+
+			$response = $this->opensearch->deleteMany("web-populer-ga", $condition);
+
+			// file_get_contents("https://www.tribunjualbeli.com/tcache/clear_home");
+
+			if (!$response['status']) {
+				$this->logMessage($response['status'], "ERROR");
+				return false;
+			}
+
+			return true;
+		}
+
+		public function insertTopIklanTribunJualBeli($data)
+		{
+			$total = 0;
+
+			$arrResponse = array();
+
+			$arrResult = array();
+
+			foreach ($data as $idx => $populer) {
+
+				$condition = ["match" => ["id" => $populer['id']]];
+
+				$response = $this->opensearch->findOne('web-post', $condition, $fields);
+
+				if (!$response['status']) {
+					$this->logMessage($response['status'], "ERROR");
+					continue;
+				}
+
+				$dataEs = isset($response['data']) ? $response['data'] : null;
+
+				if (empty($dataEs) && count($dataEs) <= 0) {
+					$this->logMessage($response['status'], "ERROR");
+					continue;
+				}
+
+				$dataInsert = array(
+					'id' => intval($dataEs['_source']['id']),
+					'title' =>  $dataEs['_source']['title'],
+					'price' => $dataEs['_source']['price'],
+					'date_publish' => $dataEs['_source']['date_publish'],
+					'date_created' => $dataEs['_source']['date_created'],
+					'image' => $dataEs['_source']['image'],
+					'category' => intval($dataEs['_source']['category']),
+					'category_alias' => $dataEs['_source']['category_alias'],
+					'category_title' => $dataEs['_source']['category_title'],
+					'subcategory' => intval($dataEs['_source']['subcategory']),
+					'subcategory_alias' => $dataEs['_source']['subcategory_alias'],
+					'subcategory_title' => $dataEs['_source']['subcategory_title'],
+					'location' => intval($dataEs['_source']['location']),
+					'location_alias' => $dataEs['_source']['location_alias'],
+					'subcategory_title' => $dataEs['_source']['subcategory_title'],
+					'sublocation' => intval($dataEs['_source']['sublocation']),
+					'sublocation_alias' => $dataEs['_source']['sublocation_alias'],
+					'sublocation_title' => $dataEs['_source']['sublocation_title'],
+					'type' => intval($dataEs['_source']['type']),
+					'nego' => intval($dataEs['_source']['nego']),
+					'pageviews' => intval($populer['pageviews']),
+					'is_commerce' => intval($dataEs['_source']['is_commerce'])
+				);
+
+				$response = $this->opensearch->insert('web-populer-ga', $dataInsert);
+
+				$res = array();
+
+				$res['id'] = $id;
+				$res['status'] = $response['status'];
+				$res['result'] = $response['result'];
+				$res['pageviews'] = intval($pageviews);
+
+				$arrResponse[] = $res;
+				$total++;
+			}
+
+			$result['status'] = true;
+			$result['total'] = $total;
+			$result['data'] = $arrResult;
+
+			return $result;
+		}
+
+		public function logMessage($message, $status="INFO")
+		{
+			$logFile = LOGGING;
+			$formattedMessage = "[".$status."][" . date("Y-m-d H:i:s") . "] " . $message . PHP_EOL;
+			file_put_contents($logFile, $formattedMessage, FILE_APPEND);
+		}
+
+		public function readLogMessages($logFilePath) {
+
+			if (!file_exists($logFilePath)) {
+				return "Log file not found.";
+			}
+		
+			$logContents = file_get_contents($logFilePath);
+		
+			return $logContents;
+		}
+		
+	}
+
+	$main = new Main();
+	$main->InitTopIklanTribunJualBeli__();
+
+?>

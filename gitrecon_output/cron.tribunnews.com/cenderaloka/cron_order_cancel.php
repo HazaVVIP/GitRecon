@@ -1,0 +1,36 @@
+<?php
+include_once "/var/www/html/web-cron/config/config.php";
+ini_set("display_errors",1);
+error_reporting(E_ALL);
+define('TIMEZONE', 'Asia/Jakarta');
+date_default_timezone_set(TIMEZONE);
+
+$time_start = time();
+$auth = base64_encode(''.API_TJB_AUTH_USERNAME.':'.API_TJB_AUTH_PASSWORD.'');
+$url = "https://cenderaloka.com/cron/cron_order_cancel_today"; //url apis prod
+$opts = array(
+    'http' => array(
+        'method' => "GET",
+        'timeout' => 3,
+        'header' => "Authorization: Basic " . $auth
+    ),
+    'ssl'  => array(
+        'verify_peer'      => false,
+        'verify_peer_name' => false,
+    )
+);
+
+$context = stream_context_create($opts);
+$result = @file_get_contents($url, false, $context);
+// $result_cron = json_decode($result,true);
+if($result === FALSE) 
+{
+    echo "Failed to fetch data from cenderaloka<br />";
+} 
+else
+{
+    echo "Success to fetch api data from cenderaloka<br />";
+}
+
+echo "<br />Execution time in seconds: ". (microtime(true) - $time_start) . "<br />";
+?>

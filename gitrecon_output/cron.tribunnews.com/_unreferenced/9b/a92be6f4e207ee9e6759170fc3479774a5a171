@@ -1,0 +1,50 @@
+<?php
+define('PATH_ROOT', "/var/www/html/cron");
+
+//ES
+define('ES_URL', 'https://search-tribunnews-es-prod-fsbuac6mkv54gt6wfk7b7xta3a.ap-southeast-1.es.amazonaws.com');
+define('ES_DAERAH_URL', 'https://search-daerah-prod-aqiblt647far5hthtvjmbd4hoa.ap-southeast-1.es.amazonaws.com');
+define('ES_TEST_URL', 'https://search-tribunnews-es-mtkqj2e5hs2t3m4px7ikrnx2ry.ap-southeast-1.es.amazonaws.com');
+
+//OS
+define('OS_URL', 'https://leuser.tribunnews.com');
+define('OS_USERNAME', 'tunggulametung');
+define('OS_PASSWORD', 'cTCYgE8gVXgxiS7/BmIQKcL/1NUpCDslUYJsvLnkmj4');
+
+define('OS_DAERAH_URL', 'https://merbabu.tribunnews.com');
+define('OS_DAERAH_USERNAME', 'batikmadrim');
+define('OS_DAERAH_PASSWORD', '4kzYR/MT+onlOmifhA8YLJ2NIOvmYJa6R3RN1ZaGQng');
+
+define('OS_TBO_URL', 'https://vpc-tbo-es-prod-hwilcgdzfymcuqbv4dqzok3zzi.ap-southeast-1.es.amazonaws.com');
+define('OS_TBO_USERNAME', 'tribun-tbo');
+define('OS_TBO_PASSWORD', '!Bhu4St^chHp!W=N?zp@A%dB2Jdp#t$tk^xffKts47F3^Ntcuh');
+
+define('OS_TNEWSWIKI_URL', 'https://patuha.tribunnewswiki.com');
+define('OS_TNEWSWIKI_USERNAME', 'os-wiki');
+define('OS_TNEWSWIKI_PASSWORD', 'mSBj6OaPKAL0iYO4Aw_2Aa-zIuPBGHMpaOVZOTQLAa');
+
+define('OS_ADS_URL', 'https://tidar.tribunnews.com');
+define('OS_ADS_USERNAME', 'ads-tribun');
+define('OS_ADS_PASSWORD', 'U11IMsM4JvqvxBSDvwY7esCkbT/QGghkKw5d3PQhPIQ');
+
+//RDS
+define('RDS_HOST', 'db-tnews-read-3.cttdtdmogujb.ap-southeast-1.rds.amazonaws.com');
+define('RDS_USERNAME', 'tnews-apiuse');
+define('RDS_PASSWORD', 't12bun7n3w5-7ri3unD1g17alonlin3-ap1-user2019');
+
+define('RDS_HOST_MASTER', 'db-tnews.cttdtdmogujb.ap-southeast-1.rds.amazonaws.com');
+define('RDS_USERNAME_MASTER', 'dbusertnews');
+define('RDS_PASSWORD_MASTER', 't2bun7n3w55-712113unD1gtal()nl1n3-(2015)');
+
+define('RDS_DAERAH_HOST', 'db-daerah-read-3.cttdtdmogujb.ap-southeast-1.rds.amazonaws.com');
+define('RDS_DAERAH_USERNAME', 'tdaerah-appuse');
+define('RDS_DAERAH_PASSWORD', 't12bun7d43rah-7ri3unD1g17alonlin3-app7d43rah-u53r2015');
+
+define('RDS_DAERAH_NEW_HOST', 'db-clusterdaerah-read.cttdtdmogujb.ap-southeast-1.rds.amazonaws.com');
+define('RDS_DAERAH_NEW_USERNAME', 'dbclusterdaerah');
+define('RDS_DAERAH_NEW_PASSWORD', 'n&#Kc%=dHP2P8F7q^5fNVqBQJeRG^8*&xS6W6jS6L');
+
+define('RDS_TNEWSWIKI_HOST', 'db-tnewswiki.cttdtdmogujb.ap-southeast-1.rds.amazonaws.com');
+define('RDS_TNEWSWIKI_USERNAME', 'twiki-appuse');
+define('RDS_TNEWSWIKI_PASSWORD', 'dbt12bunWikW1k-7ri3unD1g17alonlin3-app-u53r9102');
+?>

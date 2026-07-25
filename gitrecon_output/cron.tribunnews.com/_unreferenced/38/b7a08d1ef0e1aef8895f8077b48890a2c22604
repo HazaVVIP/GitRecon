@@ -1,0 +1,274 @@
+<?php
+use \MongoDB\BSON\UTCDateTime;
+
+class Mongodb {
+	public $ci;
+    public $server;
+    public $auth = false;
+    public $username;
+    public $password;
+    public $dbname;
+    protected $client;
+    protected $collection;
+	protected $db;
+	
+	public function __construct()
+    {
+        /* $this->ci = &get_instance();
+		$this->ci->config->load("mongodb");
+		$this->server = $this->ci->config->item('mongo_host_users');
+		$this->username = $this->ci->config->item('mongo_user_users');
+		$this->password = $this->ci->config->item('mongo_password_users');
+		$this->dbname = $this->ci->config->item('mongo_db_users');
+		$this->auth = $this->ci->config->item('mongo_auth_users');
+		
+		$str_connetion = "mongodb+srv://".$this->username.":".$this->password."@".$this->server."/?retryWrites=true";
+		
+		try {
+			$this->client = new MongoDB\Client($str_connetion);
+			$this->db = $this->client->{$this->dbname};
+		} catch (Exception $e) {
+			printf($e->getMessage());
+		} */
+    }
+	
+	public function connect($mongo_host, $mongo_user, $mongo_password, $mongo_dbname, $db_auth=false){
+		$this->server = $mongo_host;
+		$this->username = $mongo_user;
+		$this->password = $mongo_password;
+		$this->dbname = $mongo_dbname;
+		$this->auth = $db_auth;
+		
+		if($this->auth === false){
+			$str_connetion = "mongodb://localhost:27017";
+		} else {	
+			$str_connetion = "mongodb+srv://".$this->username.":".$this->password."@".$this->server."/?retryWrites=true";
+		}
+		
+		try {
+			$this->client = new MongoDB\Client($str_connetion);
+
+			$this->db = $this->client->{$mongo_dbname};
+		} catch (Exception $e) {
+			return $e->getMessage();
+		}
+	}
+	
+	public function connect_replika($mongo_host, $mongo_user, $mongo_password, $mongo_dbname, $db_auth=false, $options=array()){
+		$this->server = $mongo_host;
+		$this->username = $mongo_user;
+		$this->password = $mongo_password;
+		$this->dbname = $mongo_dbname;
+		$this->auth = $db_auth;
+		
+		try {
+			if($this->auth === false){
+				$this->client = new MongoDB\Client('mongodb+srv://'.$this->server.'');
+			} else {	
+				$arrOptions = array(
+									'username' 			=> $this->username,
+									'password' 			=> $this->password,
+									'db'       			=> $this->dbname,
+									'port' 				=> 27017
+								);
+				if(is_countable($options) && count($options)){
+					$arrConnection = array_merge_recursive($arrOptions, $options);
+				} else {
+					$arrConnection = $arrOptions;
+				}
+				
+				echo $this->server."<br>";
+				echo "<pre>";
+				print_r($arrConnection);
+				echo "</pre>";
+
+				$this->client = new MongoDB\Client('mongodb+srv://'.$this->server.'', $arrConnection);
+				
+				echo "<pre>";
+				print_r($this->client);
+				echo "</pre>";
+			}
+
+			$this->db = $this->client->{$mongo_dbname};
+		} catch (Exception $e) {
+			return $e->getMessage();
+		}
+	}
+	
+	public function findOne($collection, $condition=array(), $fields=array()) {
+		try {
+			$options = array('projection'=>array());
+			foreach($fields AS $f) {
+				$options['projection'][$f] = 1;
+			}
+			return $this->db->$collection->findOne($condition, $options);
+		} catch (Exception $e) {
+			die($e->getMessage());
+		}	
+	}
+	
+	public function total($collection, $condition=array()) {
+		try {
+			return $this->db->$collection->count($condition);
+		} catch (Exception $e) {
+			die($e->getMessage());
+		}	
+	}
+	
+	public function find($collection, $condition=array(), $projections=array(), $sort=array(), $skip=-1, $limit=-1) {
+		try {
+			$options = array();
+			if( !empty($projections ) ) {
+				foreach($projections AS $f) {
+					$options['projection'][$f] = 1;
+				}
+			}
+			if( !empty($sort) ) {
+				$options['sort'] = $sort;
+			}
+			if( $skip >= 0) {
+				$options['skip'] = $skip;
+			}
+			if( $limit >= 0 ) {
+				$options['limit'] = $limit;
+			}
+			return $this->db->$collection->find($condition, $options)->toArray();
+		} catch (Exception $e) {
+			die($e->getMessage());
+		}	
+	}
+	
+	public function update($collection, $condition=array(), $newVal, $upsert=FALSE) {
+		try {
+			$options = array();
+			if( $upsert ) {
+				$options['upsert'] = TRUE;
+			}
+			
+			return $this->db->$collection->updateOne($condition, $newVal, $options);
+		} catch (Exception $e) {
+			die($e->getMessage());
+		}
+	}
+	
+	public function updateMany($collection, $condition=array(), $newVal, $upsert=FALSE) {
+		try {
+			$options = array();
+			if( $upsert ) {
+				$options['upsert'] = TRUE;
+			}
+			$this->db->$collection->updateMany($condition, $newVal, $options);
+		} catch (Exception $e) {
+			die($e->getMessage());
+		}	
+	}
+	
+	public function insert($collection, $document) {
+		try {
+			return $this->db->$collection->insertOne($document);
+		} catch (Exception $e) {
+			die($e->getMessage());
+		}	
+	}
+	
+	public function insertMany($collection, $documents) {
+		try {
+			return $this->db->$collection->insertMany($documents);
+		} catch (Exception $e) {
+			die($e->getMessage());
+		}	
+	}
+
+	public function findAndUpdate($collection, $query, $newVal, $upsert=false) {
+		try {
+			$options = array('upsert' => $upsert, 
+				'returnDocument' => MongoDB\Operation\FindOneAndUpdate::RETURN_DOCUMENT_AFTER);
+			return $this->db->$collection->findOneAndUpdate($query, $newVal, $options);
+		} catch (Exception $e) {
+			die($e->getMessage());
+		}	
+	}
+	
+	public function remove($collection, $condition) {
+		try {
+			if( empty($collection) || empty($condition) ) {
+				return FALSE;
+			}
+			return $this->db->$collection->deleteOne($condition);
+		} catch (Exception $e) {
+			die($e->getMessage());
+		}
+	}
+
+	public function renameField(&$obj, $oldField, $newField) {
+		if( isset($obj->$oldField) ) {
+			$obj->$newField = $obj->$oldField;
+			unset($obj->{$oldField});
+		}
+	}
+	
+	public function deleteMany($collection, $condition) {	
+		try {
+			$result = $this->db->$collection->deleteMany($condition);		
+			return $result;
+		} catch (Exception $e) {
+			die($e->getMessage());
+		}
+	}
+	
+	public function aggregate($collection, $query, $options) {		
+		try {
+			$ops = array();
+			if( !empty($query ) ) {
+				$query = array('$match'=>$query);
+				array_push($ops, $query);
+			}
+			
+			if( isset($options['unwind'])) {
+				array_push($ops, array('$unwind'=>$options['unwind']));
+			}
+			
+			if (isset($options['project'])) {
+				$project = array('$project'=>$options['project']);
+				array_push($ops, $project);
+			}
+			
+			if (isset($options['group'])) {
+				$group = array('$group'=>$options['group']);
+				array_push($ops, $group);
+			}
+			
+			if( isset($options['groups']) ) {
+				foreach($options['groups'] AS $group) {
+					array_push($ops, array('$group' => $group));
+				}
+			}				
+			
+			if (isset($options['sort'])) {
+				$sort = array('$sort'=>$options['sort']);
+				array_push($ops, $sort);
+			}
+			
+			if (isset($options['skip'])) {
+				if ($options['skip']>0) {
+					$skip = array('$skip'=>$options['skip']);
+					array_push($ops, $skip);
+				}
+			}
+			
+			if (isset($options['limit'])) {
+				if ($options['limit']>0) {
+					$limit = array('$limit'=>$options['limit']);
+					array_push($ops, $limit);
+				}
+			}
+			
+			$result = $this->db->$collection->aggregate($ops)->toArray(); 
+
+			return $result;
+		} catch (Exception $e) {
+			die($e->getMessage());
+		}	
+	}
+}	
+?>

@@ -1,0 +1,199 @@
+<?php
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+
+$time_start = time();
+
+define("DOC_ROOT","/var/www/html/web-cron/");
+
+include DOC_ROOT."config/config.php";
+include DOC_ROOT."config/other_config.php";
+include DOC_ROOT."lib/Opensearch.php";
+
+$site = isset($_GET['site'])?$_GET['site']:"aceh";
+$tag = isset($_GET['tag'])?$_GET['tag']:"";
+
+if(!empty($site) && !empty($tag)){
+	$arrTag = explode(",",$tag);
+	$year_now = date("Y");
+	
+	if(count($arrTag) > 0){
+		$opensearch = new Opensearch();
+		$opensearch->init(OS_URL,OS_USERNAME,OS_PASSWORD,true);
+		
+		$opensearchDaerah = new Opensearch();
+		$opensearchDaerah->init(OS_DAERAH_URL,OS_DAERAH_USERNAME,OS_DAERAH_PASSWORD,true);
+		
+		$opensearchDaerahNew = new Opensearch();
+		$opensearchDaerahNew->init(OS_DAERAH_NEW_URL,OS_DAERAH_NEW_USERNAME,OS_DAERAH_NEW_PASSWORD,true);
+		
+		$opensearchDaerahCluster = new Opensearch();
+		$opensearchDaerahCluster->init(OS_DAERAH_CLUSTER_URL,OS_DAERAH_CLUSTER_USERNAME,OS_DAERAH_CLUSTER_PASSWORD,true);
+		
+		$opensearchCommerce = new Opensearch();
+		$opensearchCommerce->init(OS_TBO_URL,OS_TBO_USERNAME,OS_TBO_PASSWORD,true);
+		
+		$opensearchTBO = new Opensearch();
+		$opensearchTBO->init(OS_TBO_NEW_URL,OS_TBO_NEW_USERNAME,OS_TBO_NEW_PASSWORD,true);
+		
+		$arrShould = array();
+		foreach($arrTag as $tag_title){
+			$tag_alias = url_title($tag_title);
+			$arrShoudTag = [
+							 "match_phrase" => [
+								"tagging.alias" => $tag_alias
+							 ]
+						  ];
+			array_push($arrShould,$arrShoudTag);
+		}
+		
+		if(count($arrShould) > 0){
+			$index_name = "tribunnews-articles";
+			if($site == "video"){
+				$index_name = "tribunnews-video";
+			} else if(in_array($site, LIST_COMMERCE_CLUSTER)){
+				$index_name = $site.".articles";
+			} else if(in_array($site, LIST_TBO_CLUSTER)){
+				$index_name = $site.".articles";
+			} else if(in_array($site, LIST_DAERAH_NEW)){
+				$index_name = $site.".tribundaerah-articles";
+			} else if(in_array($site, LIST_DAERAH_CLUSTER)){
+				$index_name = $site.".tribundaerah-articles";
+			} else if(in_array($site, LIST_DAERAH_MERBABU)){
+				$index_name = $site.".tribundaerah-articles";
+			} 
+			
+			if($site == "video"){
+				$aggs = array(
+								"date_hist_agg" => array(
+										"date_histogram" => array(
+													"field" => "upload_date",
+													"interval" => "month",
+													"format" => "yyyy-MM",
+													"order" => array("_term"=> "desc")
+												   )
+									)
+								);
+				
+				
+				$query =  array(
+								"bool" => array(
+									"must" => 
+										array(
+											array(
+												"nested" => array(
+													"path" => "tagging",
+													"query" => array(
+														"bool" => array(
+															"should" => $arrShould
+															)
+													)
+												)
+											),
+											array(
+												"range" => array(
+													"written_date" => array (
+													  'gte' => ''.$year_now.'-01-01 00:00:00',
+													  'lte' => ''.$year_now.'-12-31 23:59:59',
+													)
+												)
+											)
+										)
+								)
+							  );
+			} else {	
+				$aggs = array(
+								"date_hist_agg" => array(
+										"date_histogram" => array(
+													"field" => "written_date",
+													"interval" => "month",
+													"format" => "yyyy-MM",
+													"order" => array("_term"=> "desc")
+												   )
+									)
+								);
+				
+				
+				$query =  array(
+								"bool" => array(
+									"must" => 
+										array(
+											array(
+												"nested" => array(
+													"path" => "tagging",
+													"query" => array(
+														"bool" => array(
+															"should" => $arrShould
+															)
+													)
+												)
+											),
+											array(
+												"range" => array(
+													"written_date" => array (
+													  'gte' => ''.$year_now.'-01-01 00:00:00',
+													  'lte' => ''.$year_now.'-12-31 23:59:59',
+													)
+												)
+											)
+										)
+								)
+							  );
+			}
+						  
+			if($site == "video"){
+				$response = $opensearch->aggregations($index_name,$aggs,$query);
+			} else if(in_array($site, LIST_COMMERCE_CLUSTER)){
+				$response = $opensearchCommerce->aggregations($index_name,$aggs,$query);
+			} else if(in_array($site, LIST_TBO_CLUSTER)){
+				$response = $opensearchTBO->aggregations($index_name,$aggs,$query);
+			} else if(in_array($site, LIST_DAERAH_NEW)){
+				$response = $opensearchDaerahNew->aggregations($index_name,$aggs,$query);
+			} else if(in_array($site, LIST_DAERAH_CLUSTER)){
+				$response = $opensearchDaerahCluster->aggregations($index_name,$aggs,$query);
+			} else if(in_array($site, LIST_DAERAH_MERBABU)){
+				$response = $opensearchDaerah->aggregations($index_name,$aggs,$query);
+			} else {
+				$response = $opensearch->aggregations($index_name,$aggs,$query);
+			}
+			
+			if($response['status']){
+				$rows = isset($response['data']['date_hist_agg']['buckets'])?$response['data']['date_hist_agg']['buckets']:array();
+				
+				echo "Site = ".$site."<br>";
+				echo "Tag = ".$tag."<br>";
+				echo $index_name."<br>";
+				
+				echo "<pre>";
+				print_r($query);
+				print_r($aggs);
+				print_r($response);
+				echo "</pre>";
+			
+				if(count($rows) > 0){
+					echo "<hr>";
+					
+					foreach($rows as $row){
+						echo "<a href='report_tagging_article_request.php?site=".$site."&tag=".$tag."&dt_month=".$row['key_as_string']."'>".$row['key_as_string']."</a> = ".$row['doc_count']."<br>";
+					}
+				}
+			}
+		}	
+	}
+}	
+
+
+function url_title($str) {
+	 $title = strtolower(trim($str));
+	 $replacements = ['@'=> "at", '#' => "hash", '$' => "dollar", '%' => "percentage", '&' => "and", '.' => "dot", 
+				'+' => "plus", '-' => "minus", '*' => "multiply", '/' => "devide", '=' => "equal to",
+				'<' => "less than", '<=' => "less than or equal to", '>' => "greater than", '<=' => "greater than or equal to",
+		];
+
+	 $title = strtr($title, $replacements);
+	 return $urlKey = preg_replace('#[^0-9a-z]+#i', '-', $title);
+}
+	
+
+echo '<br>Execution time in seconds: ' . (microtime(true) - $time_start) . "<br>";
+?>

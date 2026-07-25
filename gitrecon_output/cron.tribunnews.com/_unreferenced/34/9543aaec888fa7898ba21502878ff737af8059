@@ -1,0 +1,197 @@
+<?php
+ini_set("memory_limit", "-1");
+set_time_limit(0);
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+
+$time_start = time();
+
+//define("DOC_ROOT","/var/www/html/web-cron/");
+define("DOC_ROOT","C:\\wamp64\\www\\cron\\");
+
+include DOC_ROOT."config/config.php";
+include DOC_ROOT."lib/Opensearch.php";
+
+/* 
+Running in command
+- sudo -u www-data /usr/bin/php7.4 /var/www/html/web-cron/tribunnews/video/video_live_nbs.php > /home/cron/log_cron/video_live_nbs.txt
+*/
+
+
+$limit = isset($_SERVER["argv"][1])?$_SERVER["argv"][1]:10;
+if(isset($_GET['limit'])){
+	$limit = $_GET['limit'];
+}	
+if(empty($limit)) $limit = 10;
+
+$totalInsert = 0;
+$totalUpdate = 0;
+$index_name = "video_live_nbs";
+
+
+//OS
+$opensearch = new Opensearch();
+$opensearch->init(OS_DEV_URL,OS_DEV_USERNAME,OS_DEV_PASSWORD,true);
+
+$apiUrl = "https://api.tribunx.com/v1/livestreams?limit=".$limit."&sortBy=latest";
+$auth = base64_encode('usr_bVjxM9w9a9:jNh4kx)gqm^EjKbq3NtwF');
+$opts = array(
+	'http'=>array(
+		'method'=>"GET",
+		'timeout' => 5,
+		'header'=>"Accept-language: en\r\n" .
+				  "Authorization: Basic ".$auth."\r\n"
+	),
+	'ssl'  => array (
+		'verify_peer'      => false,
+		'verify_peer_name' => false,
+	  )
+	);
+$context = stream_context_create($opts);
+$result = @file_get_contents($apiUrl, false, $context);
+
+if($result !== false){
+	$dataVideo = json_decode($result,TRUE);
+	$statusApi = isset($dataVideo['success'])?$dataVideo['success']:0;
+
+	if($statusApi){
+		$items = isset($dataVideo['data']['items'])?$dataVideo['data']['items']:array();
+
+		if(count($items) > 0){
+			//$opensearch->deleteMany($index_name);
+			
+			foreach($items as $item){
+				$id = $item['xid'];
+				$video_name = $item['name'];
+				$video_slug = $item['slug'];
+				$video_description = $item['description'];
+				$category_id = $item['category']['xid'];
+				$category_name = $item['category']['name'];
+				$editor_id = isset($item['editor']['xid'])?$item['editor']['xid']:"";
+				$editor_name = isset($item['editor']['name'])?$item['editor']['name']:"";
+				$host_id = isset($item['host']['xid'])?$item['host']['xid']:"";
+				$host_name = isset($item['host']['name'])?$item['host']['name']:"";
+				$cover_url = $item['cover']['url'];
+				$video_hls_url = $item['playback']['hls']['url'];
+				$video_total_view = $item['totalViews'];
+				$video_status = $item['status']['id']; // 2 is public
+				$video_createdat = isset($item['createdAt'])?date('Y-m-d H:i:s',$item['createdAt']):null;
+				$video_publishedat = isset($item['publishedAt'])?date('Y-m-d H:i:s',$item['publishedAt']):null;
+				$video_updatedat = isset($item['updatedAt'])?date('Y-m-d H:i:s',$item['updatedAt']):null;
+				$tags = $item['tags'];
+				
+				$condition = array("match_phrase" => array("id" => $id));
+				$fields = array("id");
+				$response = $opensearch->findOne($index_name,$condition,$fields);
+				
+				if($response['status']){
+					$record = array();
+					$record['id'] = $id;
+					$record['video_name'] = $video_name;
+					$record['video_slug'] = $video_slug;
+					$record['video_status'] = intval($video_status);
+					$record['video_createdat'] = $video_createdat;
+					$record['video_publishedat'] = $video_publishedat;
+					$record['video_updatedat'] = $video_updatedat;
+					$record['category_id'] = $category_id;
+					$record['category_name'] = $category_name;
+					$record['category_slug'] = url_title($category_name,"-",TRUE);
+					$record['editor_id'] = $editor_id;
+					$record['editor_name'] = $editor_name;
+					$record['host_id'] = $host_id;
+					$record['host_name'] = $host_name;
+					$record['cover_url'] = $cover_url;
+					$record['video_hls_url'] = $video_hls_url;
+					$record['video_total_view'] = intval($video_total_view);
+					$record['tags'] = $tags;
+					$record['video_description'] = $video_description;
+					
+					$responseUpdate = $opensearch->updateOne($index_name, $id, $record);
+					
+					/* echo "<pre>";
+					print_r($responseUpdate);
+					print_r($record);
+					echo "</pre>"; */
+					
+					if($responseUpdate['status']){
+						$totalUpdate++;
+					}
+				} else {
+					$record = array();
+					$record['id'] = $id;
+					$record['video_name'] = $video_name;
+					$record['video_slug'] = $video_slug;
+					$record['video_status'] = intval($video_status);
+					$record['video_createdat'] = $video_createdat;
+					$record['video_publishedat'] = $video_publishedat;
+					$record['video_updatedat'] = $video_updatedat;
+					$record['category_id'] = $category_id;
+					$record['category_name'] = $category_name;
+					$record['category_slug'] = url_title($category_name,"-",TRUE);
+					$record['editor_id'] = $editor_id;
+					$record['editor_name'] = $editor_name;
+					$record['host_id'] = $host_id;
+					$record['host_name'] = $host_name;
+					$record['cover_url'] = $cover_url;
+					$record['video_hls_url'] = $video_hls_url;
+					$record['video_total_view'] = intval($video_total_view);
+					$record['tags'] = $tags;
+					$record['video_description'] = $video_description;
+					
+					$responseInsert = $opensearch->insert($index_name, $record);
+					
+					/* echo "<pre>";
+					print_r($responseInsert);
+					print_r($record);
+					echo "</pre>"; */
+					
+					if($responseInsert['status']){
+						$totalInsert++;
+					}
+				}	
+			}
+		}
+	}
+}
+
+unset($opensearch);
+
+echo 'Total insert data: '.$totalInsert. "<br>\n";
+echo 'Total update data: '.$totalUpdate. "<br>\n";
+echo '<br>\nExecution time in seconds: ' . (microtime(true) - $time_start) . "<br>\n";
+
+
+function url_title($str, $separator = '-', $lowercase = FALSE)
+{
+	if ($separator === 'dash')
+	{
+		$separator = '-';
+	}
+	elseif ($separator === 'underscore')
+	{
+		$separator = '_';
+	}
+
+	$q_separator = preg_quote($separator, '#');
+
+	$trans = array(
+		'&.+?;'			=> '',
+		'[^\w\d _-]'		=> '',
+		'\s+'			=> $separator,
+		'('.$q_separator.')+'	=> $separator
+	);
+
+	$str = strip_tags($str);
+	foreach ($trans as $key => $val)
+	{
+		$str = preg_replace('#'.$key.'#i'.(TRUE ? 'u' : ''), $val, $str);
+	}
+
+	if ($lowercase === TRUE)
+	{
+		$str = strtolower($str);
+	}
+
+	return trim(trim($str, $separator));
+}
+?>

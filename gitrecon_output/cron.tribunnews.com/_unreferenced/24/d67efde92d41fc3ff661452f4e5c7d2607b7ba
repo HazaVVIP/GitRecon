@@ -1,0 +1,48 @@
+<?php
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+
+//define("DOC_ROOT","/var/www/html/web-cron/");
+define("DOC_ROOT","C:\\wamp64\\www\\cron\\");
+
+include DOC_ROOT."config/config.php";
+include DOC_ROOT."lib/Opensearch.php";
+
+$opensearch = new Opensearch();
+//$opensearch->init(OS_DEV_URL, OS_DEV_USERNAME, OS_DEV_PASSWORD, true);
+$opensearch->init(OS_TBO_URL,OS_TBO_USERNAME,OS_TBO_PASSWORD,true);
+
+$index = 'video_nbs_popular';
+$tables = array(
+		'id' => "keyword",
+		'video_name' => "text",
+		'video_slug' => "keyword",
+		'video_description' => "text_keyword",
+		'video_orientation' => "integer",
+		'category_id' => "text",
+		'category_name' => "text",
+		"video_total_view" => "integer",
+		"tags" => "nested_tagging_video_nbs",
+		"editor_id" => "text",
+		"editor_name" => "text",
+		"host_id" => "text",
+		"host_name" => "text",
+		"cover_url" => "text",
+		"video_url" => "text",
+		"video_hls_url" => "text",
+		"video_dash_url" => "text",
+		"video_createdat" => "date",
+		"video_publishedat" => "date_null",
+		"video_updatedat" => "date_null",
+		"video_status" => "integer",
+        "sort_by" => "keyword"
+	);
+$response = $opensearch->create($index,$tables);
+
+echo "<pre>";
+print_r($tables);
+print_r($response);
+echo "</pre>";
+
+unset($opensearch);
+?>

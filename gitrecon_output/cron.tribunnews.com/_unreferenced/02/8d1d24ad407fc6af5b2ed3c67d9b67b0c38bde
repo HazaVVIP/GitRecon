@@ -1,0 +1,103 @@
+<?php
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+
+define("DOC_ROOT","/var/www/html/web-cron/");
+
+$time_start = time();
+
+include DOC_ROOT."config/config.php";
+include DOC_ROOT."config/other_config.php";
+include DOC_ROOT."lib/Opensearch.php";
+
+$site = isset($_GET['site'])?$_GET['site']:"tribunnews";
+$dateStart = isset($_GET['start'])?$_GET['start']:"";
+$dateEnd = isset($_GET['end'])?$_GET['end']:"";
+
+if(empty($dateStart)){	
+	$dateStart = date("Y-m-d", strtotime('-1 days'));
+}
+
+if(empty($dateEnd)){	
+	$dateEnd = date("Y-m-d", strtotime('-1 days'));
+}
+
+echo $site."<br>";
+echo $dateStart." - ".$dateEnd."<br>";
+
+
+//RDS
+$daerah_rds = $site;
+
+if($site == "tribunnews"){
+	$con = mysqli_connect(RDS_HOST,RDS_USERNAME,RDS_PASSWORD,"tribunnews");
+} else if(in_array($site, LIST_COMMERCE_CLUSTER)){
+	$con = mysqli_connect(RDS_TBO_HOST,RDS_TBO_USERNAME,RDS_TBO_PASSWORD,$site);
+} else if(in_array($site, LIST_TBO_CLUSTER)){
+	$con = mysqli_connect(RDS_TBO_HOST,RDS_TBO_USERNAME,RDS_TBO_PASSWORD,$site);
+} else if(in_array($site, LIST_DAERAH_NEW)){
+	$daerah_rds = str_replace("aceh","aceh2",$daerah_rds);
+	$daerah_rds = str_replace("jambi","jambi2",$daerah_rds);
+	$con = mysqli_connect(RDS_DAERAH_HOST,RDS_DAERAH_USERNAME,RDS_DAERAH_PASSWORD,$daerah_rds);
+} else if(in_array($site, LIST_DAERAH_CLUSTER)){
+	$con = mysqli_connect(RDS_DAERAH_NEW_HOST,RDS_DAERAH_NEW_USERNAME,RDS_DAERAH_NEW_PASSWORD,$daerah_rds);
+} else { 
+	$daerah_rds = str_replace("aceh","aceh2",$daerah_rds);
+	$daerah_rds = str_replace("jambi","jambi2",$daerah_rds);
+	$con = mysqli_connect(RDS_DAERAH_HOST,RDS_DAERAH_USERNAME,RDS_DAERAH_PASSWORD,$daerah_rds);
+}
+
+if (mysqli_connect_errno()) {
+	echo "Failed to connect to MySQL: " . mysqli_connect_error();
+	exit();
+}
+
+
+$totalRds = 0;
+$arrIDRds = array();
+$sql = "SELECT count(a.id) as total
+		FROM bank_photo a
+	    WHERE a.upload_date BETWEEN '".$dateStart." 00:00:00' AND '".$dateEnd." 23:59:59'
+	    ORDER BY a.id DESC";
+$result = mysqli_query($con, $sql);
+$rsTotalRds = mysqli_fetch_assoc($result);
+$totalRds = isset($rsTotalRds['total'])?$rsTotalRds['total']:0;
+
+echo "Total RDS : ".$totalRds."<br>";
+
+//OS
+$where = array();
+array_push($where,array("range" => array("date_upload" => array("gte" => ''.$dateStart.' 00:00:00', "lte" => ''.$dateEnd.' 23:59:59'))));
+array_push($where,array("match_phrase" => array("domain" => $site)));
+array_push($where,array("match_phrase" => array("typ" => 'photo')));	
+$condition = array();
+if(count($where) > 0){
+	$condition = array("bool" =>
+					array("must" =>
+						$where
+					)
+				);
+}				
+$fields = array('id');
+$sort = array("id" => "desc");
+$start = 0;
+$limit = 1000;
+
+$opensearchAllNetwork = new Opensearch();
+$opensearchAllNetwork->init(OS_ALLNETWOORK_URL,OS_ALLNETWOORK_USERNAME,OS_ALLNETWOORK_PASSWORD,true);
+$response_os = $opensearchAllNetwork->count_total('allnetwork-images',$condition,$fields,$sort,$start,$limit);
+$totalSyncOsAllNetwork = 0;
+if($response_os['status']){
+	$totalSyncOsAllNetwork = isset($response_os['total'])?$response_os['total']:0;
+}
+
+
+echo "Total OS All Network: ".$totalSyncOsAllNetwork."<br>";
+
+mysqli_free_result($result);
+mysqli_close($con);
+unset($opensearchAllNetwork);
+
+
+echo '<br>Execution time in seconds: ' . (microtime(true) - $time_start) . "<br>";
+?>

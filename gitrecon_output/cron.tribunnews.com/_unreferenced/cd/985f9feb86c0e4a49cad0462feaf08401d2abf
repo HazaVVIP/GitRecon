@@ -1,0 +1,58 @@
+<?php
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+
+include "config/config.php";
+include "lib/Opensearch.php";
+
+$opensearch = new Opensearch();
+$opensearch->init(OS_URL,OS_USERNAME,OS_PASSWORD,true);
+
+$index = 'tribunnews-articles-2021';
+$tables = array(
+		'id' => "integer",
+		'title' => "text",
+		'alias' => "text_keyword",
+		'alias_old' => "text_keyword",
+		"subtitle" => "text", 
+		"subtitle_alias" => "text_keyword",
+		"keyword" => "text",
+		"foto_type" => "text_keyword",
+		"foto_name" => "text_keyword",
+		"foto_caption" => "text_keyword",
+		"foto_source" => "text_keyword",
+		"introtext" => "text_keyword",
+		"fulltexts" => "text",
+		"section_id" => "integer",
+		"category_id" => "integer",
+		"publish" => "integer",
+		"frontpage_section" => "integer",
+		"frontpage_category" => "integer",
+		"written_by" => "integer",
+		"editor_by" => "integer",
+		"editor_video_by" => "text_keyword",
+		"written_date" => "date",
+		"publish_date" => "date",
+		"source" => "integer",
+		"livereport" => "integer",
+		"youtube" => "text_keyword",
+		"related_id" => "text_keyword",
+		"editor" => "text_keyword",
+		"editor_fullname" => "text_keyword",
+		"editor_id" => "integer",
+		"hit" => "integer",
+		"section" => "text_keyword",
+		"writter" => "integer",
+		"writter_fullname" => "text_keyword",
+		"writter_id" => "integer",
+		"index_year" => "date_only_year"
+	);
+$response = $opensearch->create($index,$tables);
+
+echo "<pre>";
+print_r($tables);
+print_r($response);
+echo "</pre>";
+
+unset($opensearch);
+?>

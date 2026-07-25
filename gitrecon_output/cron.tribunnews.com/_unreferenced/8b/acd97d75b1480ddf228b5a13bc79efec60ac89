@@ -1,0 +1,248 @@
+<?php
+date_default_timezone_set('Asia/Jakarta');
+set_time_limit(0);
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+
+define("DOC_ROOT","/var/www/html/web-cron/");
+
+include DOC_ROOT ."config/config.php";
+include DOC_ROOT ."lib/Utils.php";
+include DOC_ROOT."lib/Opensearch.php";
+
+$index = "quran";
+
+$opensearchDev = new Opensearch();
+$opensearchDev->init(OS_DEV_URL,OS_DEV_USERNAME,OS_DEV_PASSWORD,true);
+
+$opensearchTBO = new Opensearch();
+$opensearchTBO->init(OS_TBO_URL,OS_TBO_USERNAME,OS_TBO_PASSWORD,true);
+
+$aggs = array(
+    'list_surah' => array(
+        'terms' => array(
+            'field' => 'chapter_id',
+            'size'  => 114,
+            'order' => array('_key' => 'asc')
+        ),
+        'aggs' => array(
+            'surah_detail' => array(
+                'top_hits' => array(
+                    'size' => 1,
+                    '_source' => array(
+                        'includes' => array(
+                            'surah_name',
+                            'chapter_id',
+                            'chapter_name_latin_id',
+							'chapter_translation_en',
+                            'chapter_translation_id',
+                            'chapter_type_id',
+                            'chapter_type_en',
+							'chapter_type_ar',
+                            'chapter_total_verses',
+							'chapter_alias'
+                        )
+                    ),
+                    'sort' => array(
+                        array('ayah_id' => array('order' => 'asc'))
+                    )
+                )
+            )
+        )
+    )
+);
+
+$response = $opensearchTBO->aggregations('quran', $aggs);
+
+$arrAlQuran = array();
+if (isset($response['status']) && $response['status'] == 1) {
+	$totalAyah = isset($response['total_row'])?intval($response['total_row']):0;
+	$dataSurah = isset($response['data']['list_surah']['buckets'])?$response['data']['list_surah']['buckets']:array();
+	
+	if($totalAyah> 0){
+		foreach($dataSurah as $arrSurah){
+			$arrSurahDetail = isset($arrSurah['surah_detail']['hits']['hits'][0])?$arrSurah['surah_detail']['hits']['hits'][0]:array();
+			
+			if(count($arrSurahDetail) > 0){
+				$row = $arrSurahDetail['_source'];
+				
+				$chapter_id = intval($row['chapter_id']);
+				$chapter_name_ar = $row['surah_name'];
+				$chapter_name_id = $row['chapter_name_latin_id'];
+				$chapter_name_en = $row['chapter_translation_en'];
+				$chapter_translation_id = $row['chapter_translation_id'];
+				$chapter_translation_en = $row['chapter_translation_en'];
+				$chapter_total_ayah = intval($row['chapter_total_verses']);
+				$chapter_type_ar = $row['chapter_type_ar'];
+				$chapter_type_id = $row['chapter_type_id'];
+				$chapter_type_en = $row['chapter_type_en'];
+				$chapter_alias = $row['chapter_alias'];
+				
+				$arrRow = array();
+				$arrRow['chapter_id'] = $chapter_id;
+				$arrRow['chapter_name_ar'] = $chapter_name_ar;
+				$arrRow['chapter_name_id'] = $chapter_name_id;
+				$arrRow['chapter_name_en'] = $chapter_name_en;
+				$arrRow['chapter_translation_id'] = $chapter_translation_id;
+				$arrRow['chapter_translation_en'] = $chapter_translation_en;
+				$arrRow['chapter_total_ayah'] = $chapter_total_ayah;
+				$arrRow['chapter_type_ar'] = $chapter_type_ar;
+				$arrRow['chapter_type_id'] = $chapter_type_id;
+				$arrRow['chapter_type_en'] = $chapter_type_en;
+				$arrRow['chapter_alias'] = $chapter_alias;
+				
+				array_push($arrAlQuran,$arrRow);
+			}
+		}
+	}
+} else {
+	$errorMessage = isset($response['error_reason']) ? $response['error_reason'] : 'Data surah tidak ditemukan';
+}
+
+unset($opensearchDev);
+unset($opensearchTBO);
+?>
+
+<?php if(count($arrAlQuran) > 0){ ?>
+	<html lang="id">
+	<head>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, initial-scale=1">
+		<title>Al-Qur'an Digital</title>
+		<style>
+			* {
+				box-sizing: border-box;
+			}
+
+			body {
+				margin: 0;
+				padding: 20px;
+				font-family: Arial, sans-serif;
+				background: #f5f7fb;
+				color: #222;
+			}
+
+			.container {
+				max-width: 1000px;
+				margin: 0 auto;
+			}
+
+			.title {
+				font-size: 28px;
+				font-weight: bold;
+				margin-bottom: 20px;
+				text-align: center;
+			}
+			
+			.surah-grid {
+				display: grid;
+				grid-template-columns: repeat(3, 1fr);
+				gap: 10px;
+			}
+
+			.surah-card {
+				display: block;
+				text-decoration: none;
+				color: inherit;
+				background: #fff;
+				border-radius: 8px;
+				padding: 10px 12px;
+				border: 1px solid #e5e7eb;
+				transition: 0.15s;
+			}
+
+			.surah-card:hover {
+				background: #f9fafb;
+			}
+
+			.surah-header {
+				display: flex;
+				align-items: center;
+				gap: 8px;
+			}
+
+			.surah-number {
+				width: 28px;
+				height: 28px;
+				border-radius: 6px;
+				background: #2563eb;
+				color: #fff;
+				font-size: 13px;
+				font-weight: bold;
+				display: flex;
+				align-items: center;
+				justify-content: center;
+			}
+
+			.surah-name-latin {
+				font-size: 15px;
+				font-weight: 600;
+			}
+
+			.surah-meaning {
+				font-size: 12px;
+				color: #6b7280;
+			}
+
+			.surah-name-arab {
+				font-size: 18px;
+				text-align: right;
+				margin-top: 6px;
+				margin-bottom: 6px;
+				direction: rtl;
+			}
+
+			.surah-meta {
+				display: flex;
+				justify-content: space-between;
+				font-size: 11px;
+				color: #6b7280;
+			}
+
+			/* MOBILE */
+			@media (max-width: 768px) {
+				.surah-grid {
+					grid-template-columns: 1fr;
+				}
+			}
+				</style>
+	</head>
+	<body>
+		<div class="container">
+			<div class="title">Al-Qur'an Digital</div>
+			<div class="surah-grid">
+				<?php foreach ($arrAlQuran as $surah): ?>
+					<a class="surah-card" href="quran_surah.php?surah_id=<?php echo $surah['chapter_alias']; ?>">
+
+						<div class="surah-header">
+							<div class="surah-number">
+								<?php echo $surah['chapter_id']; ?>
+							</div>
+
+							<div>
+								<div class="surah-name-latin">
+									<?php echo htmlspecialchars($surah['chapter_name_id']); ?>
+								</div>
+
+								<div class="surah-meaning">
+									<?php echo htmlspecialchars($surah['chapter_translation_id']); ?>
+								</div>
+							</div>
+						</div>
+
+						<div class="surah-name-arab">
+							<?php echo htmlspecialchars($surah['chapter_name_ar']); ?>
+						</div>
+
+						<div class="surah-meta">
+							<span><?php echo $surah['chapter_type_id']; ?></span>
+							<span><?php echo $surah['chapter_total_ayah']; ?> ayat</span>
+						</div>
+
+					</a>
+				<?php endforeach; ?>
+			</div>
+		</div>
+	</body>
+	</html>
+<?php } ?>

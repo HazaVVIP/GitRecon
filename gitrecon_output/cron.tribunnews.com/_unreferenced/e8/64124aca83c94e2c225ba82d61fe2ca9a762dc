@@ -1,0 +1,111 @@
+<?php 
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+
+define('TIMEZONE', 'Asia/Jakarta');
+date_default_timezone_set(TIMEZONE);
+
+$time_start = microtime(true);
+
+include "/var/www/html/web-cron/config/config.php";
+include_once "/var/www/html/web-cron/booking/model/model_transaction.php";
+include_once "/var/www/html/web-cron/config/config_db_booking.php";
+require_once 'Twilio/autoload.php';
+
+use Twilio\Rest\Client;
+use Twilio\Exceptions\RestException;
+
+$config_db  = new config_db_booking();
+$conn       = $config_db->conn_to_db_prod();
+
+$now = new DateTime();
+$mins = $now->getOffset() / 60;
+$sgn = ($mins < 0 ? -1 : 1);
+$mins = abs($mins);
+$hrs = floor($mins / 60);
+$mins -= $hrs * 60;
+$offset = sprintf('%+d:%02d', $hrs*$sgn, $mins);
+
+$conn->query("SET time_zone='$offset';");
+
+$dateNow = $now->format('Y-m-d H:i:s');
+
+echo $dateNow;
+
+$model_transaction = new model_transaction();
+$getDataExpired    = $model_transaction->get_invoice_reminder_expired($dateNow);
+$totalDataExpired  = mysqli_num_rows($getDataExpired);
+
+$sid   = 'ACa6848a976cce8e42003347139cabf7f7';
+$token = 'ec4446222f3367585d9341af77e5ffbb';
+$whatsapp_number = "+6285702280701";
+
+$client = new Client($sid, $token);
+
+if ($totalDataExpired > 0) {
+
+    $result = [];
+
+    while ($dataEx = mysqli_fetch_assoc($getDataExpired)) {
+        $result[] = $dataEx;
+    }
+
+    foreach ($result as $row) {
+        if ($row['wa_reminder_sent'] == 1) {
+            continue;
+        }
+        if (substr($row['phone'],0,1) == '0') {
+            $number = '62'.substr($row['phone'],1);
+        } else {
+            $number = $row['phone'];
+        }
+
+         $expired 		= date_format(date_create($row['tgl_expire']), "d M Y H:i:s");
+         $payment 		= strtoupper($row['bank_type']).' '.str_replace('_', ' ', strtoupper($row['payment_type']));
+         $nominal 		= "Rp " . number_format($row['total_harga'],2,',','.');
+
+        try {
+            $message    =  'Hi '.$row['firstname'].','.PHP_EOL.PHP_EOL;
+            $message    .=  'Transaksi pembelianmu untuk event '.$row['judul'];
+            $message    .=  'belum dibayar. Yuk lakukan pembayaran sebesar '.$nominal;
+            $message    .=  'menggunakan '.$payment.' sebelum pukul '.$expired.' WIB agar transaksimu berhasil.';
+            $twilio = $client->messages->create(
+                "whatsapp:+".$number,
+                [
+                    "contentSid" => 'HXd24f7b80a4a6116214b33b19feb1149a',
+                    "from" => 'whatsapp:'.$whatsapp_number,
+                    "contentVariables" => json_encode([
+                        "1" => $row['firstname'],
+                        "2" => $row['judul'],
+                        "3" => $nominal,
+                        "4" => $payment,
+                        "5" => $expired
+
+                    ])
+                ]
+            );
+            $conn->query("
+                UPDATE tbl_transaksi 
+                SET wa_reminder_sent = 1 
+                WHERE id = '".$row['id']."'
+            ");
+
+        } catch (RestException $e) {
+
+            error_log(
+                "Twilio Error [".$e->getStatusCode()."] ".$e->getMessage()
+            );
+
+            continue;
+        }
+    }
+
+} else {
+    echo "No data found";
+    exit;
+}
+
+mysqli_close($conn);
+
+echo "\nExecution time: ".(microtime(true) - $time_start)." seconds\n";
+?>

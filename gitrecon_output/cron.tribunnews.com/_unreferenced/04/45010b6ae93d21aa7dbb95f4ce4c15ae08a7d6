@@ -1,0 +1,65 @@
+<?php
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+
+define("DOC_ROOT","/var/www/html/web-cron/");
+
+include_once DOC_ROOT."config/config.php";
+include_once DOC_ROOT."lib/Opensearch.php";
+
+
+$opensearch = new Opensearch();
+$opensearch->init(OS_BOOKING,OS_BOOKING_USERNAME,OS_BOOKING_PASSWORD,true);
+
+$index = 'booking.rekap_rpc';
+$tables = array(
+		"id" : {"type" : "integer"},
+		"kode_pemesanan" : {"type" : "keyword","index": "true" },
+		"no_tiket" : {"type" : "keyword","index": "true"},
+		"kode_invoice" : {"type" : "keyword","index": "true"},
+		"bank_type" : {"type" : "keyword"},
+		"judul" : {"type" : "text"},
+		"nama" : {"type" : "keyword","index": "true"},
+		"firstname" : {"type" : "keyword","index": "true"},
+		"lastname" : {"type" : "keyword","index": "true"},
+		"nama_kota" : {"type" : "keyword"},
+		"paid_time" : {"type" : "date_null"},
+		"tgl_scan" : {"type" : "date_null"},
+		"transaction_status" : {"type" : "integer"},
+		"status_paid" : {"type" : "keyword"},
+		"tgl_transaksi" : {"type" : "date"},
+		"total_harga" : {"type" : "integer"},
+		"gender" : {"type" : "keyword"},
+		"email" : {"type" : "text"},
+		"seat_no" : {"type" : "text"},
+		"nik" : {"type" : "text"},
+		"ticket_name" : {"type" : "text"},
+		"event_type" : {"type" : "text"},
+		"category_name" : {"type" : "text"},
+		"no_bib" : {"type" : "keyword"},
+		"tgl_bib" : {"type" : "date_null"},
+		"status_rpc" : {"type" : "keyword"},
+		"penerima_rpc" : {"type" : "text"},
+		"phone_rpc" : {"type" : "text"},
+		"pic_rpc" : {"type" : "text"},
+		"tgl_diambil" : {"type" : "date_null"},
+		"metode_flag" : {"type" : "integer"},
+		"statusTicket" : {"type" : "keyword"},
+		"referral" : {"type" : "text"},
+		"nmkondar" : {"type" : "text"},
+		"nokondar" : {"type" : "text"},
+		"nik2" : {"type" : "text"},
+		"golongandarah" : {"type" : "text"},
+		"dob" : {"type" : "date_null"},
+		"jersey_racer" : {"type" : "keyword"},
+		"jersey_finisher" : {"type" : "keyword"}
+	);
+$response = $opensearch->create($index,$tables);
+
+echo "<pre>";
+print_r($tables);
+print_r($response);
+echo "</pre>";
+
+unset($opensearch);
+?>

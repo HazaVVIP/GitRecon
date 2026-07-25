@@ -1,0 +1,67 @@
+PUT quran_ayahs
+{
+  "settings": {
+    "analysis": {
+      "normalizer": {
+        "lc_norm": {
+          "type": "custom",
+          "filter": ["lowercase"]
+        }
+      }
+    }
+  },
+  "mappings": {
+    "dynamic": "strict",
+    "properties": {
+
+      "id": { "type": "integer" },
+      "verse_key": { "type": "keyword" },
+      "sort_order": { "type": "integer" },
+
+      "chapter_id": { "type": "byte" },
+      "verse_id": { "type": "short" },
+
+      "chapter_name_short": {
+        "type": "text",
+        "fields": {
+          "keyword": { "type": "keyword" }
+        }
+      },
+
+      "chapter_name_latin_id": {
+        "type": "text",
+        "fields": {
+          "keyword": {
+            "type": "keyword",
+            "normalizer": "lc_norm"
+          }
+        }
+      },
+
+      "ayah_text": {
+        "type": "text",
+        "fields": {
+          "keyword": { "type": "keyword" }
+        }
+      },
+
+      "ayah_text_plain": {
+        "type": "text",
+        "fields": {
+          "keyword": { "type": "keyword" }
+        }
+      },
+
+      "transliteration_en": {
+        "type": "text",
+        "fields": {
+          "keyword": { "type": "keyword" }
+        }
+      },
+
+      "translation_id": {
+        "type": "text"
+      }
+    }
+  }
+}

@@ -1,0 +1,76 @@
+<?php
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+
+$time_start = time();
+
+define("DOC_ROOT","/var/www/html/web-cron/");
+//define("DOC_ROOT",$_SERVER["DOCUMENT_ROOT"]."/");
+
+include DOC_ROOT."config/config.php";
+include DOC_ROOT."lib/Opensearch.php";
+
+$url = "https://www.logammulia.com/id/harga-emas-hari-ini";
+$ch = curl_init();
+
+$cookie = "__cf_bm=ABC123xyz; cf_clearance=DEF456uvw;";
+
+curl_setopt($ch, CURLOPT_URL, $url);
+curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+curl_setopt($ch, CURLOPT_HTTPHEADER, [
+    "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0 Safari/537.36",
+    "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "Accept-Language: en-US,en;q=0.9",
+    "Cookie: $cookie"
+]);
+$response = curl_exec($ch);
+$httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+
+if (curl_errno($ch)) {
+    echo "Error: " . curl_error($ch);
+} elseif ($httpCode != 200) {
+    echo "HTTP Error: " . $httpCode;
+} else {
+    // Jika berhasil, tampilkan sebagian isi HTML
+    echo substr($response, 0, 1000);
+}
+
+
+
+
+/* $dom = new DOMDocument();
+libxml_use_internal_errors(true); // Hindari warning HTML tidak valid
+$dom->loadHTML($html);
+libxml_clear_errors();
+
+$xpath = new DOMXPath($dom);
+
+// Cari baris-baris harga di tabel
+$rows = $xpath->query("//table[contains(@class, 'table')]/tbody/tr");
+
+$data = [];
+
+foreach ($rows as $row) {
+    $cols = $xpath->query("td", $row);
+    if ($cols->length >= 3) {
+        $berat = trim($cols[0]->nodeValue);
+        $harga = trim($cols[1]->nodeValue);
+        $harga_pph = trim($cols[2]->nodeValue);
+
+        $data[] = [
+            'berat' => $berat,
+            'harga' => $harga,
+            'harga_dengan_pph' => $harga_pph,
+        ];
+    }
+}
+
+// Tampilkan hasil sebagai JSON
+header('Content-Type: application/json');
+echo json_encode($data, JSON_PRETTY_PRINT); */
+
+unset($opensearch);
+
+
+echo '<br>Execution time in seconds: ' . (microtime(true) - $time_start) . "<br>";
+?>

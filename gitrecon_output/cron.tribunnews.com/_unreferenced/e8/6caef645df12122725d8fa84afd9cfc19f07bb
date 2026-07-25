@@ -1,0 +1,83 @@
+<?php
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+
+$time_start = time();
+
+define("DOC_ROOT","/var/www/html/web-cron/");
+
+include DOC_ROOT."config/config.php";
+include DOC_ROOT."lib/Opensearch.php";
+include DOC_ROOT."lib/Writelog.php";
+include_once "/var/www/html/web-cron/config/config_db_booking.php";
+include_once "/var/www/html/web-cron/booking/model/model_transaction.php";
+
+$config_db  = new config_db_booking();
+$conn       = $config_db->conn_to_db_prod();
+$opensearch = new Opensearch();
+$opensearch->init(OS_BOOKING,OS_BOOKING_USERNAME,OS_BOOKING_PASSWORD,true);
+
+$model_transaction  = new model_transaction();
+
+$getDataExpired     = $model_transaction->getListAllTransaksiTiketPerEvent();
+$totalDataExpired   = mysqli_num_rows($getDataExpired);
+
+if ($totalDataExpired > 0) {
+    $result    = array();
+    while ($dataEx =  mysqli_fetch_assoc($getDataExpired))
+    {
+        $result[] = $dataEx;
+    }
+
+    foreach ($result as $row) {
+		$datainsert = array(
+						'id' => $row['id'],
+						'kode_pemesanan' => $row['kode_pemesanan'],
+						'no_tiket' => $row['no_tiket'],
+						'kode_invoice' => $row['kode_invoice'],
+						'bank_type' => $row['bank_type'],
+						'judul' => $row['judul'],
+						'nama' => $row['nama'],
+						'firstname' => $row['firstname'],
+						'lastname' => $row['lastname'],
+						'nama_kota' => $row['nama_kota'],
+						'paid_time' => $row['paid_time'],
+						'tgl_scan' => $row['tgl_scan'],
+						'transaction_status' => $row['transaction_status'],
+						'status_paid' => $row['status_paid'],
+						'tgl_transaksi' => $row['tgl_transaksi'],
+						'total_harga' => $row['total_harga'],
+						'gender' => $row['gender'],
+						'email' => $row['email'],
+						'seat_no' => $row['seat_no'],
+						'nik' => $row['nik'],
+						'ticket_name' => $row['ticket_name'],
+						'event_type' => $row['event_type'],
+						'category_name' => $row['category_name'],
+						'no_bib' => $row['no_bib'],
+						'tgl_bib' => $row['tgl_bib'],
+						'status_rpc' => $row['status_rpc'],
+						'penerima_rpc' => $row['penerima_rpc'],
+						'phone_rpc' => $row['phone_rpc'],
+						'pic_rpc' => $row['pic_rpc'],
+						'tgl_diambil' => $row['tgl_diambil'],
+						'metode_flag' => $row['metode_flag'],
+						'statusTicket' => $row['statusTicket'],
+						'referral' => $row['referral'],
+						'nmkondar' => $row['nmkondar'],
+						'nokondar' => $row['nokondar'],
+						'nik2' => $row['nik2'],
+						'golongandarah' => $row['golongandarah'],
+						'dob' => $row['dob'],
+						'jersey_racer' => $row['jersey_racer'],
+						'jersey_finisher' => $row['jersey_finisher']						
+		);
+	var_dump($datainsert);
+		//$responseInsertOs = $opensearch->insert("booking.rekap_rpc", $datainsert);
+		//var_dump($responseInsertOs);
+	}
+}
+
+
+
+?>

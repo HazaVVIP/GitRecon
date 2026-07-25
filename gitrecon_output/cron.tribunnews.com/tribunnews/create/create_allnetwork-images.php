@@ -1,0 +1,70 @@
+<?php
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+
+define("DOC_ROOT","/var/www/html/web-cron/");
+
+include_once DOC_ROOT."config/config.php";
+include_once DOC_ROOT."lib/Opensearch.php";
+
+$opensearch = new Opensearch();
+$opensearch->init(OS_ALLNETWOORK_URL,OS_ALLNETWOORK_USERNAME,OS_ALLNETWOORK_PASSWORD,true);
+
+$index = 'allnetwork-images';
+$tables = array(
+		'id' => "long",
+		'domain_id' => "integer",
+		'domain' => "keyword",
+		'type' => "keyword",
+		'title' => "text_keyword",
+		"album_id" => "integer",
+		"album_title" => "text",
+		"uploader_id" => "integer",
+		"uploader_username" => "text_keyword",
+		"uploader_fullname" => "text_keyword",
+		"photografer_id" => "integer",
+		"photografer_username" => "text_keyword",
+		"photografer_fullname" => "text_keyword",
+		"source_id" => "integer",
+		"source_name" => "text_keyword",
+		"source_url" => "text_keyword",
+		"source_group" => "text_keyword",
+		"filename" => "text_keyword",
+		"date_upload" => "date",
+		"frontpage" => "integer",
+		"type" => "text_keyword",
+		"categories" => "text_keyword",
+		"width" => "integer",
+		"height" => "height",
+		"copyright" => "text_keyword",
+		"caption" => "text_keyword",
+		"captionwriter" => "text_keyword",
+		"headline" => "text_keyword",
+		"specialinstruction" => "text_keyword",
+		"keyword" => "text",
+		"category" => "text_keyword",
+		"suppcategory" => "text_keyword",
+		"byline" => "text_keyword",
+		"objectname" => "text_keyword",
+		"datecreated" => "text_keyword",
+		"city" => "text_keyword",
+		"province" => "text_keyword",
+		"country" => "text_keyword",
+		"pageviews" => "integer",
+		"tagging" => "nested_tagging",
+		"lastupdate_date" => "date",
+		"modified_date" => "date_null",
+		"source_image_id" => "integer",
+		"source_image_name" => "text_keyword",
+		"source_image_url" => "text_keyword",
+		"index_year" => "date_only_year"
+	);
+$response = $opensearch->create($index,$tables);
+
+echo "<pre>";
+print_r($tables);
+print_r($response);
+echo "</pre>";
+
+unset($opensearch);
+?>

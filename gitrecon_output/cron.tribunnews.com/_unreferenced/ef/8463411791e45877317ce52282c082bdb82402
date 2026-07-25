@@ -1,0 +1,246 @@
+<?php
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+
+define("DOC_ROOT","/var/www/html/web-cron/");
+
+include DOC_ROOT."config/config.php";
+include DOC_ROOT."lib/Opensearch.php";
+?>
+<html>
+<head>
+<title>Import Jadwal Imsak Bimsa</title>
+<style>
+input[type=file]::file-selector-button {
+	margin-right: 20px;
+	border: none;
+	background: #084cdf;
+	padding: 10px 20px;
+	border-radius: 10px;
+	color: #fff;
+	cursor: pointer;
+	transition: background .2s ease-in-out;
+}
+
+input[type=file]::file-selector-button:hover {
+	background: #0d45a5;
+}
+
+.form-submit-button {
+	background: #084cdf;
+	color: white;
+	border-style: outset;
+	border-color: #0066A2;
+	height: 50px;
+	width: 100px;
+	font: bold15px arial,sans-serif;
+	text-shadow: none;
+	border-radius: 10px;
+}
+.form-submit-button:hover {
+	background: #0d45a5;
+	color: white;
+	border-style: outset;
+	border-color: #0066A2;
+	height: 50px;
+	width: 100px;
+	font: bold15px arial,sans-serif;
+	text-shadow: none;
+	border-radius: 10px;
+}
+</style>
+</head>
+<body>
+<form action="" method="post" enctype="multipart/form-data">
+  Pilih File Jadwal Imsak Bimsa (.xls) untuk upload:
+  <input type="file" name="fileToUpload" id="fileToUpload" accept="application/vnd.ms-excel"><br>
+  <input type="submit" class="form-submit-button" value="Upload File" name="submit">
+</form>
+</body>
+</html>
+
+<?php
+include DOC_ROOT.'tribunnews/ramadhan/php-excel-reader/excel_reader2.php';
+include DOC_ROOT.'tribunnews/ramadhan/php-excel-reader/SpreadsheetReader.php';
+
+function url_alias($str) {
+	 $title = strtolower(trim($str));
+	 $replacements = ['@'=> "at", '#' => "hash", '$' => "dollar", '%' => "percentage", '&' => "and", '.' => "-", 
+				'+' => "plus", '-' => "minus", '*' => "multiply", '/' => "devide", '=' => "equal to",
+				'<' => "less than", '<=' => "less than or equal to", '>' => "greater than", '<=' => "greater than or equal to",
+		];
+
+	 $title = strtr($title, $replacements);
+	 return $urlKey = preg_replace('#[^0-9a-z]+#i', '-', $title);
+}
+
+if(isset($_POST['submit'])){
+	if(isset($_FILES['fileToUpload']) && !empty($_FILES["fileToUpload"]) && $_FILES['fileToUpload']['error'] == 0){
+		$time_start = time();
+		
+		$file_name = basename($_FILES['fileToUpload']['name']);
+		$file_size = $_FILES['fileToUpload']['size'];
+		$file_tmp = $_FILES['fileToUpload']['tmp_name'];
+		$file_type = $_FILES['fileToUpload']['type'];
+		
+		if ($file_type == "application/vnd.ms-excel") {
+			//RDS
+			$con = mysqli_connect("db-dev8.cuhyfpzt6xd5.ap-southeast-1.rds.amazonaws.com","dev-cms","buTlpr87RI0Tl-HuvuphubR5miPhls","tribunnews");
+			if (mysqli_connect_errno()) {
+				echo "Failed to connect to MySQL: " . mysqli_connect_error();
+				exit();
+			}
+			
+			$target_dir = DOC_ROOT."tribunnews/ramadhan/uploads/";
+			$target_file = $target_dir . $file_name;
+			
+			if (!file_exists($target_file)) {
+				if ((move_uploaded_file($file_tmp,$target_file))) {
+					try {
+						$Reader = new SpreadsheetReader($target_file);
+						
+						$arrData = array();
+						foreach ($Reader as $key => $Row){
+							foreach ($Row as $idx => $val){
+								$val = trim($val);
+								//if(!empty($val)){
+								if($val != ""){
+									$arrData[$key][$idx] = $val;
+								}
+							}
+						} 
+						
+						$arrRamadhan = array();
+						if(count($arrData) > 0){
+							$i = 0;
+							$hari_ke = 1;
+							
+							foreach($arrData as $key => $data){
+								$province_name = "";
+								if($key == 4){
+									$str_province_name = $data[2];
+									$arrProvinceName = explode("PROVINSI",$str_province_name);
+									$province_name = isset($arrProvinceName[1])?trim($arrProvinceName[1]):"";
+
+									$arrRamadhan['province_name'] = $province_name;
+								}
+								
+								$city_name = "";
+								if($key == 6){
+									$str_city_name = $data[0];
+									$arrCityName = explode("DAERAH",$str_city_name);
+									$city_name = isset($arrCityName[1])?trim($arrCityName[1]):"";
+									
+									$arrRamadhan['city_name'] = $city_name;
+								}
+								
+								if($key > 10){
+									$tanggal = $data[1];
+									$imsak = $data[3];
+									$subuh = $data[4];
+									$terbit = $data[5];
+									$duha = $data[6];
+									$zuhur = $data[7];
+									$asar = $data[8];
+									$magrib = $data[9];
+									$isya = $data[10];
+									
+									$arrRamadhan['prayer_schedule'][$i]['hari_ke'] = $hari_ke;
+									$arrRamadhan['prayer_schedule'][$i]['tanggal'] = $tanggal;
+									$arrRamadhan['prayer_schedule'][$i]['imsak'] = $imsak;
+									$arrRamadhan['prayer_schedule'][$i]['subuh'] = $subuh;
+									$arrRamadhan['prayer_schedule'][$i]['terbit'] = $terbit;
+									$arrRamadhan['prayer_schedule'][$i]['duha'] = $duha;
+									$arrRamadhan['prayer_schedule'][$i]['zuhur'] = $zuhur;
+									$arrRamadhan['prayer_schedule'][$i]['asar'] = $asar;
+									$arrRamadhan['prayer_schedule'][$i]['magrib'] = $magrib;
+									$arrRamadhan['prayer_schedule'][$i]['isya'] = $isya;
+
+									$i++;
+									$hari_ke++;
+								}	
+							}
+						}
+						
+						$total = 0;
+						if(isset($arrRamadhan['prayer_schedule']) && count($arrRamadhan['prayer_schedule']) > 0){
+							$province_name = isset($arrRamadhan['province_name'])?trim($arrRamadhan['province_name']):"";
+							$city_name = isset($arrRamadhan['city_name'])?trim($arrRamadhan['city_name']):"";
+							$city_alias = url_alias(strtolower($city_name));
+							
+							$arrPrayerSchedule = isset($arrRamadhan['prayer_schedule'])?$arrRamadhan['prayer_schedule']:array();
+
+							if(count($arrRamadhan) > 0 && !empty($province_name) && !empty($city_name)){
+								foreach($arrPrayerSchedule as $iii => $prayerschedule){
+									$tanggal = $prayerschedule['tanggal'];
+									$hari_ke = $prayerschedule['hari_ke'];
+									$imsak = $prayerschedule['imsak'];
+									$subuh = $prayerschedule['subuh'];
+									$terbit = $prayerschedule['terbit'];
+									$duha = $prayerschedule['duha'];
+									$zuhur = $prayerschedule['zuhur'];
+									$asar = $prayerschedule['asar'];
+									$magrib = $prayerschedule['magrib'];
+									$isya = $prayerschedule['isya'];
+									
+									$sqlCheck = "SELECT id
+											FROM jadwal_imsak
+											WHERE city_alias = '".$city_alias."' AND hari_ke = ".$hari_ke."";
+									$resultCheck = mysqli_query($con, $sqlCheck);
+									$totalCheck = mysqli_num_rows($resultCheck);
+																
+									if($totalCheck < 1){								
+										$sql = "INSERT into jadwal_imsak SET 
+													city_name = '".$city_name."',
+													city_alias = '".$city_alias."',
+													province_name = '".$province_name."',
+													hari_ke = ".$hari_ke.",
+													imsak = '".$imsak."', 
+													subuh = '".$subuh."', 
+													terbit = '".$terbit."', 
+													duha = '".$duha."', 
+													zuhur = '".$zuhur."', 
+													asar = '".$asar."', 
+													magrib = '".$magrib."', 
+													isya = '".$isya."', 
+													thn = '2024', 
+													create_date = '".date("Y-m-d H:i:s")."'";
+										if (!mysqli_query($con, $sql)) {
+											printf("Error message: %s\n", mysqli_error($con));
+										} else {
+											$id = mysqli_insert_id($con);
+
+											$total++; 
+										} 
+									}
+								}
+							}
+						}
+						
+						echo "File ".$file_name." berhasil terupload<br>";
+						echo "Total $total hari<br>";
+						
+						echo "<pre>";
+						print_r($arrRamadhan);
+						echo "</pre>";
+					} catch (Exception $e){
+						echo "<span style='color:red'>".$e->getMessage()."</span>";
+					}
+				} else {
+					echo "<span style='color:red'>File ".$file_name." gagal terupload</span>";
+				}	
+			} else {
+				echo "<span style='color:red'>File ".$file_name." sudah pernah terupload</span>";
+			}
+			
+			echo '<br>Execution time in seconds: ' . (microtime(true) - $time_start) . "<br>";
+
+			mysqli_close($con);
+		} else {
+			echo "<span style='color:red'>File ".$file_name." bukan tipe xls</span>";
+		}
+	} else {
+		echo "<span style='color:red'>File belum dipilih</span>";
+	}	
+}	
+?>

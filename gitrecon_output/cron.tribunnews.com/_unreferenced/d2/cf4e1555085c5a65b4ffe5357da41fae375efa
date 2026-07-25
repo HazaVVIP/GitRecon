@@ -1,0 +1,19 @@
+<?php 
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+//error_reporting(0);
+
+$time_start = time();
+
+include "/var/www/html/web-cron/config/config.php";
+include_once "/var/www/html/web-cron/booking/model/model_transaction.php";
+
+    //load model class
+    $model_transaction  = new model_transaction();
+
+    $getDataExpired     = $model_transaction->get_invoice_expired();
+    var_dump($getDataExpired);exit
+    
+    echo "\nExecution time in seconds: ". (microtime(true) - $time_start) . "\n";
+
+?>

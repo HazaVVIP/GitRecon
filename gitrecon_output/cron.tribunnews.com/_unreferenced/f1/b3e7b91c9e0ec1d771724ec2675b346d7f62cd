@@ -1,0 +1,79 @@
+<?php
+error_reporting(E_ALL);
+
+require('simple_html_dom.php');
+
+$time_start = time();
+
+$url_pildun_klasmen = "https://www.foxsports.com/soccer/2022-fifa-world-cup/standings";
+
+$options = array(
+  'http'=>array(
+	'method'=>"GET",
+	'header'=>"Accept-language: en\r\n" .
+			  "User-Agent: Mozilla/5.0 (iPad; U; CPU OS 3_2 like Mac OS X; en-us) AppleWebKit/531.21.10 (KHTML, like Gecko) Version/4.0.4 Mobile/7B334b Safari/531.21.102011-10-16 20:23:10\r\n"
+  )
+);
+
+$context = stream_context_create($options);
+$results = file_get_contents($url_pildun_klasmen, false, $context);
+
+if($results != false){
+	$dom = new DOMDocument('1.0', 'UTF-8');
+	$dom->preserveWhiteSpace = false; 
+	@$dom->loadHTML($results);
+	$tables = $dom->getElementsByTagName('table');
+	
+	$no = 1;
+	foreach ($tables as $idx => $table) {
+		$rows = $table->getElementsByTagName('tr');
+
+		foreach ($rows as $row) {   
+            $cols = $row->getElementsByTagName('td');
+			
+			$rank = @$cols[0]->textContent;
+			$country = @$cols[1]->textContent;
+			$gp = @$cols[2]->textContent;
+			$wdl = @$cols[3]->textContent;
+			$gf = @$cols[4]->textContent;
+			$gk = @$cols[5]->textContent;
+			$point = @$cols[6]->textContent;
+			$ga = @$cols[7]->textContent;
+			
+			if(!empty($country)){
+				$arrWDL = explode("-",$wdl);
+				
+				$win = isset($arrWDL[0])?$arrWDL[0]:0;
+				$draw = isset($arrWDL[1])?$arrWDL[1]:0;
+				$lose = isset($arrWDL[2])?$arrWDL[2]:0;
+				
+				if($no >= 1 && $no <= 4){
+					$group = "A";
+				} else if($no >= 5 && $no <= 8){
+					$group = "B";
+				} else if($no >= 9 && $no <= 12){
+					$group = "C";
+				} else if($no >= 13 && $no <= 16){
+					$group = "D";
+				} else if($no >= 17 && $no <= 20){
+					$group = "E";
+				} else if($no >= 21 && $no <= 24){
+					$group = "F";
+				} else if($no >= 25 && $no <= 28){
+					$group = "G";
+				} else if($no >= 29 && $no <= 32){
+					$group = "H";
+				} 
+				
+				if ($no%4 == 1) echo "Group ".$group."<hr>";
+				echo $country." | ".$gp." | ".$win." | ".$draw." | ".$lose." | ".$gf." | ".$gk." | ".$point." | ".$ga."<br>"; 
+				if ($no%4 == 0) echo "<br>";
+
+				$no++;
+			}	
+        }  
+	}	
+}	
+
+echo 'Total execution time in seconds: ' . (microtime(true) - $time_start);
+?>

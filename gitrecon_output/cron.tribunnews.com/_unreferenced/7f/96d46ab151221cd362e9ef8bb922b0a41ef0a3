@@ -1,0 +1,174 @@
+<?php
+ini_set("memory_limit", "-1");
+set_time_limit(0);
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+
+/* 
+Running in cmd / command
+- sudo -u cron /usr/bin/php7.4 /var/www/html/web-cron/tribunnews/privacy_policy/sync_privacy.php 
+*/
+
+$time_start = time();
+
+define("DOC_ROOT","/var/www/html/web-cron/");
+
+include DOC_ROOT."config/config.php";
+include DOC_ROOT."config/other_config.php";
+include DOC_ROOT."lib/Opensearch.php";
+
+
+$totalData = 0;
+
+//OS
+$opensearch = new Opensearch();
+//$opensearch->init(OS_TBO_URL,OS_TBO_USERNAME,OS_TBO_PASSWORD,true);
+$opensearch->init(OS_DEV_URL,OS_DEV_USERNAME,OS_DEV_PASSWORD,true);
+
+
+$index_name = "policy_violation";
+$condition = array("match_phrase" => array("status" => 0));
+$fields = array('id','alias','domain');
+$sort = array("id" => "desc");
+$start = 0;
+$limit = 1000;
+$response = $opensearch->find($index_name,$condition,$fields,$sort,$start,$limit);
+
+if($response['status']){
+	$totalSearch = isset($response['total_row'])?$response['total_row']:0;
+	$dataArticle = isset($response['data'])?$response['data']:array();
+	
+	if(count($dataArticle) > 0){
+		$opensearchTnews = new Opensearch();
+		$opensearchTnews->init(OS_URL,OS_USERNAME,OS_PASSWORD,true);
+		
+		$opensearchDaerah = new Opensearch();
+		$opensearchDaerah->init(OS_DAERAH_URL,OS_DAERAH_USERNAME,OS_DAERAH_PASSWORD,true);
+		
+		$opensearchDaerahNew = new Opensearch();
+		$opensearchDaerahNew->init(OS_DAERAH_NEW_URL,OS_DAERAH_NEW_USERNAME,OS_DAERAH_NEW_PASSWORD,true);
+		
+		$opensearchDaerahCluster = new Opensearch();
+		$opensearchDaerahCluster->init(OS_DAERAH_CLUSTER_URL,OS_DAERAH_CLUSTER_USERNAME,OS_DAERAH_CLUSTER_PASSWORD,true);
+		
+		$opensearchCommerce = new Opensearch();
+		$opensearchCommerce->init(OS_TBO_URL,OS_TBO_USERNAME,OS_TBO_PASSWORD,true);
+		
+		$opensearchTBO = new Opensearch();
+		$opensearchTBO->init(OS_TBO_NEW_URL,OS_TBO_NEW_USERNAME,OS_TBO_NEW_PASSWORD,true);
+		
+		$opensearchWIKI = new Opensearch();
+		$opensearchWIKI->init(OS_TNEWSWIKI_URL,OS_TNEWSWIKI_USERNAME,OS_TNEWSWIKI_PASSWORD,true);
+		
+		
+		foreach($dataArticle as $article){
+			$row = $article['_source'];
+			
+			$id = isset($row['id'])?intval($row['id']):0;
+			$domain = isset($row['domain'])?$row['domain']:"";
+			$alias = isset($row['alias'])?$row['alias']:"";
+			
+			if($id > 0){
+				if($domain == "tribunnews"){
+					$fields = array("id","title","alias","publish_date","written_by","writter_fullname","editor_by","editor_fullname","writter_username","editor");
+					$query = array("match_phrase" => array("alias" => $alias));
+					$response4 = $opensearch->findOne("tribunnews-articles", $query, $fields);	
+				} else if($domain == "video"){
+					$fields = array("id","title","alias", "topic", "category", "poster", "file", "upload_date", "editor_video", "editor_video_name", "uploader", "uploader_name", "reporter", "cameraman");
+					$query = array("match_phrase" => array("alias" => $alias));
+					$response4 = $opensearch->findOne("tribunnews-video", $query, $fields);
+				} else {
+					if(in_array($domain, LIST_COMMERCE_CLUSTER)){
+						$fields = array("id","title","alias","publish_date","written_by","writter_fullname","editor_by","editor_fullname","writter_username","editor");
+						$query = array("match_phrase" => array("alias" => $alias));
+						$response4 = $opensearchCommerce->findOne($domain.".articles", $query, $fields);	
+					} else if(in_array($domain, LIST_TBO_CLUSTER)){
+						$fields = array("id","title","alias","publish_date","written_by","writter_fullname","editor_by","editor_fullname","writter_username","editor");
+						$query = array("match_phrase" => array("alias" => $alias));
+						$response4 = $opensearchTBO->findOne($domain.".articles", $query, $fields);	
+					} else if($domain == "tribunnewswiki"){
+						$fields = array("id","title","alias","publish_date","written_by","writter_fullname","editor_by","editor_fullname","wikiblog");
+						$query = array("match_phrase" => array("alias" => $alias));
+						$response4 = $opensearchWIKI->findOne("tribunnewswiki-articles", $query, $fields);	
+					} else if(in_array($domain, LIST_DAERAH_NEW)){
+						$fields = array("id","title","alias","publish_date","written_by","writter_fullname","editor_by","editor_fullname","writter_username","editor");
+						$query = array("match_phrase" => array("alias" => $alias));
+						$response4 = $opensearchDaerahNew->findOne($domain.".tribundaerah-articles", $query, $fields);
+					} else if(in_array($domain, LIST_DAERAH_CLUSTER)){
+						$fields = array("id","title","alias","publish_date","written_by","writter_fullname","editor_by","editor_fullname","writter_username","editor");
+						$query = array("match_phrase" => array("alias" => $alias));
+						$response4 = $opensearchDaerahCluster->findOne($domain.".tribundaerah-articles", $query, $fields);
+					} else { 
+						$fields = array("id","title","alias","publish_date","written_by","writter_fullname","editor_by","editor_fullname","writter_username","editor");
+						$query = array("match_phrase" => array("alias" => $alias));
+						$response4 = $opensearchDaerah->findOne($domain.".tribundaerah-articles", $query, $fields);	
+					}
+				}
+				
+				if($response4['status']){
+					$rows = isset($response4['data']['_source'])?json_decode(json_encode($response4['data']['_source'])):array();
+					
+					$title = isset($rows->title)?$rows->title:"";
+					$publish_date = isset($rows->publish_date)?$rows->publish_date:"";
+					$id_article = isset($rows->id)?intval($rows->id):0;
+					
+					$writter_id = isset($rows->written_by)?intval($rows->written_by):0;
+					$writter = isset($rows->written_by)?intval($rows->written_by):0;
+					$writter_username = isset($rows->writter_username)?$rows->writter_username:"";
+					$writter_fullname = isset($rows->writter_fullname)?$rows->writter_fullname:"";
+					
+					$editor_id = isset($rows->editor_by)?intval($rows->editor_by):0;
+					$editor = isset($rows->editor_by)?intval($rows->editor_by):0;
+					$editor_username = isset($rows->editor_username)?$rows->editor_username:"";
+					if(empty($editor_username)){
+						$editor_username = isset($rows->editor)?$rows->editor:"";
+					}
+					$editor_fullname = isset($rows->editor_fullname)?$rows->editor_fullname:"";
+					
+					if($domain == "video"){
+						$alias 				= "view/".$id."/".$alias;
+					}
+					
+					if(!empty($id_article)){
+						$dataUpdate = array();
+						$dataUpdate['id_article'] = $id_article;
+						$dataUpdate['title'] = strip_tags($title);
+						$dataUpdate['publish_date'] = $publish_date;
+						$dataUpdate['editor_id'] = $editor_id;
+						$dataUpdate['editor_username'] = $editor_username;
+						$dataUpdate['editor_fullname'] = $editor_fullname;
+						$dataUpdate['writter_id'] = $writter_id;
+						$dataUpdate['writter_username'] = $writter_username;
+						$dataUpdate['writter_fullname'] = $writter_fullname;
+						
+						$responseUpdate = $opensearch->updateOne($index_name,$id,$dataUpdate);
+						
+						/* echo "<pre>";
+						print_r($responseUpdate);
+						print_r($dataUpdate);
+						echo "</pre>"; */
+					
+						if($responseUpdate['status']){
+							$totalData++;
+						}
+					}
+				}
+			}
+		}
+		
+		
+		unset($opensearchTnews);
+		unset($opensearchDaerah);
+		unset($opensearchDaerahNew);
+		unset($opensearchDaerahCluster);
+		unset($opensearchCommerce);
+		unset($opensearchTBO);
+		unset($opensearchWIKI);
+	}
+}	
+
+unset($opensearch);
+
+echo 'Total update data: '.$totalData;
+echo '\n<br>Execution time in seconds: ' . (microtime(true) - $time_start);
+?>

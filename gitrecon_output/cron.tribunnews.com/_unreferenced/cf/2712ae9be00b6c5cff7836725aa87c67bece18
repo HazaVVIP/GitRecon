@@ -1,0 +1,119 @@
+<?php
+ini_set('display_errors',1);
+error_reporting(E_ALL);
+ini_set("memory_limit", "-1");
+set_time_limit(0);
+
+$time_start = time();
+
+define("DOC_ROOT","/var/www/html/web-cron/");
+
+include DOC_ROOT."config/config.php";
+include DOC_ROOT."lib/Opensearch.php";
+
+$playlist_name = isset($_SERVER["argv"][1])?$_SERVER["argv"][1]:"";
+if(isset($_GET['playlist_name'])){
+	$playlist_name = $_GET['playlist_name'];
+}	
+
+$arrPlaylist = array(
+				array("playlist_name"=> "belajar-baca-alquran", "playlist_id"=> "PLRUmxnvpvtstWC4OdtpLSmIrGdsPzr5Z4"),
+				array("playlist_name"=> "tanya-ustaz", "playlist_id"=> "PLRUmxnvpvtstndFgKUZ1skGE7bbWwYw4t"),
+				array("playlist_name"=> "berkah-ramadan", "playlist_id"=> "PLRUmxnvpvtsvRbdUtTCCuTp-q1SHaga5B"),
+				array("playlist_name"=> "ramadan-cantik", "playlist_id"=> "PLRUmxnvpvtstYZ9J_ajHV6LKqVZ90LOgr"),
+				array("playlist_name"=> "kuliner-ramadan", "playlist_id"=> "PLRUmxnvpvtsug205vz15wEdItpY69iLnS"),
+				array("playlist_name"=> "ngabuburit-asyik", "playlist_id"=> "PLRUmxnvpvtsvM7l8O1gG5IqW1VB4dqWwf"),
+				array("playlist_name"=> "puasa-sehat", "playlist_id"=> "PLRUmxnvpvtst4qj3nvo8zClVw83EVRjAQ"),
+				);
+				
+
+$arrayKey = searcharray($playlist_name, "playlist_name", $arrPlaylist);
+
+$videoList = array();
+
+$channelId = 'UCmxAIW7RDDC88EPk4ry16Kg';
+$apiKey = 'AIzaSyC3KtwEDGp4AY9oUW9hZpWWBL6OiujTwsk';
+$max = 20;
+
+$playlistId = isset($arrPlaylist[$arrayKey]['playlist_id'])?$arrPlaylist[$arrayKey]['playlist_id']:"";
+
+if(!empty($playlistId)){
+	$apiv3_getPlaylist = 'https://www.googleapis.com/youtube/v3/playlistItems?part=snippet&channelId='.$channelId.'&key='.$apiKey.'&playlistId='.$playlistId.'&maxResults='.$max.'&order=viewcount&type=video';
+	
+	echo $apiv3_getPlaylist."<br>";
+	
+	$apierror = 'Not found';
+	try{
+		$apiData = @file_get_contents($apiv3_getPlaylist);
+		
+		if($apiData){
+			$jsonVideoList = json_decode($apiData, TRUE);
+			
+			$videoList = isset($jsonVideoList['items'])?$jsonVideoList['items']:array();
+		}else{
+			throw new Exception('Invalid API Key or Channel ID');
+		}
+	}catch(Exception $e){
+		$apierror = $e->getMessage();
+	}
+}	
+
+$arrRamadhan = array();
+if(count($videoList) > 0){
+	//OS
+	$opensearch = new Opensearch();
+	$opensearch->init(OS_DEV_URL,OS_DEV_USERNAME,OS_DEV_PASSWORD,true);
+	//$opensearch->init(OS_TBO_URL,OS_TBO_USERNAME,OS_TBO_PASSWORD,true);
+
+	foreach($videoList as $k => $video){
+		$title = @$video['snippet']['title'];
+		$description = @$video['snippet']['description'];
+		$published_at = @$video['snippet']['publishedAt'];
+		$youtube_video_id = @$video['snippet']['resourceId']['videoId'];
+		
+		$arrRamadhan[$k]['id'] = $k;
+		$arrRamadhan[$k]['youtube_video_id'] = $youtube_video_id;
+		$arrRamadhan[$k]['title'] = $title;
+		$arrRamadhan[$k]['description'] = $description;
+		$arrRamadhan[$k]['published_at'] = $published_at;
+		$arrRamadhan[$k]['playlist_id'] = $arrPlaylist[$arrayKey]['playlist_id'];
+		$arrRamadhan[$k]['playlist_name'] = $arrPlaylist[$arrayKey]['playlist_name'];
+		$arrRamadhan[$k]['create_date'] = date("Y-m-d H:i:s");
+		
+		$arrInsert = array();
+		$arrInsert['id'] = $k;
+		$arrInsert['youtube_video_id'] = $youtube_video_id;
+		$arrInsert['title'] = $title;
+		$arrInsert['description'] = $description;
+		$arrInsert['published_at'] = $published_at;
+		$arrInsert['playlist_id'] = $playlist_id;
+		$arrInsert['playlist_name'] = $playlist_name;
+		$arrInsert['create_date'] = date("Y-m-d H:i:s");
+		
+		$responseInsertOs = $opensearch->insert("playlist_youtube_ramadan", $arrInsert);
+		
+		/* echo "<pre>";
+		print_r($responseInsertOs);
+		print_r($arrInsert);
+		echo "</pre>"; */
+	}	
+	
+	unset($opensearch);
+}
+
+
+echo "<pre>";
+print_r($arrRamadhan);
+echo "</pre>";
+
+function searcharray($value, $key, $array) {
+	foreach ($array as $k => $val) {
+		if ($val[$key] == $value) {
+		   return $k;
+		}
+	}
+	return null;
+}
+
+echo '<br>Execution time in seconds: ' . (microtime(true) - $time_start) . "<br>";
+?>

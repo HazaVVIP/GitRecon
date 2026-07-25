@@ -1,0 +1,53 @@
+<?php
+error_reporting(E_ALL);
+ini_set('display_errors', 1);
+
+require('simple_html_dom.php');
+
+$time_start = time();
+
+$url_pildun_klasmen = "https://bola.kompas.com/gebyarqatar/klasemen";
+
+$options = array(
+  'http'=>array(
+	'method'=>"GET",
+	'header'=>"Accept-language: en\r\n" .
+			  "User-Agent: Mozilla/5.0 (iPad; U; CPU OS 3_2 like Mac OS X; en-us) AppleWebKit/531.21.10 (KHTML, like Gecko) Version/4.0.4 Mobile/7B334b Safari/531.21.102011-10-16 20:23:10\r\n"
+  )
+);
+
+$context = stream_context_create($options);
+$results = file_get_contents($url_pildun_klasmen, false, $context);
+
+if($results != false){
+	$dom = new DOMDocument('1.0', 'UTF-8');
+	@$dom->loadHTML($results);
+
+	$selector = new DOMXPath($dom); 
+	$anchors = $selector->query("//*[@class='standing-row standing-pos']");
+	
+	$no = 1;
+	foreach ($anchors as $node) {
+		$full_content = innerHTML($node);
+		
+		$full_content = "<html><head></head><body>".$full_content."</body></html>";
+		
+		$content = str_get_html($full_content);
+		foreach($content->find('div.standing-col') as $key => $element){
+			var_dump($element);
+		}	
+	}
+	
+}
+
+function innerHTML(DOMNode $node)
+{
+  $doc = new DOMDocument();
+  foreach ($node->childNodes as $child) {
+    $doc->appendChild($doc->importNode($child, true));
+  }
+  return $doc->saveHTML();
+}	
+
+echo 'Total execution time in seconds: ' . (microtime(true) - $time_start);
+?>
