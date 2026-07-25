@@ -1,6 +1,0 @@
-#!/bin/bash
-while true; do
-    sleep 15 &
-    sudo -u www-data /usr/bin/php7.4 /var/www/html/web-cron/tribunnews/quickcount_pilpres2024 > /home/cron/log_cron/quickcount_pilpres2024-pranowo.txt &
-    wait
-done

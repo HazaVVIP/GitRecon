@@ -1,5 +1,0 @@
-<?php
-	include "/var/www/html/web-cron/tjb/development/main.php";
-	$cron = new TJBCronServices();
-	$cron->init("InsertTopArticleTJB");
-?>
