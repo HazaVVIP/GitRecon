@@ -206,14 +206,14 @@ Phase 1 — DETECT        Phase 2 — MAP           Phase 3 — STREAM & SCAN   
 
 | Module | Lines | Responsibility |
 |---|---|---|
-| `main.rs` | ~330 | CLI parsing (clap), phase orchestration, configuration |
-| `detect.rs` | ~410 | Phase 1 — probe 8 metadata files, confidence scoring (0–100 %), fuzz 18+ paths |
-| `mapper.rs` | ~485 | Phase 2 — fetch 46 metadata files, collect SHA1s, parse pack indexes (v1 & v2) |
-| `streamer.rs` | ~2020 | Phase 3 — concurrent fetch, 110 secret patterns, Shannon entropy, YAML multi-line, minified JS |
-| `reporter.rs` | ~290 | Phase 4 — risk score, coloured terminal output, JSON report |
-| `git_parser.rs` | ~545 | Git object parser (loose objects, DIRC index v2–v4, pack index v1/v2, packed-refs, config) |
-| `http_client.rs` | ~200 | HTTP wrapper — exponential backoff, proxy (SOCKS5/HTTP), rate limiting, UA rotation |
-| `reconstructor.rs` | ~120 | Optional source reconstruction to disk (`--save`), path-traversal defence |
+| `main.rs` | ~4293 | CLI parsing (clap), mode orchestration, multi-target execution |
+| `detect.rs` | ~461 | Phase 1 — `.git` probing, confidence scoring, fuzz path handling |
+| `mapper.rs` | ~973 | Phase 2 — metadata fetch, SHA1 collection, pack index parsing |
+| `streamer.rs` | ~6004 | Phase 3 — concurrent object fetch, secret scanning, entropy analysis |
+| `reporter.rs` | ~1298 | Phase 4 — risk scoring, terminal formatting, report serialization |
+| `git_parser.rs` | ~1106 | Git object parsing (loose objects, DIRC, pack index, refs/config) |
+| `http_client.rs` | ~1118 | HTTP engine — retry, timeout adaptation, proxy/UA/rate limiting |
+| `binary_scanner.rs` | ~459 | Binary-format scanning (SQLite/ZIP/ELF) and secret extraction |
 
 ### Tech Stack
 

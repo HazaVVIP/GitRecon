@@ -326,9 +326,184 @@ fn extract_elf_strings(data: &[u8]) -> Vec<String> {
         return Vec::new();
     }
 
-    // For now, use the same string extraction as other binaries
-    // TODO: Parse ELF sections to target specific string sections
-    extract_printable_strings(data, 4)
+    let mut strings = extract_elf_section_strings(data);
+    if strings.is_empty() {
+        strings = extract_printable_strings(data, 4);
+    }
+
+    // Deduplicate while preserving order
+    let mut seen = HashSet::with_capacity(strings.len());
+    strings
+        .into_iter()
+        .filter(|s| seen.insert(s.clone()))
+        .collect()
+}
+
+fn read_u16(data: &[u8], off: usize, little_endian: bool) -> Option<u16> {
+    let bytes = data.get(off..off + 2)?;
+    Some(if little_endian {
+        u16::from_le_bytes([bytes[0], bytes[1]])
+    } else {
+        u16::from_be_bytes([bytes[0], bytes[1]])
+    })
+}
+
+fn read_u32(data: &[u8], off: usize, little_endian: bool) -> Option<u32> {
+    let bytes = data.get(off..off + 4)?;
+    Some(if little_endian {
+        u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+    } else {
+        u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+    })
+}
+
+fn read_u64(data: &[u8], off: usize, little_endian: bool) -> Option<u64> {
+    let bytes = data.get(off..off + 8)?;
+    Some(if little_endian {
+        u64::from_le_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        ])
+    } else {
+        u64::from_be_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        ])
+    })
+}
+
+fn get_cstr(data: &[u8], off: usize) -> Option<&str> {
+    let bytes = data.get(off..)?;
+    let nul = bytes.iter().position(|b| *b == 0)?;
+    std::str::from_utf8(&bytes[..nul]).ok()
+}
+
+fn extract_elf_section_strings(data: &[u8]) -> Vec<String> {
+    if data.len() < 0x34 {
+        return Vec::new();
+    }
+
+    let class = data[4];
+    let little_endian = match data[5] {
+        1 => true,
+        2 => false,
+        _ => return Vec::new(),
+    };
+
+    let (shoff, shentsize, shnum, shstrndx) = match class {
+        1 => {
+            let shoff = read_u32(data, 0x20, little_endian).map(|v| v as u64);
+            let shentsize = read_u16(data, 0x2E, little_endian);
+            let shnum = read_u16(data, 0x30, little_endian);
+            let shstrndx = read_u16(data, 0x32, little_endian);
+            match (shoff, shentsize, shnum, shstrndx) {
+                (Some(a), Some(b), Some(c), Some(d)) => (a, b as usize, c as usize, d as usize),
+                _ => return Vec::new(),
+            }
+        }
+        2 => {
+            let shoff = read_u64(data, 0x28, little_endian);
+            let shentsize = read_u16(data, 0x3A, little_endian);
+            let shnum = read_u16(data, 0x3C, little_endian);
+            let shstrndx = read_u16(data, 0x3E, little_endian);
+            match (shoff, shentsize, shnum, shstrndx) {
+                (Some(a), Some(b), Some(c), Some(d)) => (a, b as usize, c as usize, d as usize),
+                _ => return Vec::new(),
+            }
+        }
+        _ => return Vec::new(),
+    };
+
+    if shentsize == 0 || shnum == 0 || shstrndx >= shnum {
+        return Vec::new();
+    }
+
+    let shoff = shoff as usize;
+    let sht_total = match shentsize.checked_mul(shnum).and_then(|n| shoff.checked_add(n)) {
+        Some(v) => v,
+        None => return Vec::new(),
+    };
+    if sht_total > data.len() {
+        return Vec::new();
+    }
+
+    let shstr_hdr_off = match shstrndx.checked_mul(shentsize).and_then(|n| shoff.checked_add(n)) {
+        Some(v) => v,
+        None => return Vec::new(),
+    };
+
+    let (shstr_off, shstr_size) = match class {
+        1 => {
+            let off = read_u32(data, shstr_hdr_off + 0x10, little_endian).map(|v| v as usize);
+            let size = read_u32(data, shstr_hdr_off + 0x14, little_endian).map(|v| v as usize);
+            match (off, size) {
+                (Some(a), Some(b)) => (a, b),
+                _ => return Vec::new(),
+            }
+        }
+        2 => {
+            let off = read_u64(data, shstr_hdr_off + 0x18, little_endian).map(|v| v as usize);
+            let size = read_u64(data, shstr_hdr_off + 0x20, little_endian).map(|v| v as usize);
+            match (off, size) {
+                (Some(a), Some(b)) => (a, b),
+                _ => return Vec::new(),
+            }
+        }
+        _ => return Vec::new(),
+    };
+
+    let shstrtab = match data.get(shstr_off..shstr_off.saturating_add(shstr_size)) {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
+
+    let interesting = [".rodata", ".data", ".strtab", ".dynstr"];
+    let mut out = Vec::new();
+
+    for i in 0..shnum {
+        let hdr_off = match i.checked_mul(shentsize).and_then(|n| shoff.checked_add(n)) {
+            Some(v) => v,
+            None => continue,
+        };
+
+        let name_off = match read_u32(data, hdr_off, little_endian).map(|v| v as usize) {
+            Some(v) => v,
+            None => continue,
+        };
+        let sec_name = match get_cstr(shstrtab, name_off) {
+            Some(n) => n,
+            None => continue,
+        };
+        if !interesting.contains(&sec_name) {
+            continue;
+        }
+
+        let (sec_off, sec_size) = match class {
+            1 => {
+                let off = read_u32(data, hdr_off + 0x10, little_endian).map(|v| v as usize);
+                let size = read_u32(data, hdr_off + 0x14, little_endian).map(|v| v as usize);
+                match (off, size) {
+                    (Some(a), Some(b)) => (a, b),
+                    _ => continue,
+                }
+            }
+            2 => {
+                let off = read_u64(data, hdr_off + 0x18, little_endian).map(|v| v as usize);
+                let size = read_u64(data, hdr_off + 0x20, little_endian).map(|v| v as usize);
+                match (off, size) {
+                    (Some(a), Some(b)) => (a, b),
+                    _ => continue,
+                }
+            }
+            _ => continue,
+        };
+
+        let sec_data = match data.get(sec_off..sec_off.saturating_add(sec_size)) {
+            Some(s) => s,
+            None => continue,
+        };
+        out.extend(extract_printable_strings(sec_data, 4));
+    }
+
+    out
 }
 
 /// Static lazy regex patterns for secret detection
@@ -372,6 +547,20 @@ mod tests {
     fn test_detect_elf() {
         let data = b"\x7fELF\x01\x01\x01";
         assert_eq!(detect_binary_type(data), BinaryType::Elf);
+    }
+
+    #[test]
+    fn test_extract_elf_section_strings_invalid_layout_returns_empty() {
+        let data = b"\x7fELF\x01\x01\x01\x00";
+        let strings = extract_elf_section_strings(data);
+        assert!(strings.is_empty());
+    }
+
+    #[test]
+    fn test_extract_elf_strings_falls_back_to_full_scan() {
+        let data = b"\x7fELF\x01\x01\x01\x00----AKIAIOSFODNN7EXAMPLE----";
+        let strings = extract_elf_strings(data);
+        assert!(strings.iter().any(|s| s.contains("AKIAIOSFODNN7EXAMPLE")));
     }
 
     #[test]

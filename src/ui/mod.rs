@@ -15,7 +15,9 @@ pub use banner::{Banner, BannerStyle};
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::Banner;
+    use super::colors::ColorScheme;
+    use super::progress::ProgressBar;
 
     #[test]
     fn test_module_exports() {

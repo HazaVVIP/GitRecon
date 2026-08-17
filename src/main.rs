@@ -95,7 +95,7 @@ impl Target {
 #[derive(Parser, Debug)]
 #[command(
     name = "gitrecon",
-    version = "3.2.0",
+    version = env!("CARGO_PKG_VERSION"),
     about = "GitRecon — Streaming Git Exposure Scanner (Rust)",
     long_about = None,
     after_help = "Examples:\n  gitrecon https://target.com\n  gitrecon https://target.com --save\n  gitrecon https://target.com --proxy socks5://127.0.0.1:9050 --delay 1\n  gitrecon https://target.com --fuzz --timeout 15\n  gitrecon --targets urls.txt --parallel-targets 5\n  gitrecon https://target.com --format sarif --webhook https://alerts.example.com\n  gitrecon --token ghp_xxxxxxxxxxxxxxxxxxxx\n  gitrecon --token ghp_xxxx --format sarif --output ./results\n  gitrecon --token ghp_xxxx --workers 20 --max-blob-size 2\n  gitrecon --dir ./project --format json\n\nToken mode interactive flow:\n  1) Repositories are listed with numbers\n  2) Choose one number, comma-separated numbers, or 'all'\n  3) Confirm whether reconstruction should be saved [Y/N]"
@@ -3983,43 +3983,47 @@ async fn main() {
                     println!("  ✔  Done\n");
                 }
             }
-            Target::Token { token: _, repos: _ } => {
+            Target::Token { token, repos } => {
                 if verbose {
-                    println!("  [{}] Token target: not yet implemented (use --token mode directly)", target_num);
+                    println!("  [{}] Token target: scanning via GitHub token mode", target_num);
                 }
-                // TODO: Implement token target handling in future iteration
-                continue;
+                if let Some(repo_list) = repos.as_ref() {
+                    if verbose && !repo_list.is_empty() {
+                        eprintln!("  ⚠   Target-level repos filter is not supported yet; scanning accessible repositories.");
+                    }
+                }
+
+                run_token_scan(
+                    &args,
+                    &rep,
+                    base_cfg.clone(),
+                    token,
+                    extra_patterns.clone(),
+                ).await;
             }
-            Target::Dir { dir: _ } => {
+            Target::Dir { dir } => {
                 if verbose {
-                    println!("  [{}] Dir target: not yet implemented (use --dir mode directly)", target_num);
+                    println!("  [{}] Directory target: scanning local path {}", target_num, dir);
                 }
-                // TODO: Implement dir target handling in future iteration
-                continue;
+                run_dir_scan(
+                    &args,
+                    &rep,
+                    &client,
+                    dir,
+                    extra_patterns.clone(),
+                ).await;
             }
         }
     }
 
     // A-1: Generate aggregate report if multiple targets were processed
     if targets.len() > 1 && !all_results.is_empty() {
-        let aggregate_path = format!("{}/aggregate_report.json", args.output);
-        if let Err(e) = std::fs::write(
-            &aggregate_path,
-            serde_json::to_string_pretty(&serde_json::json!({
-                "tool": "GitRecon",
-                "version": env!("CARGO_PKG_VERSION"),
-                "timestamp": chrono::Utc::now().to_rfc3339(),
-                "total_targets": targets.len(),
-                "scanned_targets": all_results.len(),
-                "results": all_results,
-            })).unwrap_or_default()
-        ) {
-            if verbose {
-                eprintln!("  ⚠   Could not save aggregate report: {}", e);
-            }
-        } else if verbose {
-            println!("  ✔  Aggregate report saved: {}", aggregate_path);
-        }
+        write_aggregate_report(
+            &args.output,
+            targets.len(),
+            &all_results,
+            verbose,
+        );
     }
 }
 
@@ -4110,6 +4114,34 @@ pub async fn authenticate_github_client(
 /// ```
 pub fn detect_platform(url: &str) -> Option<forge::Platform> {
     forge::Platform::from_url(url)
+}
+
+fn write_aggregate_report(
+    output_dir: &str,
+    total_targets: usize,
+    all_results: &[serde_json::Value],
+    verbose: bool,
+) {
+    let aggregate_path = format!("{}/aggregate_report.json", output_dir);
+    let payload = serde_json::json!({
+        "tool": "GitRecon",
+        "version": env!("CARGO_PKG_VERSION"),
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "total_targets": total_targets,
+        "scanned_targets": all_results.len(),
+        "results": all_results,
+    });
+
+    if let Err(e) = std::fs::write(
+        &aggregate_path,
+        serde_json::to_string_pretty(&payload).unwrap_or_default(),
+    ) {
+        if verbose {
+            eprintln!("  ⚠   Could not save aggregate report: {}", e);
+        }
+    } else if verbose {
+        println!("  ✔  Aggregate report saved: {}", aggregate_path);
+    }
 }
 
 fn load_extra_patterns(file_path: &str) -> Result<Vec<streamer::DynPattern>, Box<dyn std::error::Error>> {

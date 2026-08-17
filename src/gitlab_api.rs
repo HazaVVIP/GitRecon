@@ -5,7 +5,7 @@
 //! All requests are authenticated with `PRIVATE-TOKEN: <PAT>` and target
 //! `https://gitlab.com/api/v4` or self-hosted instances via --gitlab-url.
 
-use crate::forge::{EnumScope, Forge, Platform, RateLimitInfo, Repository, TreeEntry};
+use crate::forge::{EnumScope, Forge, Platform, RateLimitInfo, Repository, TreeEntry, normalize_api_base, with_header};
 use crate::http_client::{HttpClient, HttpConfig};
 use async_trait::async_trait;
 use std::time::{Duration, Instant};
@@ -319,11 +319,11 @@ pub struct GlTreeEntry {
 ///
 /// Clones `base_cfg` and injects the required GitLab header:
 /// - `PRIVATE-TOKEN: <PAT>`
-pub fn build_gitlab_client(mut base_cfg: HttpConfig, token: &str, gitlab_url: Option<&str>) -> anyhow::Result<(HttpClient, String)> {
-    let api_base = gitlab_url.unwrap_or(DEFAULT_GL_API).to_string();
+pub fn build_gitlab_client(base_cfg: HttpConfig, token: &str, gitlab_url: Option<&str>) -> anyhow::Result<(HttpClient, String)> {
+    let api_base = normalize_api_base(gitlab_url, DEFAULT_GL_API, Some("api/v4"));
 
-    base_cfg.extra_headers.push(("PRIVATE-TOKEN".to_string(), token.to_string()));
-    let client = HttpClient::new(base_cfg)?;
+    let cfg = with_header(base_cfg, "PRIVATE-TOKEN", token);
+    let client = HttpClient::new(cfg)?;
 
     Ok((client, api_base))
 }

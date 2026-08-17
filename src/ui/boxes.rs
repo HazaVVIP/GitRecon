@@ -568,14 +568,17 @@ mod tests {
 
     #[test]
     fn test_box_creation() {
-        let test_box = Box::with_title("Test").with_content(vec!["line1", "line2"]);
+        let mut test_box = Box::with_title("Test");
+        test_box.add_line("line1");
+        test_box.add_line("line2");
         assert_eq!(test_box.title, Some("Test".to_string()));
         assert_eq!(test_box.content.len(), 2);
     }
 
     #[test]
     fn test_box_render() {
-        let test_box = Box::with_title("Test").with_content(vec!["line1"]);
+        let mut test_box = Box::with_title("Test");
+        test_box.add_line("line1");
         let rendered = test_box.render();
         assert!(rendered.contains("Test"));
         assert!(rendered.contains("line1"));

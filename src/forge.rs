@@ -8,6 +8,7 @@
 use async_trait::async_trait;
 #[allow(unused_imports)]
 use base64::Engine;
+use crate::http_client::HttpConfig;
 use std::time::Duration;
 
 // ════════════════════════════════════════════════
@@ -90,6 +91,28 @@ impl Platform {
 impl std::fmt::Display for Platform {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.name())
+    }
+
+    /// Normalize API base URL from user input and optional required API suffix.
+    pub fn normalize_api_base(raw: Option<&str>, default_api_base: &str, required_suffix: Option<&str>) -> String {
+        let mut api_base = raw.unwrap_or(default_api_base).trim().trim_end_matches('/').to_string();
+
+        if let Some(suffix) = required_suffix {
+            let normalized_suffix = suffix.trim().trim_start_matches('/');
+            if !normalized_suffix.is_empty() && !api_base.ends_with(normalized_suffix) {
+                if !api_base.contains("/api/") {
+                    api_base = format!("{}/{}", api_base, normalized_suffix);
+                }
+            }
+        }
+
+        api_base
+    }
+
+    /// Add a single HTTP header to the shared HTTP config builder input.
+    pub fn with_header(mut cfg: HttpConfig, key: impl Into<String>, value: impl Into<String>) -> HttpConfig {
+        cfg.extra_headers.push((key.into(), value.into()));
+        cfg
     }
 }
 
@@ -238,6 +261,23 @@ pub trait Forge: Send + Sync {
 
     /// Get the platform identifier.
     fn platform(&self) -> Platform;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_api_base;
+
+    #[test]
+    fn normalize_api_base_appends_suffix_when_needed() {
+        let got = normalize_api_base(Some("https://example.com"), "https://default/api/v1", Some("api/v1"));
+        assert_eq!(got, "https://example.com/api/v1");
+    }
+
+    #[test]
+    fn normalize_api_base_keeps_existing_api_path() {
+        let got = normalize_api_base(Some("https://example.com/api/v4/"), "https://default/api/v4", Some("api/v4"));
+        assert_eq!(got, "https://example.com/api/v4");
+    }
 
     /// Resolve HEAD commit SHA for a branch.
     ///

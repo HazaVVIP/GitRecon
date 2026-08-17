@@ -6,7 +6,7 @@
 //! (on-premise TFS/VSTS). All requests are authenticated with Basic auth using
 //! the PAT as the username.
 
-use crate::forge::{EnumScope, Forge, Platform, RateLimitInfo, Repository, TreeEntry};
+use crate::forge::{EnumScope, Forge, Platform, RateLimitInfo, Repository, TreeEntry, normalize_api_base, with_header};
 use crate::http_client::{HttpClient, HttpConfig};
 use async_trait::async_trait;
 use std::time::{Duration, Instant};
@@ -468,16 +468,15 @@ pub struct AzTreeEntry {
 /// Create a new [`HttpClient`] configured for Azure DevOps API calls.
 ///
 /// Azure DevOps uses Basic authentication with the PAT as the username.
-pub fn build_azure_client(mut base_cfg: HttpConfig, token: &str, azure_url: Option<&str>) -> anyhow::Result<(HttpClient, String)> {
-    let api_base = azure_url.unwrap_or(DEFAULT_AZURE_API).to_string();
+pub fn build_azure_client(base_cfg: HttpConfig, token: &str, azure_url: Option<&str>) -> anyhow::Result<(HttpClient, String)> {
+    let api_base = normalize_api_base(azure_url, DEFAULT_AZURE_API, None);
 
     // Azure DevOps uses Basic auth with PAT as username (empty password)
     use base64::Engine;
     let encoded = base64::engine::general_purpose::STANDARD.encode(format!("{}:", token));
-    base_cfg.extra_headers.push(("Authorization".to_string(), format!("Basic {}", encoded)));
-    base_cfg.extra_headers.push(("Accept".to_string(), "application/json".to_string()));
-
-    let client = HttpClient::new(base_cfg)?;
+    let cfg = with_header(base_cfg, "Authorization", format!("Basic {}", encoded));
+    let cfg = with_header(cfg, "Accept", "application/json");
+    let client = HttpClient::new(cfg)?;
 
     Ok((client, api_base))
 }

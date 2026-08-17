@@ -7,7 +7,7 @@
 //!
 //! Compatible with Gitea 1.19+ and Forgejo (API-compatible fork).
 
-use crate::forge::{EnumScope, Forge, Platform, RateLimitInfo, Repository, TreeEntry};
+use crate::forge::{EnumScope, Forge, Platform, RateLimitInfo, Repository, TreeEntry, normalize_api_base, with_header};
 use crate::http_client::{HttpClient, HttpConfig};
 use async_trait::async_trait;
 use std::time::{Duration, Instant};
@@ -292,22 +292,11 @@ pub struct GtTreeEntry {
 ///
 /// Clones `base_cfg` and injects the required Gitea header:
 /// - `Authorization: token <PAT>`
-pub fn build_gitea_client(mut base_cfg: HttpConfig, token: &str, gitea_url: Option<&str>) -> anyhow::Result<(HttpClient, String)> {
-    let api_base = gitea_url.unwrap_or(DEFAULT_GT_API).to_string();
+pub fn build_gitea_client(base_cfg: HttpConfig, token: &str, gitea_url: Option<&str>) -> anyhow::Result<(HttpClient, String)> {
+    let api_base = normalize_api_base(gitea_url, DEFAULT_GT_API, Some("api/v1"));
 
-    // Ensure API base ends with /api/v1
-    let api_base = if api_base.ends_with("/api/v1") {
-        api_base
-    } else if api_base.ends_with("/api/v1/") {
-        api_base.trim_end_matches('/').to_string()
-    } else if api_base.contains("/api/") {
-        api_base
-    } else {
-        format!("{}/api/v1", api_base.trim_end_matches('/'))
-    };
-
-    base_cfg.extra_headers.push(("Authorization".to_string(), format!("token {}", token)));
-    let client = HttpClient::new(base_cfg)?;
+    let cfg = with_header(base_cfg, "Authorization", format!("token {}", token));
+    let client = HttpClient::new(cfg)?;
 
     Ok((client, api_base))
 }

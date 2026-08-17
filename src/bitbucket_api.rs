@@ -6,7 +6,7 @@
 //! All requests are authenticated with `Authorization: Bearer <APP_PASSWORD>` and target
 //! `https://api.bitbucket.org/2.0` or self-hosted instances.
 
-use crate::forge::{EnumScope, Forge, Platform, RateLimitInfo, Repository, TreeEntry};
+use crate::forge::{EnumScope, Forge, Platform, RateLimitInfo, Repository, TreeEntry, normalize_api_base};
 use crate::http_client::{HttpClient, HttpConfig};
 use async_trait::async_trait;
 use std::time::{Duration, Instant};
@@ -422,11 +422,11 @@ pub struct BbTreeEntry {
 /// Clones `base_cfg` and injects the required Bitbucket header:
 /// - `Authorization: Bearer <APP_PASSWORD>`
 pub fn build_bitbucket_client(
-    mut base_cfg: HttpConfig,
+    base_cfg: HttpConfig,
     token: &str,
     bitbucket_url: Option<&str>,
 ) -> anyhow::Result<(HttpClient, String)> {
-    let api_base = bitbucket_url.unwrap_or(DEFAULT_BB_API).to_string();
+    let api_base = normalize_api_base(bitbucket_url, DEFAULT_BB_API, None);
 
     // Bitbucket uses Bearer auth with App Password
     base_cfg.extra_headers.push(("Authorization".to_string(), format!("Bearer {}", token)));

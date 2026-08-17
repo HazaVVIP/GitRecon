@@ -5,7 +5,7 @@
 //! All requests are authenticated with `Authorization: token <PAT>` and target
 //! `https://api.github.com`.
 
-use crate::forge::{EnumScope, Forge, Platform, RateLimitInfo, Repository, TreeEntry};
+use crate::forge::{EnumScope, Forge, Platform, RateLimitInfo, Repository, TreeEntry, with_header};
 use crate::http_client::{HttpClient, HttpConfig};
 use async_trait::async_trait;
 use std::time::{Duration, Instant};
@@ -283,11 +283,11 @@ pub struct GhTreeEntry {
 /// - `Authorization: token <PAT>`
 /// - `Accept: application/vnd.github+json`
 /// - `X-GitHub-Api-Version: 2022-11-28`
-pub fn build_github_client(mut base_cfg: HttpConfig, token: &str) -> anyhow::Result<HttpClient> {
-    base_cfg.extra_headers.push(("Authorization".to_string(), format!("token {}", token)));
-    base_cfg.extra_headers.push(("Accept".to_string(), "application/vnd.github+json".to_string()));
-    base_cfg.extra_headers.push(("X-GitHub-Api-Version".to_string(), "2022-11-28".to_string()));
-    HttpClient::new(base_cfg)
+pub fn build_github_client(base_cfg: HttpConfig, token: &str) -> anyhow::Result<HttpClient> {
+    let cfg = with_header(base_cfg, "Authorization", format!("token {}", token));
+    let cfg = with_header(cfg, "Accept", "application/vnd.github+json");
+    let cfg = with_header(cfg, "X-GitHub-Api-Version", "2022-11-28");
+    HttpClient::new(cfg)
 }
 
 // ════════════════════════════════════════════════
