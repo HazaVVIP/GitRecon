@@ -78,6 +78,10 @@ const MIN_CONFIDENCE: u32 = 20;
 const PROTECTED_CONFIDENCE: u32 = 25;
 const PROTECTED_LABEL: &str = "PROTECTED";
 
+fn is_accessible_status(status: u16) -> bool {
+    (200..300).contains(&status)
+}
+
 #[derive(Debug, Clone)]
 pub struct ProbeDetail {
     #[allow(dead_code)]
@@ -163,8 +167,8 @@ async fn detect_server(client: &HttpClient, url: &str) -> String {
 async fn check_listing(client: &HttpClient, git_url: &str) -> bool {
     let url = format!("{}/", git_url);
     let r = client.get(&url).await;
-    let resp = if r.ok() { r } else { client.get(git_url).await };
-    if !resp.ok() {
+    let resp = if is_accessible_status(r.status) { r } else { client.get(git_url).await };
+    if !is_accessible_status(resp.status) {
         return false;
     }
     let t = resp.text().to_lowercase();
@@ -194,7 +198,7 @@ async fn probe_one_path(
     for &(path, verify, weight) in PROBES {
         let url  = format!("{}/{}", git_url, path);
         let resp = client.get(&url).await;
-        let ok   = resp.ok();
+        let ok   = is_accessible_status(resp.status);
         let mut valid = false;
 
         if ok {
@@ -421,6 +425,16 @@ mod tests {
             PROTECTED_CONFIDENCE >= MIN_CONFIDENCE,
             "PROTECTED_CONFIDENCE must be at least MIN_CONFIDENCE so protected results are reported"
         );
+    }
+
+    #[test]
+    fn test_is_accessible_status_accepts_all_2xx() {
+        assert!(is_accessible_status(200));
+        assert!(is_accessible_status(204));
+        assert!(is_accessible_status(206));
+        assert!(is_accessible_status(299));
+        assert!(!is_accessible_status(301));
+        assert!(!is_accessible_status(403));
     }
 
     // ── V3.1 fuzz path tests ──────────────────────
