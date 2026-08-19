@@ -608,6 +608,21 @@ mod tests {
     }
 
     #[test]
+    fn test_read_elf_uint_supports_endian_widths() {
+        assert_eq!(read_elf_uint(&[0x34, 0x12], 0, 2, false), Some(0x1234));
+        assert_eq!(read_elf_uint(&[0x12, 0x34], 0, 2, true), Some(0x1234));
+        assert_eq!(
+            read_elf_uint(&[0x78, 0x56, 0x34, 0x12], 0, 4, false),
+            Some(0x12345678)
+        );
+        assert_eq!(
+            read_elf_uint(&[0x12, 0x34, 0x56, 0x78], 0, 4, true),
+            Some(0x12345678)
+        );
+        assert_eq!(read_elf_uint(&[0, 1, 2], 1, 4, false), None);
+    }
+
+    #[test]
     fn test_extract_elf_strings_prefers_named_sections() {
         let mut elf = vec![0u8; 0x300];
         elf[..4].copy_from_slice(magic::ELF);
