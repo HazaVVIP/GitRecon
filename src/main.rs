@@ -47,6 +47,7 @@ mod targets;
 mod temp_cleanup; // SEC-004: Temp file cleanup
 mod text_utils;
 mod ui;
+mod url_pipeline;
 mod validation;
 
 use std::io::{self, Write};
@@ -62,6 +63,7 @@ use forge_scan::BlobEntry;
 use futures::StreamExt;
 use outcome::{classify_error, ScanSummary, TargetErrorCode, TargetOutcome, TargetStatus};
 use scanner_factory::build_streamer;
+use url_pipeline::run_stream;
 
 use binary_adapter::{binary_findings_to_findings, is_binary_extension};
 use colored::Colorize;
@@ -327,26 +329,7 @@ async fn run_url_target(context: UrlRunContext<'_>, url: String, fuzz: bool) -> 
         false_positive_keywords.to_vec(),
     );
 
-    let rep_arc = Arc::new(rep.clone());
-    let rep_for_progress = rep_arc.clone();
-    let stream_r = streamer
-        .run(
-            &dr.git_url,
-            &map_r,
-            if quiet {
-                None
-            } else {
-                Some(Arc::new(move |done: usize, total: usize| {
-                    rep_for_progress.progress_bar(done, total, 0);
-                }))
-            },
-            save_dir,
-        )
-        .await;
-
-    if verbose {
-        println!();
-    }
+    let stream_r = run_stream(&streamer, &dr.git_url, &map_r, rep, verbose, save_dir).await;
 
     // ── Intelligence Report ──────────────────────────────────────
     if verbose {
