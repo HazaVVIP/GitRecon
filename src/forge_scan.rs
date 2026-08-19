@@ -473,15 +473,16 @@ pub(crate) async fn run_repository_scan_loop(
 mod tests {
     use std::collections::HashSet;
     use std::fs;
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Instant;
 
     use super::{
-        build_stream_result, reconstruct_blobs, scan_workspace_files, FileScanConfig,
-        RepositoryScanOutcome, RepositoryScanRequest, WorkspaceLifecycle,
+        build_stream_result, reconstruct_blobs, run_repository_scan_loop, scan_workspace_files,
+        FileScanConfig, RepositoryScanOutcome, RepositoryScanRequest, WorkspaceLifecycle,
     };
-    use crate::forge::{Platform, Repository, TreeEntry};
+    use crate::forge::{EnumScope, Forge, Platform, RateLimitInfo, Repository, TreeEntry};
     use crate::streamer::DynPattern;
     use tokio::sync::Mutex;
 
@@ -631,6 +632,92 @@ mod tests {
         drop(temporary);
         assert!(!temporary_root.exists());
         fs::remove_dir_all(output).expect("test output root should be removable");
+    }
+
+    struct EmptyForge;
+
+    #[async_trait::async_trait]
+    impl Forge for EmptyForge {
+        async fn authenticate(&mut self, _token: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn enumerate_repos(&self, _scope: EnumScope) -> anyhow::Result<Vec<Repository>> {
+            Ok(Vec::new())
+        }
+
+        async fn get_tree(
+            &self,
+            _repo: &Repository,
+            _branch: &str,
+        ) -> anyhow::Result<Vec<TreeEntry>> {
+            Ok(Vec::new())
+        }
+
+        async fn get_blob(&self, _repo: &Repository, _sha: &str) -> anyhow::Result<Vec<u8>> {
+            Ok(Vec::new())
+        }
+
+        fn rate_limit_remaining(&self) -> Option<(u32, std::time::Duration)> {
+            None
+        }
+
+        fn rate_limit_info(&self) -> Option<RateLimitInfo> {
+            None
+        }
+
+        fn platform(&self) -> Platform {
+            Platform::GitHub
+        }
+
+        async fn get_head_sha(&self, _repo: &Repository, _branch: &str) -> anyhow::Result<String> {
+            Ok(String::new())
+        }
+
+        async fn whoami(&self) -> anyhow::Result<(String, String)> {
+            Ok(("empty".to_string(), "Empty Forge".to_string()))
+        }
+    }
+
+    #[tokio::test]
+    async fn run_repository_scan_loop_handles_empty_selection() {
+        let workspace = WorkspaceLifecycle::new(
+            &std::env::temp_dir(),
+            "gitrecon-empty-selection",
+            true,
+            "gitrecon_empty_selection_scan",
+        );
+        let result = run_repository_scan_loop(
+            &EmptyForge,
+            &[],
+            &workspace,
+            FileScanConfig {
+                workspace: PathBuf::new(),
+                repository_name: String::new(),
+                max_blob_bytes: 1024,
+                workers: 1,
+                exhaustive: true,
+                entropy_threshold: 4.5,
+                live: false,
+                pipe: false,
+                verbose: false,
+                max_findings: 0,
+                stop_on_critical: false,
+                extra_patterns: Arc::new(Vec::new()),
+                stop_flag: Arc::new(AtomicBool::new(false)),
+                all_findings: Arc::new(Mutex::new(Vec::new())),
+                tech_stack_set: Arc::new(Mutex::new(HashSet::new())),
+                blobs_scanned: Arc::new(AtomicUsize::new(0)),
+                blobs_failed: Arc::new(AtomicUsize::new(0)),
+                bytes_scanned: Arc::new(AtomicUsize::new(0)),
+            },
+            Instant::now(),
+        )
+        .await;
+        assert!(result.findings.is_empty());
+        assert_eq!(result.blobs_scanned, 0);
+        assert_eq!(result.blobs_failed, 0);
+        assert_eq!(result.bytes_scanned, 0);
     }
 
     #[tokio::test]
