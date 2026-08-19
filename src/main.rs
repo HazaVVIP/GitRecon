@@ -27,6 +27,7 @@ mod config;
 mod detect;
 mod forge;
 mod forge_factory;
+mod forge_scan;
 mod git_parser;
 mod gitea_api; // GIT-003: Gitea/Forgejo support
 mod github_api;
@@ -56,6 +57,7 @@ use std::time::{Duration, Instant};
 use clap::Parser;
 use forge::Forge;
 use forge_factory::create_forge_client;
+use forge_scan::{BlobEntry, RepositoryScanOutcome, RepositoryScanRequest};
 use futures::StreamExt;
 use outcome::{classify_error, ScanSummary, TargetErrorCode, TargetOutcome, TargetStatus};
 
@@ -1282,59 +1284,36 @@ async fn run_token_scan(
         };
         let _ = std::fs::create_dir_all(&repo_workspace);
 
-        // Reconstruct source workspace from tree blobs
-        let blobs: Vec<_> = tree
-            .into_iter()
-            .filter(|e| e.obj_type == "blob")
-            .filter(|e| e.size.is_none_or(|s| s <= max_blob_bytes as u64))
-            .collect();
-
-        if verbose && !blobs.is_empty() {
-            println!("      Reconstructing {} files into workspace", blobs.len());
+        // Reconstruct source workspace from tree blobs.
+        let blob_count = tree
+            .iter()
+            .filter(|entry| entry.obj_type == "blob")
+            .filter(|entry| entry.size.is_none_or(|size| size <= max_blob_bytes as u64))
+            .count();
+        if verbose && blob_count > 0 {
+            println!("      Reconstructing {} files into workspace", blob_count);
         }
-
-        let reconstruct_stream = futures::stream::iter(blobs)
-            .map(|entry| {
-                let client = gh_client.clone();
-                let owner = repo.owner.clone();
-                let name = repo.name.clone();
-                let workspace = repo_workspace.clone();
+        let client = gh_client.clone();
+        let owner = repo.owner.clone();
+        let name = repo.name.clone();
+        let failed = forge_scan::reconstruct_blobs(
+            tree,
+            repo_workspace.clone(),
+            max_blob_bytes,
+            args.workers,
+            move |entry| {
+                let client = client.clone();
+                let owner = owner.clone();
+                let name = name.clone();
                 async move {
-                    let data = match github_api::get_blob_content(
-                        &client, &owner, &name, &entry.sha,
-                    )
-                    .await
-                    {
-                        Ok(d) => d,
-                        Err(_) => return false,
-                    };
-                    if data.len() > max_blob_bytes {
-                        return false;
-                    }
-                    let rel = match normalize_repo_relative_path(&entry.path) {
-                        Some(r) => r,
-                        None => return false,
-                    };
-                    let local_path = workspace.join(rel);
-                    if !local_path.starts_with(&workspace) {
-                        return false;
-                    }
-                    if let Some(parent) = local_path.parent() {
-                        if std::fs::create_dir_all(parent).is_err() {
-                            return false;
-                        }
-                    }
-                    std::fs::write(local_path, &data).is_ok()
+                    github_api::get_blob_content(&client, &owner, &name, entry.sha())
+                        .await
+                        .map_err(|error| anyhow::anyhow!(error))
                 }
-            })
-            .buffer_unordered(args.workers);
-
-        futures::pin_mut!(reconstruct_stream);
-        while let Some(ok) = reconstruct_stream.next().await {
-            if !ok {
-                blobs_failed.fetch_add(1, Ordering::Relaxed);
-            }
-        }
+            },
+        )
+        .await;
+        blobs_failed.fetch_add(failed, Ordering::Relaxed);
 
         let mut candidates: Vec<PathBuf> = collect_local_files(&repo_workspace)
             .into_iter()
@@ -1732,13 +1711,9 @@ async fn run_gitlab_token_scan(
             break;
         }
 
+        let scan_request = RepositoryScanRequest::new(repo.clone(), repo_idx, selected_repo_count);
         if verbose {
-            println!(
-                "  ▶  [{}/{}] {}",
-                repo_idx + 1,
-                selected_repo_count,
-                repo.full_name
-            );
+            println!("  ▶  {}", scan_request.progress_label());
         }
 
         // Get HEAD SHA for the default branch
@@ -1764,68 +1739,46 @@ async fn run_gitlab_token_scan(
         };
 
         let repo_workspace = if let Some(root) = save_root.as_ref() {
-            root.join(repo.full_name.replace('/', "_"))
+            root.join(scan_request.workspace_name())
         } else if let Some(root) = temp_root.as_ref() {
-            root.join(repo.full_name.replace('/', "_"))
+            root.join(scan_request.workspace_name())
         } else {
             continue;
         };
         let _ = std::fs::create_dir_all(&repo_workspace);
 
-        // Reconstruct source workspace from tree blobs
-        let blobs: Vec<_> = tree
-            .into_iter()
-            .filter(|e| e.obj_type == "blob")
-            .filter(|e| e.size.is_none_or(|s| s <= max_blob_bytes as u64))
-            .collect();
-
-        if verbose && !blobs.is_empty() {
-            println!("      Reconstructing {} files into workspace", blobs.len());
+        // Reconstruct source workspace from tree blobs.
+        let blob_count = tree
+            .iter()
+            .filter(|entry| entry.obj_type == "blob")
+            .filter(|entry| entry.size.is_none_or(|size| size <= max_blob_bytes as u64))
+            .count();
+        if verbose && blob_count > 0 {
+            println!("      Reconstructing {} files into workspace", blob_count);
         }
-
-        let reconstruct_stream = futures::stream::iter(blobs)
-            .map(|entry| {
-                let client = gl_client.clone();
+        let client = gl_client.clone();
+        let api_base = api_base.clone();
+        let owner = repo.owner.clone();
+        let name = repo.name.clone();
+        let failed = forge_scan::reconstruct_blobs(
+            tree,
+            repo_workspace.clone(),
+            max_blob_bytes,
+            args.workers,
+            move |entry| {
+                let client = client.clone();
                 let api_base = api_base.clone();
-                let owner = repo.owner.clone();
-                let name = repo.name.clone();
-                let workspace = repo_workspace.clone();
+                let owner = owner.clone();
+                let name = name.clone();
                 async move {
-                    let data = match gitlab_api::get_blob_content(
-                        &client, &api_base, &owner, &name, &entry.sha,
-                    )
-                    .await
-                    {
-                        Ok(d) => d,
-                        Err(_) => return false,
-                    };
-                    if data.len() > max_blob_bytes {
-                        return false;
-                    }
-                    let rel = match normalize_repo_relative_path(&entry.path) {
-                        Some(r) => r,
-                        None => return false,
-                    };
-                    let local_path = workspace.join(rel);
-                    if !local_path.starts_with(&workspace) {
-                        return false;
-                    }
-                    if let Some(parent) = local_path.parent() {
-                        if std::fs::create_dir_all(parent).is_err() {
-                            return false;
-                        }
-                    }
-                    std::fs::write(local_path, &data).is_ok()
+                    gitlab_api::get_blob_content(&client, &api_base, &owner, &name, entry.sha())
+                        .await
+                        .map_err(|error| anyhow::anyhow!(error))
                 }
-            })
-            .buffer_unordered(args.workers);
-
-        futures::pin_mut!(reconstruct_stream);
-        while let Some(ok) = reconstruct_stream.next().await {
-            if !ok {
-                blobs_failed.fetch_add(1, Ordering::Relaxed);
-            }
-        }
+            },
+        )
+        .await;
+        blobs_failed.fetch_add(failed, Ordering::Relaxed);
 
         let mut candidates: Vec<PathBuf> = collect_local_files(&repo_workspace)
             .into_iter()
@@ -1953,15 +1906,20 @@ async fn run_gitlab_token_scan(
     let findings = all_findings.lock().await.clone();
     let mut ts_vec: Vec<String> = tech_stack_set.lock().await.iter().cloned().collect();
     ts_vec.sort();
+    let scan_outcome = RepositoryScanOutcome::from_counts(
+        blobs_scanned.load(Ordering::Relaxed),
+        blobs_failed.load(Ordering::Relaxed),
+        bytes_scanned.load(Ordering::Relaxed),
+    );
 
     let stream_r = StreamResult {
         findings,
         contributors: vec![],
         tech_stack: ts_vec,
         commit_count: 0,
-        blobs_scanned: blobs_scanned.load(Ordering::Relaxed),
-        blobs_failed: blobs_failed.load(Ordering::Relaxed),
-        bytes_scanned: bytes_scanned.load(Ordering::Relaxed),
+        blobs_scanned: scan_outcome.blobs_recovered,
+        blobs_failed: scan_outcome.blobs_failed,
+        bytes_scanned: scan_outcome.bytes_scanned,
         elapsed_s,
         files_saved: 0,
         files_save_failed: 0,
@@ -1972,12 +1930,10 @@ async fn run_gitlab_token_scan(
         rate_limit_dropped: 0,
         rate_limit_wait_ms: 0,
     };
-
     // ── 6. Terminal summary ──────────────────────
     if verbose && !args.pipe {
         rep.print_findings_summary(&stream_r.findings);
     }
-
     // ── 7. Save report ───────────────────────────
     let report_name = format!("gitlab_{}", login);
     let ext = match args.format.as_str() {
@@ -2316,28 +2272,33 @@ async fn run_bitbucket_token_scan(
         };
         let _ = std::fs::create_dir_all(&repo_workspace);
 
-        // Reconstruct source workspace from tree blobs
-        let blobs: Vec<_> = tree
-            .into_iter()
-            .filter(|e| e.obj_type == "blob")
-            .filter(|e| e.size.is_none_or(|s| s <= max_blob_bytes as u64))
-            .collect();
-
-        if verbose && !blobs.is_empty() {
-            println!("      Reconstructing {} files into workspace", blobs.len());
+        // Reconstruct source workspace from tree blobs.
+        let blob_count = tree
+            .iter()
+            .filter(|entry| entry.obj_type == "blob")
+            .filter(|entry| entry.size.is_none_or(|size| size <= max_blob_bytes as u64))
+            .count();
+        if verbose && blob_count > 0 {
+            println!("      Reconstructing {} files into workspace", blob_count);
         }
-
-        let reconstruct_stream = futures::stream::iter(blobs)
-            .map(|entry| {
-                let client = bb_client.clone();
+        let client = bb_client.clone();
+        let api_base = api_base.clone();
+        let owner = repo.owner.clone();
+        let name = repo.name.clone();
+        let commit_sha = head_sha.clone();
+        let failed = forge_scan::reconstruct_blobs(
+            tree,
+            repo_workspace.clone(),
+            max_blob_bytes,
+            args.workers,
+            move |entry| {
+                let client = client.clone();
                 let api_base = api_base.clone();
-                let owner = repo.owner.clone();
-                let name = repo.name.clone();
-                let workspace = repo_workspace.clone();
-                let commit_sha = head_sha.clone();
+                let owner = owner.clone();
+                let name = name.clone();
+                let commit_sha = commit_sha.clone();
                 async move {
-                    // Bitbucket requires file path to fetch content
-                    let data = match bitbucket_api::get_file_by_path(
+                    bitbucket_api::get_file_by_path(
                         &client,
                         &api_base,
                         &owner,
@@ -2346,37 +2307,12 @@ async fn run_bitbucket_token_scan(
                         &entry.path,
                     )
                     .await
-                    {
-                        Ok(d) => d,
-                        Err(_) => return false,
-                    };
-                    if data.len() > max_blob_bytes {
-                        return false;
-                    }
-                    let rel = match normalize_repo_relative_path(&entry.path) {
-                        Some(r) => r,
-                        None => return false,
-                    };
-                    let local_path = workspace.join(rel);
-                    if !local_path.starts_with(&workspace) {
-                        return false;
-                    }
-                    if let Some(parent) = local_path.parent() {
-                        if std::fs::create_dir_all(parent).is_err() {
-                            return false;
-                        }
-                    }
-                    std::fs::write(local_path, &data).is_ok()
+                    .map_err(|error| anyhow::anyhow!(error))
                 }
-            })
-            .buffer_unordered(args.workers);
-
-        futures::pin_mut!(reconstruct_stream);
-        while let Some(ok) = reconstruct_stream.next().await {
-            if !ok {
-                blobs_failed.fetch_add(1, Ordering::Relaxed);
-            }
-        }
+            },
+        )
+        .await;
+        blobs_failed.fetch_add(failed, Ordering::Relaxed);
 
         let mut candidates: Vec<PathBuf> = collect_local_files(&repo_workspace)
             .into_iter()
@@ -2843,60 +2779,38 @@ async fn run_gitea_token_scan(
         };
         let _ = std::fs::create_dir_all(&repo_workspace);
 
-        // Reconstruct source workspace from tree blobs
-        let blobs: Vec<_> = tree
-            .into_iter()
-            .filter(|e| e.obj_type == "blob")
-            .filter(|e| e.size.is_none_or(|s| s <= max_blob_bytes as u64))
-            .collect();
-
-        if verbose && !blobs.is_empty() {
-            println!("      Reconstructing {} files into workspace", blobs.len());
+        // Reconstruct source workspace from tree blobs.
+        let blob_count = tree
+            .iter()
+            .filter(|entry| entry.obj_type == "blob")
+            .filter(|entry| entry.size.is_none_or(|size| size <= max_blob_bytes as u64))
+            .count();
+        if verbose && blob_count > 0 {
+            println!("      Reconstructing {} files into workspace", blob_count);
         }
-
-        let reconstruct_stream = futures::stream::iter(blobs)
-            .map(|entry| {
-                let client = gt_client.clone();
+        let client = gt_client.clone();
+        let api_base = api_base.clone();
+        let owner = repo.owner.clone();
+        let name = repo.name.clone();
+        let failed = forge_scan::reconstruct_blobs(
+            tree,
+            repo_workspace.clone(),
+            max_blob_bytes,
+            args.workers,
+            move |entry| {
+                let client = client.clone();
                 let api_base = api_base.clone();
-                let owner = repo.owner.clone();
-                let name = repo.name.clone();
-                let workspace = repo_workspace.clone();
+                let owner = owner.clone();
+                let name = name.clone();
                 async move {
-                    let data = match gitea_api::get_blob_content(
-                        &client, &api_base, &owner, &name, &entry.sha,
-                    )
-                    .await
-                    {
-                        Ok(d) => d,
-                        Err(_) => return false,
-                    };
-                    if data.len() > max_blob_bytes {
-                        return false;
-                    }
-                    let rel = match normalize_repo_relative_path(&entry.path) {
-                        Some(r) => r,
-                        None => return false,
-                    };
-                    let local_path = workspace.join(rel);
-                    if !local_path.starts_with(&workspace) {
-                        return false;
-                    }
-                    if let Some(parent) = local_path.parent() {
-                        if std::fs::create_dir_all(parent).is_err() {
-                            return false;
-                        }
-                    }
-                    std::fs::write(local_path, &data).is_ok()
+                    gitea_api::get_blob_content(&client, &api_base, &owner, &name, entry.sha())
+                        .await
+                        .map_err(|error| anyhow::anyhow!(error))
                 }
-            })
-            .buffer_unordered(args.workers);
-
-        futures::pin_mut!(reconstruct_stream);
-        while let Some(ok) = reconstruct_stream.next().await {
-            if !ok {
-                blobs_failed.fetch_add(1, Ordering::Relaxed);
-            }
-        }
+            },
+        )
+        .await;
+        blobs_failed.fetch_add(failed, Ordering::Relaxed);
 
         let mut candidates: Vec<PathBuf> = collect_local_files(&repo_workspace)
             .into_iter()
@@ -3349,60 +3263,36 @@ async fn run_azure_token_scan(
         };
         let _ = std::fs::create_dir_all(&repo_workspace);
 
-        // Reconstruct source workspace from tree blobs
-        let blobs: Vec<_> = tree
-            .into_iter()
-            .filter(|e| e.obj_type == "blob")
-            .filter(|e| e.size.is_none_or(|s| s <= max_blob_bytes as u64))
-            .collect();
-
-        if verbose && !blobs.is_empty() {
-            println!("      Reconstructing {} files into workspace", blobs.len());
+        // Reconstruct source workspace from tree blobs.
+        let blob_count = tree
+            .iter()
+            .filter(|entry| entry.obj_type == "blob")
+            .filter(|entry| entry.size.is_none_or(|size| size <= max_blob_bytes as u64))
+            .count();
+        if verbose && blob_count > 0 {
+            println!("      Reconstructing {} files into workspace", blob_count);
         }
-
-        let reconstruct_stream = futures::stream::iter(blobs)
-            .map(|entry| {
-                let client = az_client.clone();
+        let client = az_client.clone();
+        let api_base = api_base.clone();
+        let repo_id = repo.full_name.clone();
+        let failed = forge_scan::reconstruct_blobs(
+            tree,
+            repo_workspace.clone(),
+            max_blob_bytes,
+            args.workers,
+            move |entry| {
+                let client = client.clone();
                 let api_base = api_base.clone();
-                let repo_id = repo.full_name.clone();
-                let workspace = repo_workspace.clone();
-                let entry_path = entry.path.clone();
-                let entry_sha = entry.sha.clone();
+                let repo_id = repo_id.clone();
                 async move {
-                    let data =
-                        match azure_api::get_blob_content(&client, &api_base, &repo_id, &entry_sha)
-                            .await
-                        {
-                            Ok(d) => d,
-                            Err(_) => return false,
-                        };
-                    if data.len() > max_blob_bytes {
-                        return false;
-                    }
-                    let rel = match normalize_repo_relative_path(&entry_path) {
-                        Some(r) => r,
-                        None => return false,
-                    };
-                    let local_path = workspace.join(rel);
-                    if !local_path.starts_with(&workspace) {
-                        return false;
-                    }
-                    if let Some(parent) = local_path.parent() {
-                        if std::fs::create_dir_all(parent).is_err() {
-                            return false;
-                        }
-                    }
-                    std::fs::write(local_path, &data).is_ok()
+                    azure_api::get_blob_content(&client, &api_base, &repo_id, entry.sha())
+                        .await
+                        .map_err(|error| anyhow::anyhow!(error))
                 }
-            })
-            .buffer_unordered(args.workers);
-
-        futures::pin_mut!(reconstruct_stream);
-        while let Some(ok) = reconstruct_stream.next().await {
-            if !ok {
-                blobs_failed.fetch_add(1, Ordering::Relaxed);
-            }
-        }
+            },
+        )
+        .await;
+        blobs_failed.fetch_add(failed, Ordering::Relaxed);
 
         let mut candidates: Vec<PathBuf> = collect_local_files(&repo_workspace)
             .into_iter()
