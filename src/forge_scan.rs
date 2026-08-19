@@ -3,10 +3,16 @@
 //! Forge adapters remain responsible for fetching provider-specific data. These
 //! types describe the common execution contract consumed by the scanner loop.
 
+use std::collections::HashSet;
 use std::future::Future;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::Instant;
 
 use crate::forge::Repository;
+use crate::streamer::{DynPattern, Finding, StreamResult};
+use tokio::sync::Mutex;
 
 pub(crate) trait BlobEntry: Clone + Send + 'static {
     fn is_blob(&self) -> bool;
@@ -161,12 +167,194 @@ where
     failed
 }
 
+/// Build the provider-neutral result for a forge repository scan.
+pub(crate) async fn build_stream_result(
+    started_at: Instant,
+    all_findings: Arc<Mutex<Vec<Finding>>>,
+    tech_stack_set: Arc<Mutex<HashSet<String>>>,
+    blobs_scanned: Arc<AtomicUsize>,
+    blobs_failed: Arc<AtomicUsize>,
+    bytes_scanned: Arc<AtomicUsize>,
+) -> StreamResult {
+    let findings = all_findings.lock().await.clone();
+    let mut tech_stack: Vec<String> = tech_stack_set.lock().await.iter().cloned().collect();
+    tech_stack.sort();
+    let outcome = RepositoryScanOutcome::from_counts(
+        blobs_scanned.load(Ordering::Relaxed),
+        blobs_failed.load(Ordering::Relaxed),
+        bytes_scanned.load(Ordering::Relaxed),
+    );
+    StreamResult {
+        findings,
+        contributors: vec![],
+        tech_stack,
+        commit_count: 0,
+        blobs_scanned: outcome.blobs_recovered,
+        blobs_failed: outcome.blobs_failed,
+        bytes_scanned: outcome.bytes_scanned,
+        elapsed_s: started_at.elapsed().as_secs_f64(),
+        files_saved: 0,
+        files_save_failed: 0,
+        cache_hits: 0,
+        cache_misses: 0,
+        cache_stats: None,
+        rate_limit_allowed: 0,
+        rate_limit_dropped: 0,
+        rate_limit_wait_ms: 0,
+    }
+}
+
+/// Configuration and shared state for scanning reconstructed repository files.
+#[derive(Clone)]
+pub(crate) struct FileScanConfig {
+    pub(crate) workspace: PathBuf,
+    pub(crate) repository_name: String,
+    pub(crate) max_blob_bytes: usize,
+    pub(crate) workers: usize,
+    pub(crate) exhaustive: bool,
+    pub(crate) entropy_threshold: f64,
+    pub(crate) live: bool,
+    pub(crate) pipe: bool,
+    pub(crate) verbose: bool,
+    pub(crate) max_findings: usize,
+    pub(crate) stop_on_critical: bool,
+    pub(crate) extra_patterns: Arc<Vec<DynPattern>>,
+    pub(crate) stop_flag: Arc<AtomicBool>,
+    pub(crate) all_findings: Arc<Mutex<Vec<Finding>>>,
+    pub(crate) tech_stack_set: Arc<Mutex<HashSet<String>>>,
+    pub(crate) blobs_scanned: Arc<AtomicUsize>,
+    pub(crate) blobs_failed: Arc<AtomicUsize>,
+    pub(crate) bytes_scanned: Arc<AtomicUsize>,
+}
+
+/// Scan all eligible files in a reconstructed repository workspace.
+pub(crate) async fn scan_workspace_files(config: FileScanConfig) {
+    let mut candidates: Vec<PathBuf> = crate::collect_local_files(&config.workspace)
+        .into_iter()
+        .filter(|(path, size)| {
+            !crate::binary_adapter::is_binary_extension(&path.to_string_lossy())
+                && *size <= config.max_blob_bytes as u64
+        })
+        .map(|(path, _)| path)
+        .collect();
+    candidates.sort_by_key(|path| {
+        if crate::streamer::is_ai_sensitive_path(&path.to_string_lossy()) {
+            0
+        } else {
+            1
+        }
+    });
+
+    if config.verbose {
+        println!("      Scanning {} workspace files", candidates.len());
+    }
+
+    let file_stream = futures::stream::iter(candidates)
+        .map(|path| {
+            let stop_flag = config.stop_flag.clone();
+            let extra_patterns = config.extra_patterns.clone();
+            let workspace = config.workspace.clone();
+            let repository_name = config.repository_name.clone();
+            let entropy_threshold = config.entropy_threshold;
+            async move {
+                if stop_flag.load(Ordering::Relaxed) {
+                    return (Vec::new(), Vec::new(), 0usize, false, true);
+                }
+                let data = match tokio::fs::read(&path).await {
+                    Ok(data) => data,
+                    Err(_) => return (Vec::new(), Vec::new(), 0usize, true, false),
+                };
+                if data.is_empty() {
+                    return (Vec::new(), Vec::new(), 0usize, false, false);
+                }
+                let probe = &data[..data.len().min(crate::BINARY_DETECTION_PROBE_SIZE)];
+                let null_count = probe.iter().filter(|&&byte| byte == 0).count();
+                if null_count > crate::NULL_BYTE_THRESHOLD {
+                    return (Vec::new(), Vec::new(), 0usize, false, false);
+                }
+                let text = String::from_utf8_lossy(&data);
+                let relative_path = path
+                    .strip_prefix(&workspace)
+                    .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+                    .unwrap_or_else(|_| path.to_string_lossy().replace('\\', "/"));
+                let source = format!("{}/{}", repository_name, relative_path);
+                let findings = if config.exhaustive {
+                    crate::streamer::scan_text_exhaustive(
+                        &text,
+                        &source,
+                        &extra_patterns,
+                        entropy_threshold,
+                    )
+                } else {
+                    crate::streamer::scan_text(&text, &source, &extra_patterns, entropy_threshold)
+                };
+                let mut technologies = Vec::new();
+                crate::detect_tech_from_path(&relative_path, &mut technologies);
+                (findings, technologies, data.len(), false, false)
+            }
+        })
+        .buffer_unordered(config.workers.max(1));
+    futures::pin_mut!(file_stream);
+    while let Some((findings, technologies, bytes, failed, skipped_by_stop)) =
+        file_stream.next().await
+    {
+        if skipped_by_stop {
+            continue;
+        }
+        if failed {
+            config.blobs_failed.fetch_add(1, Ordering::Relaxed);
+            continue;
+        }
+        if bytes > 0 {
+            config.blobs_scanned.fetch_add(1, Ordering::Relaxed);
+            config.bytes_scanned.fetch_add(bytes, Ordering::Relaxed);
+        }
+        if !technologies.is_empty() {
+            let mut tech_stack = config.tech_stack_set.lock().await;
+            tech_stack.extend(technologies);
+        }
+        if findings.is_empty() {
+            continue;
+        }
+        if config.live || config.pipe {
+            for finding in &findings {
+                println!(
+                    "{}",
+                    serde_json::to_string(&finding.to_dict()).unwrap_or_default()
+                );
+            }
+        }
+        let mut all_findings = config.all_findings.lock().await;
+        all_findings.extend(findings);
+        if crate::should_stop_scan(&all_findings, config.max_findings, config.stop_on_critical) {
+            config.stop_flag.store(true, Ordering::Relaxed);
+            if config.verbose {
+                if config.max_findings > 0 && all_findings.len() >= config.max_findings {
+                    println!("\n  [!] Reached --max-findings limit. Stopping scan.");
+                } else {
+                    println!("\n  [!] --stop-on-critical triggered. Stopping scan.");
+                }
+            }
+            break;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::fs;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::Instant;
 
-    use super::{reconstruct_blobs, RepositoryScanOutcome, RepositoryScanRequest};
+    use super::{
+        build_stream_result, reconstruct_blobs, scan_workspace_files, FileScanConfig,
+        RepositoryScanOutcome, RepositoryScanRequest,
+    };
     use crate::forge::{Platform, Repository, TreeEntry};
+    use crate::streamer::DynPattern;
+    use tokio::sync::Mutex;
 
     fn fixture_repository() -> Repository {
         Repository {
@@ -233,6 +421,86 @@ mod tests {
         );
         assert!(!workspace.parent().unwrap().join("escape.txt").exists());
         fs::remove_dir_all(workspace).expect("test workspace should be removable");
+    }
+
+    #[tokio::test]
+    async fn scan_workspace_files_filters_binary_files_and_collects_findings() {
+        let workspace =
+            std::env::temp_dir().join(format!("gitrecon-file-scan-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&workspace);
+        fs::create_dir_all(&workspace).expect("test workspace should be creatable");
+        fs::write(workspace.join("config.txt"), b"CUSTOM_ABCD1234").unwrap();
+        fs::write(workspace.join("image.png"), [0_u8, 1, 2, 3]).unwrap();
+
+        let all_findings = Arc::new(Mutex::new(Vec::new()));
+        let tech_stack_set = Arc::new(Mutex::new(HashSet::new()));
+        let blobs_scanned = Arc::new(AtomicUsize::new(0));
+        let blobs_failed = Arc::new(AtomicUsize::new(0));
+        let bytes_scanned = Arc::new(AtomicUsize::new(0));
+        scan_workspace_files(FileScanConfig {
+            workspace: workspace.clone(),
+            repository_name: "acme/example".to_string(),
+            max_blob_bytes: 1024,
+            workers: 2,
+            exhaustive: true,
+            entropy_threshold: 4.5,
+            live: false,
+            pipe: false,
+            verbose: false,
+            max_findings: 0,
+            stop_on_critical: false,
+            extra_patterns: Arc::new(vec![DynPattern {
+                id: "custom_token".to_string(),
+                sev: "HIGH".to_string(),
+                desc: "Custom test token".to_string(),
+                regex: regex::Regex::new(r"CUSTOM_[A-Z0-9]{8}").unwrap(),
+            }]),
+            stop_flag: Arc::new(AtomicBool::new(false)),
+            all_findings: all_findings.clone(),
+            tech_stack_set,
+            blobs_scanned: blobs_scanned.clone(),
+            blobs_failed: blobs_failed.clone(),
+            bytes_scanned: bytes_scanned.clone(),
+        })
+        .await;
+
+        let findings = all_findings.lock().await;
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].filename, "acme/example/config.txt");
+        assert_eq!(blobs_scanned.load(Ordering::Relaxed), 1);
+        assert_eq!(blobs_failed.load(Ordering::Relaxed), 0);
+        assert_eq!(bytes_scanned.load(Ordering::Relaxed), 15);
+        drop(findings);
+        fs::remove_dir_all(workspace).expect("test workspace should be removable");
+    }
+
+    #[tokio::test]
+    async fn build_stream_result_aggregates_shared_state() {
+        let all_findings = Arc::new(Mutex::new(Vec::new()));
+        let tech_stack_set = Arc::new(Mutex::new(HashSet::from([
+            "Rust".to_string(),
+            "Git".to_string(),
+        ])));
+        let blobs_scanned = Arc::new(AtomicUsize::new(3));
+        let blobs_failed = Arc::new(AtomicUsize::new(1));
+        let bytes_scanned = Arc::new(AtomicUsize::new(42));
+
+        let result = build_stream_result(
+            Instant::now(),
+            all_findings,
+            tech_stack_set,
+            blobs_scanned,
+            blobs_failed,
+            bytes_scanned,
+        )
+        .await;
+
+        assert_eq!(result.findings.len(), 0);
+        assert_eq!(result.tech_stack, vec!["Git", "Rust"]);
+        assert_eq!(result.blobs_scanned, 3);
+        assert_eq!(result.blobs_failed, 1);
+        assert_eq!(result.bytes_scanned, 42);
+        assert_eq!(result.commit_count, 0);
     }
 
     #[test]

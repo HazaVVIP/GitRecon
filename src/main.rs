@@ -57,7 +57,7 @@ use std::time::{Duration, Instant};
 use clap::Parser;
 use forge::Forge;
 use forge_factory::create_forge_client;
-use forge_scan::{BlobEntry, RepositoryScanOutcome, RepositoryScanRequest};
+use forge_scan::{BlobEntry, RepositoryScanRequest};
 use futures::StreamExt;
 use outcome::{classify_error, ScanSummary, TargetErrorCode, TargetOutcome, TargetStatus};
 
@@ -1315,154 +1315,42 @@ async fn run_token_scan(
         .await;
         blobs_failed.fetch_add(failed, Ordering::Relaxed);
 
-        let mut candidates: Vec<PathBuf> = collect_local_files(&repo_workspace)
-            .into_iter()
-            .filter(|(p, size)| {
-                !is_binary_extension(&p.to_string_lossy()) && *size <= max_blob_bytes as u64
-            })
-            .map(|(p, _)| p)
-            .collect();
-        candidates.sort_by_key(|p| {
-            if streamer::is_ai_sensitive_path(&p.to_string_lossy()) {
-                0
-            } else {
-                1
-            }
-        });
-
-        if verbose {
-            println!("      Scanning {} workspace files", candidates.len());
-        }
-
-        let file_stream = futures::stream::iter(candidates)
-            .map(|path| {
-                let stop = stop_flag.clone();
-                let extra_patterns = extra_pat_arc.clone();
-                let root = repo_workspace.clone();
-                let full_name = repo.full_name.clone();
-                let entropy_thresh = args.entropy_threshold;
-                async move {
-                    if stop.load(Ordering::Relaxed) {
-                        return (vec![], vec![], 0usize, false, true);
-                    }
-                    let data = match tokio::fs::read(&path).await {
-                        Ok(d) => d,
-                        Err(_) => return (vec![], vec![], 0usize, true, false),
-                    };
-                    if data.is_empty() {
-                        return (vec![], vec![], 0usize, false, false);
-                    }
-                    let probe = &data[..data.len().min(BINARY_DETECTION_PROBE_SIZE)];
-                    let null_count = probe.iter().filter(|&&b| b == 0).count();
-                    if null_count > NULL_BYTE_THRESHOLD {
-                        return (vec![], vec![], 0usize, false, false);
-                    }
-
-                    let text = String::from_utf8_lossy(&data);
-                    let rel = path
-                        .strip_prefix(&root)
-                        .map(|p| p.to_string_lossy().replace('\\', "/"))
-                        .unwrap_or_else(|_| path.to_string_lossy().replace('\\', "/"));
-                    let source = format!("{}/{}", full_name, rel);
-                    let findings = if args.exhaustive {
-                        streamer::scan_text_exhaustive(
-                            &text,
-                            &source,
-                            &extra_patterns,
-                            entropy_thresh,
-                        )
-                    } else {
-                        streamer::scan_text(&text, &source, &extra_patterns, entropy_thresh)
-                    };
-
-                    let mut techs = Vec::new();
-                    detect_tech_from_path(&rel, &mut techs);
-
-                    (findings, techs, data.len(), false, false)
-                }
-            })
-            .buffer_unordered(args.workers);
-
-        futures::pin_mut!(file_stream);
-        while let Some((findings, techs, bytes, failed, skipped_by_stop)) = file_stream.next().await
-        {
-            if skipped_by_stop {
-                continue;
-            }
-            if failed {
-                blobs_failed.fetch_add(1, Ordering::Relaxed);
-                continue;
-            }
-            if bytes > 0 {
-                blobs_scanned.fetch_add(1, Ordering::Relaxed);
-                bytes_scanned.fetch_add(bytes, Ordering::Relaxed);
-            }
-
-            if !techs.is_empty() {
-                let mut ts = tech_stack_set.lock().await;
-                for t in techs {
-                    ts.insert(t);
-                }
-            }
-            if findings.is_empty() {
-                continue;
-            }
-
-            if args.live || args.pipe {
-                for f in &findings {
-                    println!(
-                        "{}",
-                        serde_json::to_string(&f.to_dict()).unwrap_or_default()
-                    );
-                }
-            }
-
-            let mut all = all_findings.lock().await;
-            all.extend(findings);
-
-            if should_stop_scan(&all, args.max_findings, args.stop_on_critical) {
-                stop_flag.store(true, Ordering::Relaxed);
-                if verbose {
-                    if args.max_findings > 0 && all.len() >= args.max_findings {
-                        println!("\n  [!] Reached --max-findings limit. Stopping scan.");
-                    } else {
-                        println!("\n  [!] --stop-on-critical triggered. Stopping scan.");
-                    }
-                }
-                break;
-            }
-        }
+        forge_scan::scan_workspace_files(forge_scan::FileScanConfig {
+            workspace: repo_workspace.clone(),
+            repository_name: repo.full_name.clone(),
+            max_blob_bytes,
+            workers: args.workers,
+            exhaustive: args.exhaustive,
+            entropy_threshold: args.entropy_threshold,
+            live: args.live,
+            pipe: args.pipe,
+            verbose,
+            max_findings: args.max_findings,
+            stop_on_critical: args.stop_on_critical,
+            extra_patterns: extra_pat_arc.clone(),
+            stop_flag: stop_flag.clone(),
+            all_findings: all_findings.clone(),
+            tech_stack_set: tech_stack_set.clone(),
+            blobs_scanned: blobs_scanned.clone(),
+            blobs_failed: blobs_failed.clone(),
+            bytes_scanned: bytes_scanned.clone(),
+        })
+        .await;
     }
 
     // SEC-004: temp_guard automatically cleans up when dropped at end of scope
     // No manual cleanup needed here
 
     // ── 5. Assemble result ───────────────────────
-    let elapsed_s = t0.elapsed().as_secs_f64();
-    let findings = all_findings.lock().await.clone();
-    let mut ts_vec: Vec<String> = tech_stack_set.lock().await.iter().cloned().collect();
-    ts_vec.sort();
-
-    let stream_r = StreamResult {
-        findings,
-        contributors: vec![],
-        tech_stack: ts_vec,
-        commit_count: 0,
-        blobs_scanned: blobs_scanned.load(Ordering::Relaxed),
-        blobs_failed: blobs_failed.load(Ordering::Relaxed),
-        bytes_scanned: bytes_scanned.load(Ordering::Relaxed),
-        elapsed_s,
-        files_saved: 0,
-        files_save_failed: 0,
-        // PERF-005: Cache metrics (not applicable for token mode scanning local files)
-        cache_hits: 0,
-        cache_misses: 0,
-        cache_stats: None,
-        // PERF-004: Rate limit metrics (not applicable for token mode)
-        rate_limit_allowed: 0,
-        rate_limit_dropped: 0,
-        rate_limit_wait_ms: 0,
-    };
+    let stream_r = forge_scan::build_stream_result(
+        t0,
+        all_findings.clone(),
+        tech_stack_set.clone(),
+        blobs_scanned.clone(),
+        blobs_failed.clone(),
+        bytes_scanned.clone(),
+    )
+    .await;
 
     // ── 6. Terminal summary ──────────────────────
     if verbose && !args.pipe {
@@ -1780,156 +1668,40 @@ async fn run_gitlab_token_scan(
         .await;
         blobs_failed.fetch_add(failed, Ordering::Relaxed);
 
-        let mut candidates: Vec<PathBuf> = collect_local_files(&repo_workspace)
-            .into_iter()
-            .filter(|(p, size)| {
-                !is_binary_extension(&p.to_string_lossy()) && *size <= max_blob_bytes as u64
-            })
-            .map(|(p, _)| p)
-            .collect();
-        candidates.sort_by_key(|p| {
-            if streamer::is_ai_sensitive_path(&p.to_string_lossy()) {
-                0
-            } else {
-                1
-            }
-        });
-
-        if verbose {
-            println!("      Scanning {} workspace files", candidates.len());
-        }
-
-        let file_stream = futures::stream::iter(candidates)
-            .map(|path| {
-                let stop = stop_flag.clone();
-                let extra_patterns = extra_pat_arc.clone();
-                let root = repo_workspace.clone();
-                let full_name = repo.full_name.clone();
-                let entropy_thresh = args.entropy_threshold;
-                async move {
-                    if stop.load(Ordering::Relaxed) {
-                        return (vec![], vec![], 0usize, false, true);
-                    }
-                    let data = match tokio::fs::read(&path).await {
-                        Ok(d) => d,
-                        Err(_) => return (vec![], vec![], 0usize, true, false),
-                    };
-                    if data.is_empty() {
-                        return (vec![], vec![], 0usize, false, false);
-                    }
-                    let probe = &data[..data.len().min(BINARY_DETECTION_PROBE_SIZE)];
-                    let null_count = probe.iter().filter(|&&b| b == 0).count();
-                    if null_count > NULL_BYTE_THRESHOLD {
-                        return (vec![], vec![], 0usize, false, false);
-                    }
-
-                    let text = String::from_utf8_lossy(&data);
-                    let rel = path
-                        .strip_prefix(&root)
-                        .map(|p| p.to_string_lossy().replace('\\', "/"))
-                        .unwrap_or_else(|_| path.to_string_lossy().replace('\\', "/"));
-                    let source = format!("{}/{}", full_name, rel);
-                    let findings = if args.exhaustive {
-                        streamer::scan_text_exhaustive(
-                            &text,
-                            &source,
-                            &extra_patterns,
-                            entropy_thresh,
-                        )
-                    } else {
-                        streamer::scan_text(&text, &source, &extra_patterns, entropy_thresh)
-                    };
-
-                    let mut techs = Vec::new();
-                    detect_tech_from_path(&rel, &mut techs);
-
-                    (findings, techs, data.len(), false, false)
-                }
-            })
-            .buffer_unordered(args.workers);
-
-        futures::pin_mut!(file_stream);
-        while let Some((findings, techs, bytes, failed, skipped_by_stop)) = file_stream.next().await
-        {
-            if skipped_by_stop {
-                continue;
-            }
-            if failed {
-                blobs_failed.fetch_add(1, Ordering::Relaxed);
-                continue;
-            }
-            if bytes > 0 {
-                blobs_scanned.fetch_add(1, Ordering::Relaxed);
-                bytes_scanned.fetch_add(bytes, Ordering::Relaxed);
-            }
-
-            if !techs.is_empty() {
-                let mut ts = tech_stack_set.lock().await;
-                for t in techs {
-                    ts.insert(t);
-                }
-            }
-            if findings.is_empty() {
-                continue;
-            }
-
-            if args.live || args.pipe {
-                for f in &findings {
-                    println!(
-                        "{}",
-                        serde_json::to_string(&f.to_dict()).unwrap_or_default()
-                    );
-                }
-            }
-
-            let mut all = all_findings.lock().await;
-            all.extend(findings);
-
-            if should_stop_scan(&all, args.max_findings, args.stop_on_critical) {
-                stop_flag.store(true, Ordering::Relaxed);
-                if verbose {
-                    if args.max_findings > 0 && all.len() >= args.max_findings {
-                        println!("\n  [!] Reached --max-findings limit. Stopping scan.");
-                    } else {
-                        println!("\n  [!] --stop-on-critical triggered. Stopping scan.");
-                    }
-                }
-                break;
-            }
-        }
+        forge_scan::scan_workspace_files(forge_scan::FileScanConfig {
+            workspace: repo_workspace.clone(),
+            repository_name: repo.full_name.clone(),
+            max_blob_bytes,
+            workers: args.workers,
+            exhaustive: args.exhaustive,
+            entropy_threshold: args.entropy_threshold,
+            live: args.live,
+            pipe: args.pipe,
+            verbose,
+            max_findings: args.max_findings,
+            stop_on_critical: args.stop_on_critical,
+            extra_patterns: extra_pat_arc.clone(),
+            stop_flag: stop_flag.clone(),
+            all_findings: all_findings.clone(),
+            tech_stack_set: tech_stack_set.clone(),
+            blobs_scanned: blobs_scanned.clone(),
+            blobs_failed: blobs_failed.clone(),
+            bytes_scanned: bytes_scanned.clone(),
+        })
+        .await;
     }
 
-    // SEC-004: temp_guard automatically cleans up when dropped at end of scope
-
     // ── 5. Assemble result ───────────────────────
-    let elapsed_s = t0.elapsed().as_secs_f64();
-    let findings = all_findings.lock().await.clone();
-    let mut ts_vec: Vec<String> = tech_stack_set.lock().await.iter().cloned().collect();
-    ts_vec.sort();
-    let scan_outcome = RepositoryScanOutcome::from_counts(
-        blobs_scanned.load(Ordering::Relaxed),
-        blobs_failed.load(Ordering::Relaxed),
-        bytes_scanned.load(Ordering::Relaxed),
-    );
+    let stream_r = forge_scan::build_stream_result(
+        t0,
+        all_findings.clone(),
+        tech_stack_set.clone(),
+        blobs_scanned.clone(),
+        blobs_failed.clone(),
+        bytes_scanned.clone(),
+    )
+    .await;
 
-    let stream_r = StreamResult {
-        findings,
-        contributors: vec![],
-        tech_stack: ts_vec,
-        commit_count: 0,
-        blobs_scanned: scan_outcome.blobs_recovered,
-        blobs_failed: scan_outcome.blobs_failed,
-        bytes_scanned: scan_outcome.bytes_scanned,
-        elapsed_s,
-        files_saved: 0,
-        files_save_failed: 0,
-        cache_hits: 0,
-        cache_misses: 0,
-        cache_stats: None,
-        rate_limit_allowed: 0,
-        rate_limit_dropped: 0,
-        rate_limit_wait_ms: 0,
-    };
     // ── 6. Terminal summary ──────────────────────
     if verbose && !args.pipe {
         rep.print_findings_summary(&stream_r.findings);
@@ -2314,151 +2086,39 @@ async fn run_bitbucket_token_scan(
         .await;
         blobs_failed.fetch_add(failed, Ordering::Relaxed);
 
-        let mut candidates: Vec<PathBuf> = collect_local_files(&repo_workspace)
-            .into_iter()
-            .filter(|(p, size)| {
-                !is_binary_extension(&p.to_string_lossy()) && *size <= max_blob_bytes as u64
-            })
-            .map(|(p, _)| p)
-            .collect();
-        candidates.sort_by_key(|p| {
-            if streamer::is_ai_sensitive_path(&p.to_string_lossy()) {
-                0
-            } else {
-                1
-            }
-        });
-
-        if verbose {
-            println!("      Scanning {} workspace files", candidates.len());
-        }
-
-        let file_stream = futures::stream::iter(candidates)
-            .map(|path| {
-                let stop = stop_flag.clone();
-                let extra_patterns = extra_pat_arc.clone();
-                let root = repo_workspace.clone();
-                let full_name = repo.full_name.clone();
-                let entropy_thresh = args.entropy_threshold;
-                async move {
-                    if stop.load(Ordering::Relaxed) {
-                        return (vec![], vec![], 0usize, false, true);
-                    }
-                    let data = match tokio::fs::read(&path).await {
-                        Ok(d) => d,
-                        Err(_) => return (vec![], vec![], 0usize, true, false),
-                    };
-                    if data.is_empty() {
-                        return (vec![], vec![], 0usize, false, false);
-                    }
-                    let probe = &data[..data.len().min(BINARY_DETECTION_PROBE_SIZE)];
-                    let null_count = probe.iter().filter(|&&b| b == 0).count();
-                    if null_count > NULL_BYTE_THRESHOLD {
-                        return (vec![], vec![], 0usize, false, false);
-                    }
-
-                    let text = String::from_utf8_lossy(&data);
-                    let rel = path
-                        .strip_prefix(&root)
-                        .map(|p| p.to_string_lossy().replace('\\', "/"))
-                        .unwrap_or_else(|_| path.to_string_lossy().replace('\\', "/"));
-                    let source = format!("{}/{}", full_name, rel);
-                    let findings = if args.exhaustive {
-                        streamer::scan_text_exhaustive(
-                            &text,
-                            &source,
-                            &extra_patterns,
-                            entropy_thresh,
-                        )
-                    } else {
-                        streamer::scan_text(&text, &source, &extra_patterns, entropy_thresh)
-                    };
-
-                    let mut techs = Vec::new();
-                    detect_tech_from_path(&rel, &mut techs);
-
-                    (findings, techs, data.len(), false, false)
-                }
-            })
-            .buffer_unordered(args.workers);
-
-        futures::pin_mut!(file_stream);
-        while let Some((findings, techs, bytes, failed, skipped_by_stop)) = file_stream.next().await
-        {
-            if skipped_by_stop {
-                continue;
-            }
-            if failed {
-                blobs_failed.fetch_add(1, Ordering::Relaxed);
-                continue;
-            }
-            if bytes > 0 {
-                blobs_scanned.fetch_add(1, Ordering::Relaxed);
-                bytes_scanned.fetch_add(bytes, Ordering::Relaxed);
-            }
-
-            if !techs.is_empty() {
-                let mut ts = tech_stack_set.lock().await;
-                for t in techs {
-                    ts.insert(t);
-                }
-            }
-            if findings.is_empty() {
-                continue;
-            }
-
-            if args.live || args.pipe {
-                for f in &findings {
-                    println!(
-                        "{}",
-                        serde_json::to_string(&f.to_dict()).unwrap_or_default()
-                    );
-                }
-            }
-
-            let mut all = all_findings.lock().await;
-            all.extend(findings);
-
-            if should_stop_scan(&all, args.max_findings, args.stop_on_critical) {
-                stop_flag.store(true, Ordering::Relaxed);
-                if verbose {
-                    if args.max_findings > 0 && all.len() >= args.max_findings {
-                        println!("\n  [!] Reached --max-findings limit. Stopping scan.");
-                    } else {
-                        println!("\n  [!] --stop-on-critical triggered. Stopping scan.");
-                    }
-                }
-                break;
-            }
-        }
+        forge_scan::scan_workspace_files(forge_scan::FileScanConfig {
+            workspace: repo_workspace.clone(),
+            repository_name: repo.full_name.clone(),
+            max_blob_bytes,
+            workers: args.workers,
+            exhaustive: args.exhaustive,
+            entropy_threshold: args.entropy_threshold,
+            live: args.live,
+            pipe: args.pipe,
+            verbose,
+            max_findings: args.max_findings,
+            stop_on_critical: args.stop_on_critical,
+            extra_patterns: extra_pat_arc.clone(),
+            stop_flag: stop_flag.clone(),
+            all_findings: all_findings.clone(),
+            tech_stack_set: tech_stack_set.clone(),
+            blobs_scanned: blobs_scanned.clone(),
+            blobs_failed: blobs_failed.clone(),
+            bytes_scanned: bytes_scanned.clone(),
+        })
+        .await;
     }
 
-    // SEC-004: temp_guard automatically cleans up when dropped at end of scope
-
     // ── 5. Assemble result ───────────────────────
-    let elapsed_s = t0.elapsed().as_secs_f64();
-    let findings = all_findings.lock().await.clone();
-    let mut ts_vec: Vec<String> = tech_stack_set.lock().await.iter().cloned().collect();
-    ts_vec.sort();
-
-    let stream_r = StreamResult {
-        findings,
-        contributors: vec![],
-        tech_stack: ts_vec,
-        commit_count: 0,
-        blobs_scanned: blobs_scanned.load(Ordering::Relaxed),
-        blobs_failed: blobs_failed.load(Ordering::Relaxed),
-        bytes_scanned: bytes_scanned.load(Ordering::Relaxed),
-        elapsed_s,
-        files_saved: 0,
-        files_save_failed: 0,
-        cache_hits: 0,
-        cache_misses: 0,
-        cache_stats: None,
-        rate_limit_allowed: 0,
-        rate_limit_dropped: 0,
-        rate_limit_wait_ms: 0,
-    };
+    let stream_r = forge_scan::build_stream_result(
+        t0,
+        all_findings.clone(),
+        tech_stack_set.clone(),
+        blobs_scanned.clone(),
+        blobs_failed.clone(),
+        bytes_scanned.clone(),
+    )
+    .await;
 
     // ── 6. Terminal summary ──────────────────────
     if verbose && !args.pipe {
@@ -2812,151 +2472,39 @@ async fn run_gitea_token_scan(
         .await;
         blobs_failed.fetch_add(failed, Ordering::Relaxed);
 
-        let mut candidates: Vec<PathBuf> = collect_local_files(&repo_workspace)
-            .into_iter()
-            .filter(|(p, size)| {
-                !is_binary_extension(&p.to_string_lossy()) && *size <= max_blob_bytes as u64
-            })
-            .map(|(p, _)| p)
-            .collect();
-        candidates.sort_by_key(|p| {
-            if streamer::is_ai_sensitive_path(&p.to_string_lossy()) {
-                0
-            } else {
-                1
-            }
-        });
-
-        if verbose {
-            println!("      Scanning {} workspace files", candidates.len());
-        }
-
-        let file_stream = futures::stream::iter(candidates)
-            .map(|path| {
-                let stop = stop_flag.clone();
-                let extra_patterns = extra_pat_arc.clone();
-                let root = repo_workspace.clone();
-                let full_name = repo.full_name.clone();
-                let entropy_thresh = args.entropy_threshold;
-                async move {
-                    if stop.load(Ordering::Relaxed) {
-                        return (vec![], vec![], 0usize, false, true);
-                    }
-                    let data = match tokio::fs::read(&path).await {
-                        Ok(d) => d,
-                        Err(_) => return (vec![], vec![], 0usize, true, false),
-                    };
-                    if data.is_empty() {
-                        return (vec![], vec![], 0usize, false, false);
-                    }
-                    let probe = &data[..data.len().min(BINARY_DETECTION_PROBE_SIZE)];
-                    let null_count = probe.iter().filter(|&&b| b == 0).count();
-                    if null_count > NULL_BYTE_THRESHOLD {
-                        return (vec![], vec![], 0usize, false, false);
-                    }
-
-                    let text = String::from_utf8_lossy(&data);
-                    let rel = path
-                        .strip_prefix(&root)
-                        .map(|p| p.to_string_lossy().replace('\\', "/"))
-                        .unwrap_or_else(|_| path.to_string_lossy().replace('\\', "/"));
-                    let source = format!("{}/{}", full_name, rel);
-                    let findings = if args.exhaustive {
-                        streamer::scan_text_exhaustive(
-                            &text,
-                            &source,
-                            &extra_patterns,
-                            entropy_thresh,
-                        )
-                    } else {
-                        streamer::scan_text(&text, &source, &extra_patterns, entropy_thresh)
-                    };
-
-                    let mut techs = Vec::new();
-                    detect_tech_from_path(&rel, &mut techs);
-
-                    (findings, techs, data.len(), false, false)
-                }
-            })
-            .buffer_unordered(args.workers);
-
-        futures::pin_mut!(file_stream);
-        while let Some((findings, techs, bytes, failed, skipped_by_stop)) = file_stream.next().await
-        {
-            if skipped_by_stop {
-                continue;
-            }
-            if failed {
-                blobs_failed.fetch_add(1, Ordering::Relaxed);
-                continue;
-            }
-            if bytes > 0 {
-                blobs_scanned.fetch_add(1, Ordering::Relaxed);
-                bytes_scanned.fetch_add(bytes, Ordering::Relaxed);
-            }
-
-            if !techs.is_empty() {
-                let mut ts = tech_stack_set.lock().await;
-                for t in techs {
-                    ts.insert(t);
-                }
-            }
-            if findings.is_empty() {
-                continue;
-            }
-
-            if args.live || args.pipe {
-                for f in &findings {
-                    println!(
-                        "{}",
-                        serde_json::to_string(&f.to_dict()).unwrap_or_default()
-                    );
-                }
-            }
-
-            let mut all = all_findings.lock().await;
-            all.extend(findings);
-
-            if should_stop_scan(&all, args.max_findings, args.stop_on_critical) {
-                stop_flag.store(true, Ordering::Relaxed);
-                if verbose {
-                    if args.max_findings > 0 && all.len() >= args.max_findings {
-                        println!("\n  [!] Reached --max-findings limit. Stopping scan.");
-                    } else {
-                        println!("\n  [!] --stop-on-critical triggered. Stopping scan.");
-                    }
-                }
-                break;
-            }
-        }
+        forge_scan::scan_workspace_files(forge_scan::FileScanConfig {
+            workspace: repo_workspace.clone(),
+            repository_name: repo.full_name.clone(),
+            max_blob_bytes,
+            workers: args.workers,
+            exhaustive: args.exhaustive,
+            entropy_threshold: args.entropy_threshold,
+            live: args.live,
+            pipe: args.pipe,
+            verbose,
+            max_findings: args.max_findings,
+            stop_on_critical: args.stop_on_critical,
+            extra_patterns: extra_pat_arc.clone(),
+            stop_flag: stop_flag.clone(),
+            all_findings: all_findings.clone(),
+            tech_stack_set: tech_stack_set.clone(),
+            blobs_scanned: blobs_scanned.clone(),
+            blobs_failed: blobs_failed.clone(),
+            bytes_scanned: bytes_scanned.clone(),
+        })
+        .await;
     }
 
-    // SEC-004: temp_guard automatically cleans up when dropped at end of scope
-
     // ── 5. Assemble result ───────────────────────
-    let elapsed_s = t0.elapsed().as_secs_f64();
-    let findings = all_findings.lock().await.clone();
-    let mut ts_vec: Vec<String> = tech_stack_set.lock().await.iter().cloned().collect();
-    ts_vec.sort();
-
-    let stream_r = StreamResult {
-        findings,
-        contributors: vec![],
-        tech_stack: ts_vec,
-        commit_count: 0,
-        blobs_scanned: blobs_scanned.load(Ordering::Relaxed),
-        blobs_failed: blobs_failed.load(Ordering::Relaxed),
-        bytes_scanned: bytes_scanned.load(Ordering::Relaxed),
-        elapsed_s,
-        files_saved: 0,
-        files_save_failed: 0,
-        cache_hits: 0,
-        cache_misses: 0,
-        cache_stats: None,
-        rate_limit_allowed: 0,
-        rate_limit_dropped: 0,
-        rate_limit_wait_ms: 0,
-    };
+    let stream_r = forge_scan::build_stream_result(
+        t0,
+        all_findings.clone(),
+        tech_stack_set.clone(),
+        blobs_scanned.clone(),
+        blobs_failed.clone(),
+        bytes_scanned.clone(),
+    )
+    .await;
 
     // ── 6. Terminal summary ──────────────────────
     if verbose && !args.pipe {
@@ -3294,151 +2842,39 @@ async fn run_azure_token_scan(
         .await;
         blobs_failed.fetch_add(failed, Ordering::Relaxed);
 
-        let mut candidates: Vec<PathBuf> = collect_local_files(&repo_workspace)
-            .into_iter()
-            .filter(|(p, size)| {
-                !is_binary_extension(&p.to_string_lossy()) && *size <= max_blob_bytes as u64
-            })
-            .map(|(p, _)| p)
-            .collect();
-        candidates.sort_by_key(|p| {
-            if streamer::is_ai_sensitive_path(&p.to_string_lossy()) {
-                0
-            } else {
-                1
-            }
-        });
-
-        if verbose {
-            println!("      Scanning {} workspace files", candidates.len());
-        }
-
-        let file_stream = futures::stream::iter(candidates)
-            .map(|path| {
-                let stop = stop_flag.clone();
-                let extra_patterns = extra_pat_arc.clone();
-                let root = repo_workspace.clone();
-                let full_name = repo.full_name.clone();
-                let entropy_thresh = args.entropy_threshold;
-                async move {
-                    if stop.load(Ordering::Relaxed) {
-                        return (vec![], vec![], 0usize, false, true);
-                    }
-                    let data = match tokio::fs::read(&path).await {
-                        Ok(d) => d,
-                        Err(_) => return (vec![], vec![], 0usize, true, false),
-                    };
-                    if data.is_empty() {
-                        return (vec![], vec![], 0usize, false, false);
-                    }
-                    let probe = &data[..data.len().min(BINARY_DETECTION_PROBE_SIZE)];
-                    let null_count = probe.iter().filter(|&&b| b == 0).count();
-                    if null_count > NULL_BYTE_THRESHOLD {
-                        return (vec![], vec![], 0usize, false, false);
-                    }
-
-                    let text = String::from_utf8_lossy(&data);
-                    let rel = path
-                        .strip_prefix(&root)
-                        .map(|p| p.to_string_lossy().replace('\\', "/"))
-                        .unwrap_or_else(|_| path.to_string_lossy().replace('\\', "/"));
-                    let source = format!("{}/{}", full_name, rel);
-                    let findings = if args.exhaustive {
-                        streamer::scan_text_exhaustive(
-                            &text,
-                            &source,
-                            &extra_patterns,
-                            entropy_thresh,
-                        )
-                    } else {
-                        streamer::scan_text(&text, &source, &extra_patterns, entropy_thresh)
-                    };
-
-                    let mut techs = Vec::new();
-                    detect_tech_from_path(&rel, &mut techs);
-
-                    (findings, techs, data.len(), false, false)
-                }
-            })
-            .buffer_unordered(args.workers);
-
-        futures::pin_mut!(file_stream);
-        while let Some((findings, techs, bytes, failed, skipped_by_stop)) = file_stream.next().await
-        {
-            if skipped_by_stop {
-                continue;
-            }
-            if failed {
-                blobs_failed.fetch_add(1, Ordering::Relaxed);
-                continue;
-            }
-            if bytes > 0 {
-                blobs_scanned.fetch_add(1, Ordering::Relaxed);
-                bytes_scanned.fetch_add(bytes, Ordering::Relaxed);
-            }
-
-            if !techs.is_empty() {
-                let mut ts = tech_stack_set.lock().await;
-                for t in techs {
-                    ts.insert(t);
-                }
-            }
-            if findings.is_empty() {
-                continue;
-            }
-
-            if args.live || args.pipe {
-                for f in &findings {
-                    println!(
-                        "{}",
-                        serde_json::to_string(&f.to_dict()).unwrap_or_default()
-                    );
-                }
-            }
-
-            let mut all = all_findings.lock().await;
-            all.extend(findings);
-
-            if should_stop_scan(&all, args.max_findings, args.stop_on_critical) {
-                stop_flag.store(true, Ordering::Relaxed);
-                if verbose {
-                    if args.max_findings > 0 && all.len() >= args.max_findings {
-                        println!("\n  [!] Reached --max-findings limit. Stopping scan.");
-                    } else {
-                        println!("\n  [!] --stop-on-critical triggered. Stopping scan.");
-                    }
-                }
-                break;
-            }
-        }
+        forge_scan::scan_workspace_files(forge_scan::FileScanConfig {
+            workspace: repo_workspace.clone(),
+            repository_name: repo.full_name.clone(),
+            max_blob_bytes,
+            workers: args.workers,
+            exhaustive: args.exhaustive,
+            entropy_threshold: args.entropy_threshold,
+            live: args.live,
+            pipe: args.pipe,
+            verbose,
+            max_findings: args.max_findings,
+            stop_on_critical: args.stop_on_critical,
+            extra_patterns: extra_pat_arc.clone(),
+            stop_flag: stop_flag.clone(),
+            all_findings: all_findings.clone(),
+            tech_stack_set: tech_stack_set.clone(),
+            blobs_scanned: blobs_scanned.clone(),
+            blobs_failed: blobs_failed.clone(),
+            bytes_scanned: bytes_scanned.clone(),
+        })
+        .await;
     }
 
-    // SEC-004: temp_guard automatically cleans up when dropped at end of scope
-
     // ── 5. Assemble result ───────────────────────
-    let elapsed_s = t0.elapsed().as_secs_f64();
-    let findings = all_findings.lock().await.clone();
-    let mut ts_vec: Vec<String> = tech_stack_set.lock().await.iter().cloned().collect();
-    ts_vec.sort();
-
-    let stream_r = StreamResult {
-        findings,
-        contributors: vec![],
-        tech_stack: ts_vec,
-        commit_count: 0,
-        blobs_scanned: blobs_scanned.load(Ordering::Relaxed),
-        blobs_failed: blobs_failed.load(Ordering::Relaxed),
-        bytes_scanned: bytes_scanned.load(Ordering::Relaxed),
-        elapsed_s,
-        files_saved: 0,
-        files_save_failed: 0,
-        cache_hits: 0,
-        cache_misses: 0,
-        cache_stats: None,
-        rate_limit_allowed: 0,
-        rate_limit_dropped: 0,
-        rate_limit_wait_ms: 0,
-    };
+    let stream_r = forge_scan::build_stream_result(
+        t0,
+        all_findings.clone(),
+        tech_stack_set.clone(),
+        blobs_scanned.clone(),
+        blobs_failed.clone(),
+        bytes_scanned.clone(),
+    )
+    .await;
 
     // ── 6. Terminal summary ──────────────────────
     if verbose && !args.pipe {
