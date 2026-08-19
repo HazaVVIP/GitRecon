@@ -39,6 +39,7 @@ mod outcome;
 mod pack_reader; // Sprint 5 (S5.1): pack file parser + delta resolver
 mod rate_limiter; // PERF-004: Token bucket rate limiter
 mod reporter;
+mod scanner_factory;
 mod scanner_policy;
 mod streamer;
 mod target_utils;
@@ -60,6 +61,7 @@ use forge_factory::create_forge_client;
 use forge_scan::BlobEntry;
 use futures::StreamExt;
 use outcome::{classify_error, ScanSummary, TargetErrorCode, TargetOutcome, TargetStatus};
+use scanner_factory::build_streamer;
 
 use binary_adapter::{binary_findings_to_findings, is_binary_extension};
 use colored::Colorize;
@@ -315,24 +317,14 @@ async fn run_url_target(context: UrlRunContext<'_>, url: String, fuzz: bool) -> 
         !args.no_cache,
         args.cache_ttl,
     );
-    let streamer = streamer::Streamer::new(
+    let streamer = build_streamer(
         client.clone(),
-        scan_config.workers,
-        scan_config.mem_limit,
+        &scan_config,
         verbose,
-        scan_config.max_findings,
-        scan_config.stop_on_critical,
         extra_patterns.clone(),
-        scan_config.max_blob_size,
-        scan_config.entropy_threshold,
-        scan_config.live,
-        scan_config.adaptive_workers,
-        scan_config.resume,
-        scan_config.checkpoint_interval,
         Some(url.clone()),
         cache,
         false_positive_keywords.to_vec(),
-        scan_config.exhaustive,
     );
 
     let rep_arc = Arc::new(rep.clone());
