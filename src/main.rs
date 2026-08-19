@@ -1232,61 +1232,35 @@ async fn run_token_scan(
         rep.print_findings_summary(&stream_r.findings);
     }
 
-    // ── 7. Save report ───────────────────────────
     let report_name = format!("token_{}", login);
-    let report_path = reporter::build_report_path(&args.output, &report_name, &args.format);
-
-    let save_result = rep.save_scan_report(
-        &report_path,
-        &args.format,
-        &report_name,
-        &stream_r,
-        ReportContext::Token {
-            login: &login,
-            repo_count: selected_repo_count,
-        },
-    );
-
-    if let Err(e) = save_result {
-        eprintln!("  ⚠   Could not save report: {}", e);
-    }
-
-    if verbose && !args.pipe {
-        rep.print_token_report(&login, selected_repo_count, &stream_r, &report_path);
-    }
-
-    // ── 8. Webhook delivery ──────────────────────
-    deliver_report_webhook_if_configured(
-        rep,
+    let summary = finalize_provider_report(
         args,
-        &report_path,
-        verbose,
-        WebhookSuccessStyle::Standard,
+        rep,
+        ProviderReport {
+            report_name: &report_name,
+            stream_r: &stream_r,
+            report_context: ReportContext::Token {
+                login: &login,
+                repo_count: selected_repo_count,
+            },
+            verbose,
+            webhook_style: WebhookSuccessStyle::Standard,
+            pipe_summary: serde_json::json!({
+                "type": "summary",
+                "mode": "token",
+                "user": login,
+                "repos": selected_repo_count,
+                "findings": stream_r.findings.len(),
+                "risk_score": stream_r.risk_score(),
+            }),
+            token_report: Some((&login, selected_repo_count)),
+            print_saved_notice: false,
+        },
     )
     .await;
-
-    // ── 9. Pipe mode summary ─────────────────────
-    if args.pipe {
-        let summary = serde_json::json!({
-            "type":     "summary",
-            "mode":     "token",
-            "user":     login,
-            "repos":    selected_repo_count,
-            "findings": stream_r.findings.len(),
-            "risk_score": stream_r.risk_score(),
-        });
-        println!("{}", serde_json::to_string(&summary).unwrap_or_default());
-    }
-
-    if verbose && !args.pipe {
-        println!("  ✔  Done\n");
-    }
-    Ok(ScanSummary {
-        report_path,
-        findings_count: stream_r.findings.len(),
-        risk_score: stream_r.risk_score(),
-    })
+    Ok(summary)
 }
+
 #[allow(clippy::too_many_lines)]
 async fn run_gitlab_token_scan(
     args: &Cli,
@@ -1444,76 +1418,33 @@ async fn run_gitlab_token_scan(
     if verbose && !args.pipe {
         rep.print_findings_summary(&stream_r.findings);
     }
-    // ── 7. Save report ───────────────────────────
     let report_name = format!("gitlab_{}", login);
-    let report_path = reporter::build_report_path(&args.output, &report_name, &args.format);
-
-    let save_result = rep.save_scan_report(
-        &report_path,
-        &args.format,
-        &report_name,
-        &stream_r,
-        ReportContext::Token {
-            login: &login,
-            repo_count: selected_repo_count,
-        },
-    );
-
-    if let Err(e) = save_result {
-        eprintln!("  ⚠   Could not save report: {}", e);
-    }
-
-    if verbose && !args.pipe {
-        rep.print_token_report(&login, selected_repo_count, &stream_r, &report_path);
-    }
-
-    // ── 8. Webhook delivery ──────────────────────
-    deliver_report_webhook_if_configured(
-        rep,
+    let _ = finalize_provider_report(
         args,
-        &report_path,
-        verbose,
-        WebhookSuccessStyle::Standard,
+        rep,
+        ProviderReport {
+            report_name: &report_name,
+            stream_r: &stream_r,
+            report_context: ReportContext::Token {
+                login: &login,
+                repo_count: selected_repo_count,
+            },
+            verbose,
+            webhook_style: WebhookSuccessStyle::Standard,
+            pipe_summary: serde_json::json!({
+                "type": "summary",
+                "mode": "gitlab_token",
+                "user": login,
+                "repos": selected_repo_count,
+                "findings": stream_r.findings.len(),
+                "risk_score": stream_r.risk_score(),
+            }),
+            token_report: Some((&login, selected_repo_count)),
+            print_saved_notice: false,
+        },
     )
     .await;
-
-    // ── 9. Pipe mode summary ─────────────────────
-    if args.pipe {
-        let summary = serde_json::json!({
-            "type":     "summary",
-            "mode":     "gitlab_token",
-            "user":     login,
-            "repos":    selected_repo_count,
-            "findings": stream_r.findings.len(),
-            "risk_score": stream_r.risk_score(),
-        });
-        println!("{}", serde_json::to_string(&summary).unwrap_or_default());
-    }
-
-    if verbose && !args.pipe {
-        println!("  ✔  Done\n");
-    }
     Ok(())
-}
-
-/// Prompt for GitLab repository selection.
-fn prompt_gitlab_repo_selection(repos: &[gitlab_api::GlProject]) -> Vec<usize> {
-    println!("  ◈  Pilih repository yang ingin di-scan:");
-    prompt_repository_indexes(
-        repos.len(),
-        |index| println!("      {:>4}. {}", index + 1, repos[index].full_name),
-        "  > Pilihan repo: ",
-    )
-}
-
-/// Prompt for Bitbucket repository selection.
-fn prompt_bitbucket_repo_selection(repos: &[bitbucket_api::BbRepo]) -> Vec<usize> {
-    println!("  ◈  Pilih repository yang ingin di-scan:");
-    prompt_repository_indexes(
-        repos.len(),
-        |index| println!("      {:>4}. {}", index + 1, repos[index].full_name),
-        "  > Pilihan repo: ",
-    )
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1693,66 +1624,33 @@ async fn run_bitbucket_token_scan(
         rep.print_findings_summary(&stream_r.findings);
     }
 
-    // ── 7. Save report ───────────────────────────
     let report_name = format!("bitbucket_{}", login);
-    let report_path = reporter::build_report_path(&args.output, &report_name, &args.format);
-
-    let save_result = rep.save_scan_report(
-        &report_path,
-        &args.format,
-        &report_name,
-        &stream_r,
-        ReportContext::Token {
-            login: &login,
-            repo_count: selected_repo_count,
-        },
-    );
-
-    if let Err(e) = save_result {
-        eprintln!("  ⚠   Could not save report: {}", e);
-    }
-
-    if verbose && !args.pipe {
-        rep.print_token_report(&login, selected_repo_count, &stream_r, &report_path);
-    }
-
-    // ── 8. Webhook delivery ──────────────────────
-    deliver_report_webhook_if_configured(
-        rep,
+    let _ = finalize_provider_report(
         args,
-        &report_path,
-        verbose,
-        WebhookSuccessStyle::Standard,
+        rep,
+        ProviderReport {
+            report_name: &report_name,
+            stream_r: &stream_r,
+            report_context: ReportContext::Token {
+                login: &login,
+                repo_count: selected_repo_count,
+            },
+            verbose,
+            webhook_style: WebhookSuccessStyle::Standard,
+            pipe_summary: serde_json::json!({
+                "type": "summary",
+                "mode": "bitbucket_token",
+                "user": login,
+                "repos": selected_repo_count,
+                "findings": stream_r.findings.len(),
+                "risk_score": stream_r.risk_score(),
+            }),
+            token_report: Some((&login, selected_repo_count)),
+            print_saved_notice: false,
+        },
     )
     .await;
-
-    // ── 9. Pipe mode summary ─────────────────────
-    if args.pipe {
-        let summary = serde_json::json!({
-            "type":     "summary",
-            "mode":     "bitbucket_token",
-            "user":     login,
-            "repos":    selected_repo_count,
-            "findings": stream_r.findings.len(),
-            "risk_score": stream_r.risk_score(),
-        });
-        println!("{}", serde_json::to_string(&summary).unwrap_or_default());
-    }
-
-    if verbose && !args.pipe {
-        println!("  ✔  Done\n");
-    }
     Ok(())
-}
-
-/// Prompt for Gitea repository selection.
-fn prompt_gitea_repo_selection(repos: &[gitea_api::GtRepo]) -> Vec<usize> {
-    println!("  ◈  Pilih repository yang ingin di-scan:");
-    prompt_repository_indexes(
-        repos.len(),
-        |index| println!("      {:>4}. {}", index + 1, repos[index].full_name),
-        "  > Pilihan repo: ",
-    )
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1917,55 +1815,32 @@ async fn run_gitea_token_scan(
         rep.print_findings_summary(&stream_r.findings);
     }
 
-    // ── 7. Save report ───────────────────────────
     let report_name = format!("gitea_{}", login);
-    let report_path = reporter::build_report_path(&args.output, &report_name, &args.format);
-
-    let save_result = rep.save_scan_report(
-        &report_path,
-        &args.format,
-        &report_name,
-        &stream_r,
-        ReportContext::Token {
-            login: &login,
-            repo_count: selected_repo_count,
-        },
-    );
-
-    if let Err(e) = save_result {
-        eprintln!("  ⚠   Could not save report: {}", e);
-    }
-
-    if verbose && !args.pipe {
-        rep.print_token_report(&login, selected_repo_count, &stream_r, &report_path);
-    }
-
-    // ── 8. Webhook delivery ──────────────────────
-    deliver_report_webhook_if_configured(
-        rep,
+    let _ = finalize_provider_report(
         args,
-        &report_path,
-        verbose,
-        WebhookSuccessStyle::Standard,
+        rep,
+        ProviderReport {
+            report_name: &report_name,
+            stream_r: &stream_r,
+            report_context: ReportContext::Token {
+                login: &login,
+                repo_count: selected_repo_count,
+            },
+            verbose,
+            webhook_style: WebhookSuccessStyle::Standard,
+            pipe_summary: serde_json::json!({
+                "type": "summary",
+                "mode": "gitea_token",
+                "user": login,
+                "repos": selected_repo_count,
+                "findings": stream_r.findings.len(),
+                "risk_score": stream_r.risk_score(),
+            }),
+            token_report: Some((&login, selected_repo_count)),
+            print_saved_notice: false,
+        },
     )
     .await;
-
-    // ── 9. Pipe mode summary ─────────────────────
-    if args.pipe {
-        let summary = serde_json::json!({
-            "type":     "summary",
-            "mode":     "gitea_token",
-            "user":     login,
-            "repos":    selected_repo_count,
-            "findings": stream_r.findings.len(),
-            "risk_score": stream_r.risk_score(),
-        });
-        println!("{}", serde_json::to_string(&summary).unwrap_or_default());
-    }
-
-    if verbose && !args.pipe {
-        println!("  ✔  Done\n");
-    }
     Ok(())
 }
 
@@ -2143,54 +2018,126 @@ async fn run_azure_token_scan(
         rep.print_findings_summary(&stream_r.findings);
     }
 
-    // ── 7. Save report ───────────────────────────
     let report_name = format!("azure_{}", login);
-    let report_path = reporter::build_report_path(&args.output, &report_name, &args.format);
+    let _ = finalize_provider_report(
+        args,
+        rep,
+        ProviderReport {
+            report_name: &report_name,
+            stream_r: &stream_r,
+            report_context: ReportContext::Stream {
+                target: "azure_token",
+            },
+            verbose,
+            webhook_style: WebhookSuccessStyle::Azure,
+            pipe_summary: serde_json::json!({
+                "target": azure_url.unwrap_or("https://dev.azure.com"),
+                "scan_type": "azure_token",
+                "repos": selected_repos.iter().map(|r| &r.full_name).collect::<Vec<_>>(),
+                "findings": stream_r.findings.len(),
+                "tech": stream_r.tech_stack.clone(),
+                "blobs": stream_r.blobs_scanned,
+                "bytes": stream_r.bytes_scanned,
+                "elapsed": stream_r.elapsed_s,
+                "risk_score": stream_r.risk_score(),
+            }),
+            token_report: None,
+            print_saved_notice: true,
+        },
+    )
+    .await;
+    Ok(())
+}
 
+/// Prompt for GitLab repository selection.
+fn prompt_gitlab_repo_selection(repos: &[gitlab_api::GlProject]) -> Vec<usize> {
+    println!("  ◈  Pilih repository yang ingin di-scan:");
+    prompt_repository_indexes(
+        repos.len(),
+        |index| println!("      {:>4}. {}", index + 1, repos[index].full_name),
+        "  > Pilihan repo: ",
+    )
+}
+
+/// Prompt for Bitbucket repository selection.
+fn prompt_bitbucket_repo_selection(repos: &[bitbucket_api::BbRepo]) -> Vec<usize> {
+    println!("  ◈  Pilih repository yang ingin di-scan:");
+    prompt_repository_indexes(
+        repos.len(),
+        |index| println!("      {:>4}. {}", index + 1, repos[index].full_name),
+        "  > Pilihan repo: ",
+    )
+}
+
+/// Prompt for Gitea repository selection.
+fn prompt_gitea_repo_selection(repos: &[gitea_api::GtRepo]) -> Vec<usize> {
+    println!("  ◈  Pilih repository yang ingin di-scan:");
+    prompt_repository_indexes(
+        repos.len(),
+        |index| println!("      {:>4}. {}", index + 1, repos[index].full_name),
+        "  > Pilihan repo: ",
+    )
+}
+
+struct ProviderReport<'a> {
+    report_name: &'a str,
+    stream_r: &'a streamer::StreamResult,
+    report_context: ReportContext<'a>,
+    verbose: bool,
+    webhook_style: WebhookSuccessStyle,
+    pipe_summary: serde_json::Value,
+    token_report: Option<(&'a str, usize)>,
+    print_saved_notice: bool,
+}
+
+async fn finalize_provider_report(
+    args: &Cli,
+    rep: &Reporter,
+    report: ProviderReport<'_>,
+) -> ScanSummary {
+    let ProviderReport {
+        report_name,
+        stream_r,
+        report_context,
+        verbose,
+        webhook_style,
+        pipe_summary,
+        token_report,
+        print_saved_notice,
+    } = report;
+    let report_path = reporter::build_report_path(&args.output, report_name, &args.format);
     let save_result = rep.save_scan_report(
         &report_path,
         &args.format,
-        &report_name,
-        &stream_r,
-        ReportContext::Stream {
-            target: "azure_token",
-        },
+        report_name,
+        stream_r,
+        report_context,
     );
-
-    if save_result.is_ok() && !args.quiet {
-        println!("  📄  Saved: {}\n", report_path);
+    if let Err(error) = save_result {
+        eprintln!("  ⚠   Could not save report: {}", error);
+    } else if print_saved_notice && !args.quiet {
+        println!("  📄  Saved: {}\\n", report_path);
     }
-
-    // ── 8. Webhook ───────────────────────────────
-    deliver_report_webhook_if_configured(
-        rep,
-        args,
-        &report_path,
-        !args.quiet,
-        WebhookSuccessStyle::Azure,
-    )
-    .await;
-
-    // ── 9. Pipe mode: emit final JSON summary ─────
+    if let Some((login, repo_count)) = token_report {
+        if verbose && !args.pipe {
+            rep.print_token_report(login, repo_count, stream_r, &report_path);
+        }
+    }
+    deliver_report_webhook_if_configured(rep, args, &report_path, verbose, webhook_style).await;
     if args.pipe {
-        let summary = serde_json::json!({
-            "target":      azure_url.unwrap_or("https://dev.azure.com"),
-            "scan_type":   "azure_token",
-            "repos":       selected_repos.iter().map(|r| &r.full_name).collect::<Vec<_>>(),
-            "findings":    stream_r.findings.len(),
-            "tech":        stream_r.tech_stack,
-            "blobs":       stream_r.blobs_scanned,
-            "bytes":       stream_r.bytes_scanned,
-            "elapsed":     stream_r.elapsed_s,
-            "risk_score":  stream_r.risk_score(),
-        });
-        println!("{}", serde_json::to_string(&summary).unwrap_or_default());
+        println!(
+            "{}",
+            serde_json::to_string(&pipe_summary).unwrap_or_default()
+        );
     }
-
     if verbose && !args.pipe {
-        println!("  ✔  Done\n");
+        println!("  ✔  Done\\n");
     }
-    Ok(())
+    ScanSummary {
+        report_path,
+        findings_count: stream_r.findings.len(),
+        risk_score: stream_r.risk_score(),
+    }
 }
 
 /// Prompt for Azure DevOps repository selection.
