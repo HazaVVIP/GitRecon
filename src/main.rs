@@ -25,6 +25,7 @@ mod cache; // PERF-005: SQLite cache layer
 mod checkpoint;
 mod config;
 mod detect;
+mod dir_pipeline;
 mod forge;
 mod forge_factory;
 mod forge_scan;
@@ -65,11 +66,10 @@ use outcome::{classify_error, ScanSummary, TargetErrorCode, TargetOutcome, Targe
 use scanner_factory::build_streamer;
 use url_pipeline::run_stream;
 
-use binary_adapter::{binary_findings_to_findings, is_binary_extension};
+use binary_adapter::is_binary_extension;
 use colored::Colorize;
 use http_client::{HttpClient, HttpConfig};
 use reporter::{ReportContext, Reporter};
-use streamer::StreamResult;
 use target_utils::{
     dir_target_name, normalize_url, parse_extra_headers, select_by_indexes, target_name,
 };
@@ -2279,169 +2279,39 @@ async fn run_dir_scan(
 
     let all_files = collect_local_files(&canonical_root);
     let max_blob_bytes = args.max_blob_size * 1024 * 1024;
-
     let mut candidates: Vec<PathBuf> = all_files
         .into_iter()
-        .filter(|(p, _)| !args.no_scan_binaries || !is_binary_extension(&p.to_string_lossy()))
+        .filter(|(path, _)| !args.no_scan_binaries || !is_binary_extension(&path.to_string_lossy()))
         .filter(|(_, size)| *size <= max_blob_bytes as u64)
-        .map(|(p, _)| p)
+        .map(|(path, _)| path)
         .collect();
-    candidates.sort_by_key(|p| {
-        if streamer::is_ai_sensitive_path(&p.to_string_lossy()) {
+    candidates.sort_by_key(|path| {
+        if streamer::is_ai_sensitive_path(&path.to_string_lossy()) {
             0
         } else {
             1
         }
     });
-
     if verbose {
         println!("  ◈  Found {} candidate files\n", candidates.len());
     }
-
-    let t0 = Instant::now();
-    let all_findings = Arc::new(tokio::sync::Mutex::new(Vec::<streamer::Finding>::new()));
-    let tech_stack_set = Arc::new(tokio::sync::Mutex::new(
-        std::collections::HashSet::<String>::new(),
-    ));
-    let blobs_scanned = Arc::new(AtomicUsize::new(0));
-    let blobs_failed = Arc::new(AtomicUsize::new(0));
-    let bytes_scanned = Arc::new(AtomicUsize::new(0));
-    let stop_flag = Arc::new(AtomicBool::new(false));
-    let extra_pat_arc = Arc::new(extra_patterns);
     let display_root = canonical_root.to_string_lossy().to_string();
-    let no_scan_binaries = args.no_scan_binaries;
-    let file_stream = futures::stream::iter(candidates)
-        .map(|path| {
-            let stop = stop_flag.clone();
-            let extra_patterns = extra_pat_arc.clone();
-            let root = canonical_root.clone();
-            let display_root = display_root.clone();
-            let entropy_thresh = args.entropy_threshold;
-            async move {
-                if stop.load(Ordering::Relaxed) {
-                    return (vec![], vec![], 0usize, false, true);
-                }
-
-                let data = match tokio::fs::read(&path).await {
-                    Ok(d) => d,
-                    Err(_) => return (vec![], vec![], 0usize, true, false),
-                };
-
-                if data.is_empty() {
-                    return (vec![], vec![], 0usize, false, false);
-                }
-
-                let probe = &data[..data.len().min(BINARY_DETECTION_PROBE_SIZE)];
-                let null_count = probe.iter().filter(|&&b| b == 0).count();
-                if null_count > NULL_BYTE_THRESHOLD {
-                    if no_scan_binaries {
-                        return (vec![], vec![], data.len(), false, false);
-                    }
-                    let findings = binary_findings_to_findings(
-                        &data,
-                        &path.to_string_lossy(),
-                        max_blob_bytes,
-                        args.exhaustive,
-                    );
-                    return (findings, vec![], data.len(), false, false);
-                }
-
-                let text = String::from_utf8_lossy(&data);
-                let rel = path
-                    .strip_prefix(&root)
-                    .map(|p| p.to_string_lossy().replace('\\', "/"))
-                    .unwrap_or_else(|_| path.to_string_lossy().replace('\\', "/"));
-                let source = format!("{}/{}", display_root, rel);
-                let findings = if args.exhaustive {
-                    streamer::scan_text_exhaustive(&text, &source, &extra_patterns, entropy_thresh)
-                } else {
-                    streamer::scan_text(&text, &source, &extra_patterns, entropy_thresh)
-                };
-
-                let mut techs = Vec::new();
-                detect_tech_from_path(&rel, &mut techs);
-
-                (findings, techs, data.len(), false, false)
-            }
-        })
-        .buffer_unordered(args.workers);
-
-    futures::pin_mut!(file_stream);
-    while let Some((findings, techs, bytes, failed, skipped_by_stop)) = file_stream.next().await {
-        if skipped_by_stop {
-            continue;
-        }
-
-        if failed {
-            blobs_failed.fetch_add(1, Ordering::Relaxed);
-            continue;
-        }
-
-        if bytes > 0 {
-            blobs_scanned.fetch_add(1, Ordering::Relaxed);
-            bytes_scanned.fetch_add(bytes, Ordering::Relaxed);
-        }
-
-        if !techs.is_empty() {
-            let mut ts = tech_stack_set.lock().await;
-            for t in techs {
-                ts.insert(t);
-            }
-        }
-
-        if findings.is_empty() {
-            continue;
-        }
-
-        if args.live || args.pipe {
-            for f in &findings {
-                println!(
-                    "{}",
-                    serde_json::to_string(&f.to_dict()).unwrap_or_default()
-                );
-            }
-        }
-
-        let mut all = all_findings.lock().await;
-        all.extend(findings);
-
-        if should_stop_scan(&all, args.max_findings, args.stop_on_critical) {
-            stop_flag.store(true, Ordering::Relaxed);
-            if verbose {
-                if args.max_findings > 0 && all.len() >= args.max_findings {
-                    println!("\n  [!] Reached --max-findings limit. Stopping scan.");
-                } else {
-                    println!("\n  [!] --stop-on-critical triggered. Stopping scan.");
-                }
-            }
-        }
-    }
-
-    let elapsed_s = t0.elapsed().as_secs_f64();
-    let findings = all_findings.lock().await.clone();
-    let mut ts_vec: Vec<String> = tech_stack_set.lock().await.iter().cloned().collect();
-    ts_vec.sort();
-
-    let stream_r = StreamResult {
-        findings,
-        contributors: vec![],
-        tech_stack: ts_vec,
-        commit_count: 0,
-        blobs_scanned: blobs_scanned.load(Ordering::Relaxed),
-        blobs_failed: blobs_failed.load(Ordering::Relaxed),
-        bytes_scanned: bytes_scanned.load(Ordering::Relaxed),
-        elapsed_s,
-        files_saved: 0,
-        files_save_failed: 0,
-        // PERF-005: Cache metrics (not applicable for dir mode scanning local files)
-        cache_hits: 0,
-        cache_misses: 0,
-        cache_stats: None,
-        // PERF-004: Rate limit metrics (not applicable for dir mode)
-        rate_limit_allowed: 0,
-        rate_limit_dropped: 0,
-        rate_limit_wait_ms: 0,
-    };
+    let stream_r = dir_pipeline::scan_local_files(dir_pipeline::LocalScanConfig {
+        candidates,
+        root: canonical_root.clone(),
+        display_root: display_root.clone(),
+        max_blob_bytes,
+        workers: args.workers,
+        no_scan_binaries: args.no_scan_binaries,
+        exhaustive: args.exhaustive,
+        max_findings: args.max_findings,
+        stop_on_critical: args.stop_on_critical,
+        entropy_threshold: args.entropy_threshold,
+        extra_patterns,
+        verbose,
+        emit_findings: args.live || args.pipe,
+    })
+    .await;
 
     if verbose && !args.pipe {
         rep.print_findings_summary(&stream_r.findings);
