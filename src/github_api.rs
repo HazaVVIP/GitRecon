@@ -300,10 +300,8 @@ pub struct GhRepo {
     pub full_name: String,
     pub owner: String,
     pub name: String,
-    #[allow(dead_code)]
     pub private: bool,
     pub default_branch: String,
-    #[allow(dead_code)]
     pub clone_url: String,
 }
 
