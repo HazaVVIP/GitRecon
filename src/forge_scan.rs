@@ -384,13 +384,22 @@ pub(crate) async fn scan_workspace_files(config: FileScanConfig) {
 }
 
 /// Execute the common per-repository forge scan lifecycle through the Forge trait.
-pub(crate) async fn run_repository_scan_loop(
-    forge: &dyn Forge,
+pub(crate) async fn run_repository_scan_loop<F, Fut>(
+    forge: Arc<dyn Forge>,
     selected_repos: &[Repository],
     workspace_lifecycle: &WorkspaceLifecycle,
     scan_config: FileScanConfig,
+    fetch_blob: F,
     started_at: Instant,
-) -> StreamResult {
+) -> StreamResult
+where
+    F: Fn(Arc<dyn Forge>, Repository, crate::forge::TreeEntry, String) -> Fut
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+    Fut: Future<Output = anyhow::Result<Vec<u8>>> + Send,
+{
     for (repo_idx, repo) in selected_repos.iter().enumerate() {
         if scan_config.stop_flag.load(Ordering::Relaxed) {
             break;
@@ -399,15 +408,18 @@ pub(crate) async fn run_repository_scan_loop(
         if scan_config.verbose {
             println!("  ▶  {}", scan_request.progress_label());
         }
-        if let Err(error) = forge.get_head_sha(repo, &repo.default_branch).await {
-            if scan_config.verbose {
-                eprintln!(
-                    "    ⚠   Cannot resolve HEAD for {}: {}",
-                    repo.full_name, error
-                );
+        let head_sha = match forge.get_head_sha(repo, &repo.default_branch).await {
+            Ok(head_sha) => head_sha,
+            Err(error) => {
+                if scan_config.verbose {
+                    eprintln!(
+                        "    ⚠   Cannot resolve HEAD for {}: {}",
+                        repo.full_name, error
+                    );
+                }
+                continue;
             }
-            continue;
-        }
+        };
         let tree = match forge.get_tree(repo, &repo.default_branch).await {
             Ok(tree) => tree,
             Err(error) => {
@@ -435,16 +447,20 @@ pub(crate) async fn run_repository_scan_loop(
         if scan_config.verbose && blob_count > 0 {
             println!("      Reconstructing {} files into workspace", blob_count);
         }
-        let forge_ref = forge;
+        let forge_ref = forge.clone();
         let repo_for_blob = repo.clone();
+        let fetch_blob_for_repo = fetch_blob.clone();
         let failed = reconstruct_blobs(
             tree,
             repo_workspace.clone(),
             scan_config.max_blob_bytes,
             scan_config.workers,
             move |entry| {
+                let forge = forge_ref.clone();
                 let repo = repo_for_blob.clone();
-                async move { forge_ref.get_blob(&repo, entry.sha()).await }
+                let fetch_blob = fetch_blob_for_repo.clone();
+                let head_sha = head_sha.clone();
+                async move { fetch_blob(forge, repo, entry, head_sha).await }
             },
         )
         .await;
@@ -688,7 +704,7 @@ mod tests {
             "gitrecon_empty_selection_scan",
         );
         let result = run_repository_scan_loop(
-            &EmptyForge,
+            Arc::new(EmptyForge),
             &[],
             &workspace,
             FileScanConfig {
@@ -711,6 +727,7 @@ mod tests {
                 blobs_failed: Arc::new(AtomicUsize::new(0)),
                 bytes_scanned: Arc::new(AtomicUsize::new(0)),
             },
+            |_forge, _repo, _entry, _head_sha| async { Ok(Vec::new()) },
             Instant::now(),
         )
         .await;

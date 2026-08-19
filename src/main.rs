@@ -1231,7 +1231,7 @@ async fn run_token_scan(
     );
 
     let stream_r = forge_scan::run_repository_scan_loop(
-        &gh_forge,
+        Arc::new(gh_forge),
         &selected_repos,
         &workspace_lifecycle,
         forge_scan::FileScanConfig {
@@ -1254,6 +1254,7 @@ async fn run_token_scan(
             blobs_failed,
             bytes_scanned,
         },
+        |forge, repo, entry, _head_sha| async move { forge.get_blob(&repo, entry.sha()).await },
         t0,
     )
     .await;
@@ -1483,7 +1484,7 @@ async fn run_gitlab_token_scan(
     );
 
     let stream_r = forge_scan::run_repository_scan_loop(
-        &gl_forge,
+        Arc::new(gl_forge),
         &selected_repos,
         &workspace_lifecycle,
         forge_scan::FileScanConfig {
@@ -1506,6 +1507,7 @@ async fn run_gitlab_token_scan(
             blobs_failed,
             bytes_scanned,
         },
+        |forge, repo, entry, _head_sha| async move { forge.get_blob(&repo, entry.sha()).await },
         t0,
     )
     .await;
@@ -1789,94 +1791,13 @@ async fn run_bitbucket_token_scan(
         "gitrecon_bitbucket_scan",
     );
 
-    for (repo_idx, repo) in selected_repos.iter().enumerate() {
-        if stop_flag.load(Ordering::Relaxed) {
-            break;
-        }
-
-        if verbose {
-            println!(
-                "  ▶  [{}/{}] {}",
-                repo_idx + 1,
-                selected_repo_count,
-                repo.full_name
-            );
-        }
-
-        // Get HEAD SHA for the default branch
-        let head_sha = match bb_forge.get_head_sha(repo, &repo.default_branch).await {
-            Ok(s) => s,
-            Err(e) => {
-                if verbose {
-                    eprintln!("    ⚠   Cannot resolve HEAD for {}: {}", repo.full_name, e);
-                }
-                continue;
-            }
-        };
-
-        // Fetch the full recursive tree
-        let tree = match bb_forge.get_tree(repo, &repo.default_branch).await {
-            Ok(t) => t,
-            Err(e) => {
-                if verbose {
-                    eprintln!("    ⚠   Cannot get tree for {}: {}", repo.full_name, e);
-                }
-                continue;
-            }
-        };
-
-        let Some(repo_workspace) =
-            workspace_lifecycle.repository_path(&repo.full_name.replace('/', "_"))
-        else {
-            continue;
-        };
-        let _ = std::fs::create_dir_all(&repo_workspace);
-
-        // Reconstruct source workspace from tree blobs.
-        let blob_count = tree
-            .iter()
-            .filter(|entry| entry.obj_type == "blob")
-            .filter(|entry| entry.size.is_none_or(|size| size <= max_blob_bytes as u64))
-            .count();
-        if verbose && blob_count > 0 {
-            println!("      Reconstructing {} files into workspace", blob_count);
-        }
-        let client = bb_client.clone();
-        let api_base = api_base.clone();
-        let owner = repo.owner.clone();
-        let name = repo.name.clone();
-        let commit_sha = head_sha.clone();
-        let failed = forge_scan::reconstruct_blobs(
-            tree,
-            repo_workspace.clone(),
-            max_blob_bytes,
-            args.workers,
-            move |entry| {
-                let client = client.clone();
-                let api_base = api_base.clone();
-                let owner = owner.clone();
-                let name = name.clone();
-                let commit_sha = commit_sha.clone();
-                async move {
-                    bitbucket_api::get_file_by_path(
-                        &client,
-                        &api_base,
-                        &owner,
-                        &name,
-                        &commit_sha,
-                        &entry.path,
-                    )
-                    .await
-                    .map_err(|error| anyhow::anyhow!(error))
-                }
-            },
-        )
-        .await;
-        blobs_failed.fetch_add(failed, Ordering::Relaxed);
-
-        forge_scan::scan_workspace_files(forge_scan::FileScanConfig {
-            workspace: repo_workspace.clone(),
-            repository_name: repo.full_name.clone(),
+    let stream_r = forge_scan::run_repository_scan_loop(
+        Arc::new(bb_forge),
+        &selected_repos,
+        &workspace_lifecycle,
+        forge_scan::FileScanConfig {
+            workspace: PathBuf::new(),
+            repository_name: String::new(),
             max_blob_bytes,
             workers: args.workers,
             exhaustive: args.exhaustive,
@@ -1886,25 +1807,30 @@ async fn run_bitbucket_token_scan(
             verbose,
             max_findings: args.max_findings,
             stop_on_critical: args.stop_on_critical,
-            extra_patterns: extra_pat_arc.clone(),
-            stop_flag: stop_flag.clone(),
-            all_findings: all_findings.clone(),
-            tech_stack_set: tech_stack_set.clone(),
-            blobs_scanned: blobs_scanned.clone(),
-            blobs_failed: blobs_failed.clone(),
-            bytes_scanned: bytes_scanned.clone(),
-        })
-        .await;
-    }
-
-    // ── 5. Assemble result ───────────────────────
-    let stream_r = forge_scan::build_stream_result(
+            extra_patterns: extra_pat_arc,
+            stop_flag,
+            all_findings,
+            tech_stack_set,
+            blobs_scanned,
+            blobs_failed,
+            bytes_scanned,
+        },
+        move |_forge, repo, entry, head_sha| {
+            let client = bb_client.clone();
+            let api_base = api_base.clone();
+            async move {
+                bitbucket_api::get_file_by_path(
+                    &client,
+                    &api_base,
+                    &repo.owner,
+                    &repo.name,
+                    &head_sha,
+                    &entry.path,
+                )
+                .await
+            }
+        },
         t0,
-        all_findings.clone(),
-        tech_stack_set.clone(),
-        blobs_scanned.clone(),
-        blobs_failed.clone(),
-        bytes_scanned.clone(),
     )
     .await;
 
@@ -2164,85 +2090,13 @@ async fn run_gitea_token_scan(
         "gitrecon_gitea_scan",
     );
 
-    for (repo_idx, repo) in selected_repos.iter().enumerate() {
-        if stop_flag.load(Ordering::Relaxed) {
-            break;
-        }
-
-        if verbose {
-            println!(
-                "  ▶  [{}/{}] {}",
-                repo_idx + 1,
-                selected_repo_count,
-                repo.full_name
-            );
-        }
-
-        // Get HEAD SHA for the default branch
-        let _head_sha = match gt_forge.get_head_sha(repo, &repo.default_branch).await {
-            Ok(s) => s,
-            Err(e) => {
-                if verbose {
-                    eprintln!("    ⚠   Cannot resolve HEAD for {}: {}", repo.full_name, e);
-                }
-                continue;
-            }
-        };
-
-        // Fetch the full recursive tree
-        let tree = match gt_forge.get_tree(repo, &repo.default_branch).await {
-            Ok(t) => t,
-            Err(e) => {
-                if verbose {
-                    eprintln!("    ⚠   Cannot get tree for {}: {}", repo.full_name, e);
-                }
-                continue;
-            }
-        };
-
-        let Some(repo_workspace) =
-            workspace_lifecycle.repository_path(&repo.full_name.replace('/', "_"))
-        else {
-            continue;
-        };
-        let _ = std::fs::create_dir_all(&repo_workspace);
-
-        // Reconstruct source workspace from tree blobs.
-        let blob_count = tree
-            .iter()
-            .filter(|entry| entry.obj_type == "blob")
-            .filter(|entry| entry.size.is_none_or(|size| size <= max_blob_bytes as u64))
-            .count();
-        if verbose && blob_count > 0 {
-            println!("      Reconstructing {} files into workspace", blob_count);
-        }
-        let client = gt_client.clone();
-        let api_base = api_base.clone();
-        let owner = repo.owner.clone();
-        let name = repo.name.clone();
-        let failed = forge_scan::reconstruct_blobs(
-            tree,
-            repo_workspace.clone(),
-            max_blob_bytes,
-            args.workers,
-            move |entry| {
-                let client = client.clone();
-                let api_base = api_base.clone();
-                let owner = owner.clone();
-                let name = name.clone();
-                async move {
-                    gitea_api::get_blob_content(&client, &api_base, &owner, &name, entry.sha())
-                        .await
-                        .map_err(|error| anyhow::anyhow!(error))
-                }
-            },
-        )
-        .await;
-        blobs_failed.fetch_add(failed, Ordering::Relaxed);
-
-        forge_scan::scan_workspace_files(forge_scan::FileScanConfig {
-            workspace: repo_workspace.clone(),
-            repository_name: repo.full_name.clone(),
+    let stream_r = forge_scan::run_repository_scan_loop(
+        Arc::new(gt_forge),
+        &selected_repos,
+        &workspace_lifecycle,
+        forge_scan::FileScanConfig {
+            workspace: PathBuf::new(),
+            repository_name: String::new(),
             max_blob_bytes,
             workers: args.workers,
             exhaustive: args.exhaustive,
@@ -2252,25 +2106,16 @@ async fn run_gitea_token_scan(
             verbose,
             max_findings: args.max_findings,
             stop_on_critical: args.stop_on_critical,
-            extra_patterns: extra_pat_arc.clone(),
-            stop_flag: stop_flag.clone(),
-            all_findings: all_findings.clone(),
-            tech_stack_set: tech_stack_set.clone(),
-            blobs_scanned: blobs_scanned.clone(),
-            blobs_failed: blobs_failed.clone(),
-            bytes_scanned: bytes_scanned.clone(),
-        })
-        .await;
-    }
-
-    // ── 5. Assemble result ───────────────────────
-    let stream_r = forge_scan::build_stream_result(
+            extra_patterns: extra_pat_arc,
+            stop_flag,
+            all_findings,
+            tech_stack_set,
+            blobs_scanned,
+            blobs_failed,
+            bytes_scanned,
+        },
+        |forge, repo, entry, _head_sha| async move { forge.get_blob(&repo, entry.sha()).await },
         t0,
-        all_findings.clone(),
-        tech_stack_set.clone(),
-        blobs_scanned.clone(),
-        blobs_failed.clone(),
-        bytes_scanned.clone(),
     )
     .await;
 
@@ -2516,83 +2361,13 @@ async fn run_azure_token_scan(
         "gitrecon_azure_scan",
     );
 
-    for (repo_idx, repo) in selected_repos.iter().enumerate() {
-        if stop_flag.load(Ordering::Relaxed) {
-            break;
-        }
-
-        if verbose {
-            println!(
-                "  ▶  [{}/{}] {}",
-                repo_idx + 1,
-                selected_repo_count,
-                repo.full_name
-            );
-        }
-
-        // Get HEAD SHA for the default branch
-        let _head_sha = match az_forge.get_head_sha(repo, &repo.default_branch).await {
-            Ok(s) => s,
-            Err(e) => {
-                if verbose {
-                    eprintln!("    ⚠   Cannot resolve HEAD for {}: {}", repo.full_name, e);
-                }
-                continue;
-            }
-        };
-
-        // Fetch the full recursive tree
-        let tree = match az_forge.get_tree(repo, &repo.default_branch).await {
-            Ok(t) => t,
-            Err(e) => {
-                if verbose {
-                    eprintln!("    ⚠   Cannot get tree for {}: {}", repo.full_name, e);
-                }
-                continue;
-            }
-        };
-
-        let Some(repo_workspace) =
-            workspace_lifecycle.repository_path(&repo.full_name.replace('/', "_"))
-        else {
-            continue;
-        };
-        let _ = std::fs::create_dir_all(&repo_workspace);
-
-        // Reconstruct source workspace from tree blobs.
-        let blob_count = tree
-            .iter()
-            .filter(|entry| entry.obj_type == "blob")
-            .filter(|entry| entry.size.is_none_or(|size| size <= max_blob_bytes as u64))
-            .count();
-        if verbose && blob_count > 0 {
-            println!("      Reconstructing {} files into workspace", blob_count);
-        }
-        let client = az_client.clone();
-        let api_base = api_base.clone();
-        let repo_id = repo.full_name.clone();
-        let failed = forge_scan::reconstruct_blobs(
-            tree,
-            repo_workspace.clone(),
-            max_blob_bytes,
-            args.workers,
-            move |entry| {
-                let client = client.clone();
-                let api_base = api_base.clone();
-                let repo_id = repo_id.clone();
-                async move {
-                    azure_api::get_blob_content(&client, &api_base, &repo_id, entry.sha())
-                        .await
-                        .map_err(|error| anyhow::anyhow!(error))
-                }
-            },
-        )
-        .await;
-        blobs_failed.fetch_add(failed, Ordering::Relaxed);
-
-        forge_scan::scan_workspace_files(forge_scan::FileScanConfig {
-            workspace: repo_workspace.clone(),
-            repository_name: repo.full_name.clone(),
+    let stream_r = forge_scan::run_repository_scan_loop(
+        Arc::new(az_forge),
+        &selected_repos,
+        &workspace_lifecycle,
+        forge_scan::FileScanConfig {
+            workspace: PathBuf::new(),
+            repository_name: String::new(),
             max_blob_bytes,
             workers: args.workers,
             exhaustive: args.exhaustive,
@@ -2602,25 +2377,22 @@ async fn run_azure_token_scan(
             verbose,
             max_findings: args.max_findings,
             stop_on_critical: args.stop_on_critical,
-            extra_patterns: extra_pat_arc.clone(),
-            stop_flag: stop_flag.clone(),
-            all_findings: all_findings.clone(),
-            tech_stack_set: tech_stack_set.clone(),
-            blobs_scanned: blobs_scanned.clone(),
-            blobs_failed: blobs_failed.clone(),
-            bytes_scanned: bytes_scanned.clone(),
-        })
-        .await;
-    }
-
-    // ── 5. Assemble result ───────────────────────
-    let stream_r = forge_scan::build_stream_result(
+            extra_patterns: extra_pat_arc,
+            stop_flag,
+            all_findings,
+            tech_stack_set,
+            blobs_scanned,
+            blobs_failed,
+            bytes_scanned,
+        },
+        move |_forge, repo, entry, _head_sha| {
+            let client = az_client.clone();
+            let api_base = api_base.clone();
+            async move {
+                azure_api::get_blob_content(&client, &api_base, &repo.full_name, entry.sha()).await
+            }
+        },
         t0,
-        all_findings.clone(),
-        tech_stack_set.clone(),
-        blobs_scanned.clone(),
-        blobs_failed.clone(),
-        bytes_scanned.clone(),
     )
     .await;
 
