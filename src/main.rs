@@ -37,8 +37,10 @@ mod outcome;
 mod pack_reader; // Sprint 5 (S5.1): pack file parser + delta resolver
 mod rate_limiter; // PERF-004: Token bucket rate limiter
 mod reporter;
+mod scanner_policy;
 mod streamer;
 mod target_utils;
+mod targets;
 mod temp_cleanup; // SEC-004: Temp file cleanup
 mod text_utils;
 mod ui;
@@ -61,31 +63,11 @@ use temp_cleanup::TempDirGuard; // SEC-004
 use binary_adapter::{binary_findings_to_findings, is_binary_extension};
 use colored::Colorize;
 use http_client::{HttpClient, HttpConfig};
-use reporter::Reporter;
-use serde::Deserialize;
+use reporter::{ReportContext, Reporter};
 use streamer::StreamResult;
 use target_utils::{dir_target_name, normalize_url, parse_extra_headers, target_name};
+use targets::{load_targets, Target};
 use ui::theme::{BannerStyle as ThemeBannerStyle, Theme};
-
-// ════════════════════════════════════════════════
-// A-1: Multi-Target Scanning - Target Definition
-// ════════════════════════════════════════════════
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(untagged)]
-enum Target {
-    Url {
-        url: String,
-        fuzz: Option<bool>,
-    },
-    Token {
-        token: String,
-        repos: Option<Vec<String>>,
-    },
-    Dir {
-        dir: String,
-    },
-}
 
 struct UrlRunContext<'a> {
     args: &'a Cli,
@@ -378,39 +360,18 @@ async fn run_url_target(context: UrlRunContext<'_>, url: String, fuzz: bool) -> 
     };
     let report_path = format!("{}/{}_report.{}", args.output, tname, ext);
 
-    match args.format.as_str() {
-        "sarif" => {
-            if let Err(e) = rep.save_sarif(&report_path, &url, Some(&stream_r)) {
-                eprintln!("  ⚠   Could not save SARIF report: {}", e);
-            }
-        }
-        "csv" => {
-            if let Err(e) = rep.save_csv(&report_path, Some(&stream_r)) {
-                eprintln!("  ⚠   Could not save CSV report: {}", e);
-            }
-        }
-        "ndjson" => {
-            if let Err(e) = rep.save_ndjson(&report_path, Some(&stream_r)) {
-                eprintln!("  ⚠   Could not save NDJSON report: {}", e);
-            }
-        }
-        "md" => {
-            if let Err(e) = rep.save_markdown(&report_path, &url, Some(&stream_r)) {
-                eprintln!("  ⚠   Could not save Markdown report: {}", e);
-            }
-        }
-        "html" => {
-            if let Err(e) = rep.save_html(&report_path, &url, Some(&stream_r)) {
-                eprintln!("  ⚠   Could not save HTML report: {}", e);
-            }
-        }
-        _ => {
-            if let Err(e) =
-                rep.save_json(&report_path, &url, Some(&dr), Some(&map_r), Some(&stream_r))
-            {
-                eprintln!("  ⚠   Could not save report: {}", e);
-            }
-        }
+    if let Err(e) = rep.save_scan_report(
+        &report_path,
+        &args.format,
+        &url,
+        &stream_r,
+        ReportContext::Exposure {
+            target: &url,
+            detect: &dr,
+            map: &map_r,
+        },
+    ) {
+        eprintln!("  ⚠   Could not save report: {}", e);
     }
 
     if verbose && !args.pipe {
@@ -1523,14 +1484,16 @@ async fn run_token_scan(
     };
     let report_path = format!("{}/{}_report.{}", args.output, report_name, ext);
 
-    let save_result = match args.format.as_str() {
-        "sarif" => rep.save_sarif(&report_path, &report_name, Some(&stream_r)),
-        "csv" => rep.save_csv(&report_path, Some(&stream_r)),
-        "ndjson" => rep.save_ndjson(&report_path, Some(&stream_r)),
-        "md" => rep.save_markdown(&report_path, &report_name, Some(&stream_r)),
-        "html" => rep.save_html(&report_path, &report_name, Some(&stream_r)),
-        _ => rep.save_token_report(&report_path, &login, selected_repo_count, &stream_r),
-    };
+    let save_result = rep.save_scan_report(
+        &report_path,
+        &args.format,
+        &report_name,
+        &stream_r,
+        ReportContext::Token {
+            login: &login,
+            repo_count: selected_repo_count,
+        },
+    );
 
     if let Err(e) = save_result {
         eprintln!("  ⚠   Could not save report: {}", e);
@@ -2012,14 +1975,16 @@ async fn run_gitlab_token_scan(
     };
     let report_path = format!("{}/{}_report.{}", args.output, report_name, ext);
 
-    let save_result = match args.format.as_str() {
-        "sarif" => rep.save_sarif(&report_path, &report_name, Some(&stream_r)),
-        "csv" => rep.save_csv(&report_path, Some(&stream_r)),
-        "ndjson" => rep.save_ndjson(&report_path, Some(&stream_r)),
-        "md" => rep.save_markdown(&report_path, &report_name, Some(&stream_r)),
-        "html" => rep.save_html(&report_path, &report_name, Some(&stream_r)),
-        _ => rep.save_token_report(&report_path, &login, selected_repo_count, &stream_r),
-    };
+    let save_result = rep.save_scan_report(
+        &report_path,
+        &args.format,
+        &report_name,
+        &stream_r,
+        ReportContext::Token {
+            login: &login,
+            repo_count: selected_repo_count,
+        },
+    );
 
     if let Err(e) = save_result {
         eprintln!("  ⚠   Could not save report: {}", e);
@@ -2564,14 +2529,16 @@ async fn run_bitbucket_token_scan(
     };
     let report_path = format!("{}/{}_report.{}", args.output, report_name, ext);
 
-    let save_result = match args.format.as_str() {
-        "sarif" => rep.save_sarif(&report_path, &report_name, Some(&stream_r)),
-        "csv" => rep.save_csv(&report_path, Some(&stream_r)),
-        "ndjson" => rep.save_ndjson(&report_path, Some(&stream_r)),
-        "md" => rep.save_markdown(&report_path, &report_name, Some(&stream_r)),
-        "html" => rep.save_html(&report_path, &report_name, Some(&stream_r)),
-        _ => rep.save_token_report(&report_path, &login, selected_repo_count, &stream_r),
-    };
+    let save_result = rep.save_scan_report(
+        &report_path,
+        &args.format,
+        &report_name,
+        &stream_r,
+        ReportContext::Token {
+            login: &login,
+            repo_count: selected_repo_count,
+        },
+    );
 
     if let Err(e) = save_result {
         eprintln!("  ⚠   Could not save report: {}", e);
@@ -3085,14 +3052,16 @@ async fn run_gitea_token_scan(
     };
     let report_path = format!("{}/{}_report.{}", args.output, report_name, ext);
 
-    let save_result = match args.format.as_str() {
-        "sarif" => rep.save_sarif(&report_path, &report_name, Some(&stream_r)),
-        "csv" => rep.save_csv(&report_path, Some(&stream_r)),
-        "ndjson" => rep.save_ndjson(&report_path, Some(&stream_r)),
-        "md" => rep.save_markdown(&report_path, &report_name, Some(&stream_r)),
-        "html" => rep.save_html(&report_path, &report_name, Some(&stream_r)),
-        _ => rep.save_token_report(&report_path, &login, selected_repo_count, &stream_r),
-    };
+    let save_result = rep.save_scan_report(
+        &report_path,
+        &args.format,
+        &report_name,
+        &stream_r,
+        ReportContext::Token {
+            login: &login,
+            repo_count: selected_repo_count,
+        },
+    );
 
     if let Err(e) = save_result {
         eprintln!("  ⚠   Could not save report: {}", e);
@@ -3592,14 +3561,15 @@ async fn run_azure_token_scan(
     };
     let report_path = format!("{}/{}_report.{}", args.output, report_name, ext);
 
-    let save_result = match args.format.as_str() {
-        "sarif" => rep.save_sarif(&report_path, &report_name, Some(&stream_r)),
-        "csv" => rep.save_csv(&report_path, Some(&stream_r)),
-        "ndjson" => rep.save_ndjson(&report_path, Some(&stream_r)),
-        "md" => rep.save_markdown(&report_path, &report_name, Some(&stream_r)),
-        "html" => rep.save_html(&report_path, &report_name, Some(&stream_r)),
-        _ => rep.save_json(&report_path, "azure_token", None, None, Some(&stream_r)),
-    };
+    let save_result = rep.save_scan_report(
+        &report_path,
+        &args.format,
+        &report_name,
+        &stream_r,
+        ReportContext::Stream {
+            target: "azure_token",
+        },
+    );
 
     if save_result.is_ok() && !args.quiet {
         println!("  📄  Saved: {}\n", report_path);
@@ -3913,14 +3883,15 @@ async fn run_dir_scan(
     };
     let report_path = format!("{}/{}_report.{}", args.output, report_name, ext);
 
-    let save_result = match args.format.as_str() {
-        "sarif" => rep.save_sarif(&report_path, &display_root, Some(&stream_r)),
-        "csv" => rep.save_csv(&report_path, Some(&stream_r)),
-        "ndjson" => rep.save_ndjson(&report_path, Some(&stream_r)),
-        "md" => rep.save_markdown(&report_path, &display_root, Some(&stream_r)),
-        "html" => rep.save_html(&report_path, &display_root, Some(&stream_r)),
-        _ => rep.save_json(&report_path, &display_root, None, None, Some(&stream_r)),
-    };
+    let save_result = rep.save_scan_report(
+        &report_path,
+        &args.format,
+        &display_root,
+        &stream_r,
+        ReportContext::Stream {
+            target: &display_root,
+        },
+    );
 
     if let Err(e) = save_result {
         eprintln!("  ⚠   Could not save report: {}", e);
@@ -4608,35 +4579,15 @@ async fn main() {
 
     // A-1: Multi-Target Scanning - Parse targets from NDJSON file
     let targets: Vec<Target> = if let Some(ref targets_file) = args.targets {
-        match std::fs::read_to_string(targets_file) {
-            Ok(content) => {
-                let mut parsed = Vec::new();
-                for line in content.lines() {
-                    let line = line.trim();
-                    if line.is_empty() || line.starts_with('#') {
-                        continue;
-                    }
-
-                    // Try parse as NDJSON first
-                    if let Ok(target) = serde_json::from_str::<Target>(line) {
-                        parsed.push(target);
-                    } else {
-                        // Fallback: treat as plain URL for backward compatibility
-                        parsed.push(Target::Url {
-                            url: normalize_url(line),
-                            fuzz: Some(args.fuzz),
-                        });
-                    }
-                }
-
+        match load_targets(targets_file, args.fuzz) {
+            Ok(parsed) => {
                 if verbose {
                     println!("  ◈  Loaded {} targets from {}", parsed.len(), targets_file);
                 }
-
                 parsed
             }
-            Err(e) => {
-                eprintln!("  ⚠   Cannot read targets file '{}': {}", targets_file, e);
+            Err(error) => {
+                eprintln!("  ⚠   {}", error);
                 std::process::exit(1);
             }
         }
@@ -4739,30 +4690,11 @@ async fn main() {
                         extra_patterns.clone(),
                     )
                     .await;
-                    let (status, error_code, error, summary) = match scan_result {
-                        Ok(summary) => (TargetStatus::Success, None, None, Some(summary)),
-                        Err(e) => {
-                            let error = e.to_string();
-                            (
-                                TargetStatus::Failed,
-                                Some(classify_error(&error)),
-                                Some(error),
-                                None,
-                            )
-                        }
+                    let outcome = match scan_result {
+                        Ok(summary) => TargetOutcome::success(target, "TOKEN", &summary),
+                        Err(error) => TargetOutcome::failure(target, "TOKEN", error.to_string()),
                     };
-                    all_results.push(TargetOutcome {
-                        target,
-                        target_type: "TOKEN".to_string(),
-                        status,
-                        report_path: summary.as_ref().and_then(|s| {
-                            (!s.report_path.is_empty()).then(|| s.report_path.clone())
-                        }),
-                        findings_count: summary.as_ref().map_or(0, |s| s.findings_count),
-                        risk_score: summary.as_ref().map_or(0, |s| s.risk_score),
-                        error_code,
-                        error,
-                    });
+                    all_results.push(outcome);
                 }
                 Target::Dir { dir } => {
                     if verbose {
@@ -4771,27 +4703,11 @@ async fn main() {
                     let target = dir.clone();
                     let scan_result =
                         run_dir_scan(&args, &rep, &client, dir, extra_patterns.clone()).await;
-                    let (status, error_code, error, summary) = match scan_result {
-                        Ok(summary) => (TargetStatus::Success, None, None, Some(summary)),
-                        Err(e) => (
-                            TargetStatus::Failed,
-                            Some(TargetErrorCode::ScanFailed),
-                            Some(e.to_string()),
-                            None,
-                        ),
+                    let outcome = match scan_result {
+                        Ok(summary) => TargetOutcome::success(target, "DIR", &summary),
+                        Err(error) => TargetOutcome::failure(target, "DIR", error.to_string()),
                     };
-                    all_results.push(TargetOutcome {
-                        target,
-                        target_type: "DIR".to_string(),
-                        status,
-                        report_path: summary.as_ref().and_then(|s| {
-                            (!s.report_path.is_empty()).then(|| s.report_path.clone())
-                        }),
-                        findings_count: summary.as_ref().map_or(0, |s| s.findings_count),
-                        risk_score: summary.as_ref().map_or(0, |s| s.risk_score),
-                        error_code,
-                        error,
-                    });
+                    all_results.push(outcome);
                 }
             }
         }

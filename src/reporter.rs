@@ -131,8 +131,55 @@ fn maybe_hidden(pb: ProgressBar) -> ProgressBar {
     pb
 }
 
+/// Context used by the shared report dispatcher to preserve mode-specific JSON schemas.
+pub enum ReportContext<'a> {
+    Exposure {
+        target: &'a str,
+        detect: &'a DetectResult,
+        map: &'a MapResult,
+    },
+    Token {
+        login: &'a str,
+        repo_count: usize,
+    },
+    Stream {
+        target: &'a str,
+    },
+}
+
 #[allow(dead_code)]
 impl Reporter {
+    /// Save a scan result using the selected format and mode-aware JSON context.
+    pub fn save_scan_report(
+        &self,
+        path: &str,
+        format: &str,
+        name: &str,
+        stream: &StreamResult,
+        context: ReportContext<'_>,
+    ) -> std::io::Result<()> {
+        match format {
+            "sarif" => self.save_sarif(path, name, Some(stream)),
+            "csv" => self.save_csv(path, Some(stream)),
+            "ndjson" => self.save_ndjson(path, Some(stream)),
+            "md" => self.save_markdown(path, name, Some(stream)),
+            "html" => self.save_html(path, name, Some(stream)),
+            _ => match context {
+                ReportContext::Exposure {
+                    target,
+                    detect,
+                    map,
+                } => self.save_json(path, target, Some(detect), Some(map), Some(stream)),
+                ReportContext::Token { login, repo_count } => {
+                    self.save_token_report(path, login, repo_count, stream)
+                }
+                ReportContext::Stream { target } => {
+                    self.save_json(path, target, None, None, Some(stream))
+                }
+            },
+        }
+    }
+
     fn ai_summary(findings: &[crate::streamer::Finding]) -> (usize, HashMap<String, usize>) {
         let mut total = 0usize;
         let mut by_category: HashMap<String, usize> = HashMap::new();

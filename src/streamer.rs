@@ -20,6 +20,7 @@ use crate::checkpoint::{
 use crate::git_parser::{obj_path, ObjectParser};
 use crate::http_client::HttpClient;
 use crate::mapper::MapResult;
+use crate::scanner_policy::ScanPolicy;
 use crate::text_utils::truncate_utf8;
 
 // ── parse-failure throttle: only print the first 3 \"did not parse\" errors
@@ -2112,10 +2113,10 @@ fn process_blob_content(
                 sha1,
                 is_deleted,
                 &extra_patterns,
-                ScanPolicy {
-                    entropy_threshold,
-                    false_positive_keywords: &fp_keywords,
-                    include_placeholders: exhaustive,
+                if exhaustive {
+                    ScanPolicy::exhaustive(entropy_threshold, &fp_keywords)
+                } else {
+                    ScanPolicy::normal(entropy_threshold, &fp_keywords)
                 },
             );
 
@@ -2358,13 +2359,6 @@ async fn fetch_and_process(
     )
 }
 
-#[derive(Clone, Copy)]
-struct ScanPolicy<'a> {
-    entropy_threshold: f64,
-    false_positive_keywords: &'a [&'a str],
-    include_placeholders: bool,
-}
-
 fn scan_content(
     content: &str,
     filename: &str,
@@ -2380,11 +2374,7 @@ fn scan_content(
         sha1,
         is_deleted,
         extra_patterns,
-        ScanPolicy {
-            entropy_threshold,
-            false_positive_keywords,
-            include_placeholders: false,
-        },
+        ScanPolicy::normal(entropy_threshold, false_positive_keywords),
     )
 }
 
@@ -3883,10 +3873,10 @@ fn scan_text_with_policy(
         "",
         false,
         dyn_patterns,
-        ScanPolicy {
-            entropy_threshold,
-            false_positive_keywords: &custom_keywords,
-            include_placeholders,
+        if include_placeholders {
+            ScanPolicy::exhaustive(entropy_threshold, &custom_keywords)
+        } else {
+            ScanPolicy::normal(entropy_threshold, &custom_keywords)
         },
     );
     findings.extend(scan_yaml_nextline_secrets_with_policy(

@@ -14,10 +14,10 @@ The project intentionally favors **offensive discovery effectiveness**. Normal s
 
 | Domain | Primary modules | Responsibility |
 |---|---|---|
-| Orchestration | `src/main.rs`, `src/target_utils.rs`, `src/outcome.rs` | CLI parsing, target dispatch, bounded concurrency, deterministic aggregate outcomes, and error classification |
+| Orchestration | `src/main.rs`, `src/target_utils.rs`, `src/targets.rs`, `src/outcome.rs` | CLI parsing, target planning, target dispatch, bounded concurrency, deterministic aggregate outcomes, and error classification |
 | Forge integrations | `src/forge.rs`, `src/forge_factory.rs`, `src/*_api.rs` | Common forge contract, provider construction, authentication, pagination, repository and object access |
 | Exposure pipeline | `src/detect.rs`, `src/mapper.rs`, `src/git_parser.rs`, `src/pack_reader.rs` | Detect exposed Git metadata, map object graphs, parse loose and packed objects, and resolve deltas |
-| Scanning | `src/streamer.rs`, `src/binary_scanner.rs`, `src/binary_adapter.rs` | Pattern, entropy, multiline, database, AI-path, text, binary, and archive detection |
+| Scanning | `src/streamer.rs`, `src/scanner_policy.rs`, `src/binary_scanner.rs`, `src/binary_adapter.rs` | Policy-driven pattern, entropy, multiline, database, AI-path, text, binary, and archive detection |
 | Reliability | `src/http_client.rs`, `src/cache.rs`, `src/checkpoint.rs`, `src/rate_limiter.rs`, `src/temp_cleanup.rs` | Timeouts, retries, rate limits, cache isolation, HMAC checkpoints, and temporary-resource cleanup |
 | Reporting and validation | `src/reporter.rs`, `src/validation.rs`, `src/layout.rs` | JSON, SARIF, CSV, NDJSON, Markdown, HTML, terminal output, input validation, and layout helpers |
 | Theme | `src/ui/theme.rs` | Optional TOML-backed terminal theme configuration |

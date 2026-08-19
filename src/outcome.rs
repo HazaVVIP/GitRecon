@@ -104,3 +104,68 @@ pub(crate) struct TargetOutcome {
     pub(crate) error_code: Option<TargetErrorCode>,
     pub(crate) error: Option<String>,
 }
+
+impl TargetOutcome {
+    pub(crate) fn success(
+        target: impl Into<String>,
+        target_type: impl Into<String>,
+        summary: &ScanSummary,
+    ) -> Self {
+        Self {
+            target: target.into(),
+            target_type: target_type.into(),
+            status: TargetStatus::Success,
+            report_path: (!summary.report_path.is_empty()).then(|| summary.report_path.clone()),
+            findings_count: summary.findings_count,
+            risk_score: summary.risk_score,
+            error_code: None,
+            error: None,
+        }
+    }
+
+    pub(crate) fn failure(
+        target: impl Into<String>,
+        target_type: impl Into<String>,
+        error: impl Into<String>,
+    ) -> Self {
+        let error = error.into();
+        Self {
+            target: target.into(),
+            target_type: target_type.into(),
+            status: TargetStatus::Failed,
+            report_path: None,
+            findings_count: 0,
+            risk_score: 0,
+            error_code: Some(classify_error(&error)),
+            error: Some(error),
+        }
+    }
+}
+
+#[cfg(test)]
+mod outcome_factory_tests {
+    use super::{ScanSummary, TargetErrorCode, TargetOutcome, TargetStatus};
+
+    #[test]
+    fn builds_success_outcome_from_summary() {
+        let summary = ScanSummary {
+            report_path: "report.json".to_string(),
+            findings_count: 3,
+            risk_score: 70,
+        };
+        let outcome = TargetOutcome::success("target", "DIR", &summary);
+        assert!(matches!(outcome.status, TargetStatus::Success));
+        assert_eq!(outcome.report_path.as_deref(), Some("report.json"));
+        assert_eq!(outcome.findings_count, 3);
+    }
+
+    #[test]
+    fn builds_classified_failure_outcome() {
+        let outcome = TargetOutcome::failure("target", "TOKEN", "HTTP 401 authentication failed");
+        assert!(matches!(outcome.status, TargetStatus::Failed));
+        assert!(matches!(
+            outcome.error_code,
+            Some(TargetErrorCode::AuthenticationFailed)
+        ));
+    }
+}
