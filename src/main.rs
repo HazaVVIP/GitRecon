@@ -3339,18 +3339,9 @@ async fn main() {
     // A-1: Generate aggregate report if multiple targets were processed
     if targets.len() > 1 && !all_results.is_empty() {
         let aggregate_path = format!("{}/aggregate_report.json", args.output);
-        if let Err(e) = std::fs::write(
-            &aggregate_path,
-            serde_json::to_string_pretty(&serde_json::json!({
-                "tool": "GitRecon",
-                "version": env!("CARGO_PKG_VERSION"),
-                "timestamp": chrono::Utc::now().to_rfc3339(),
-                "total_targets": targets.len(),
-                "scanned_targets": all_results.len(),
-                "results": all_results,
-            }))
-            .unwrap_or_default(),
-        ) {
+        if let Err(e) =
+            reporter::save_aggregate_report(&aggregate_path, targets.len(), &all_results)
+        {
             if verbose {
                 eprintln!("  ⚠   Could not save aggregate report: {}", e);
             }

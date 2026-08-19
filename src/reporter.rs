@@ -5,6 +5,7 @@
 use crate::detect::DetectResult;
 use crate::layout;
 use crate::mapper::MapResult;
+use crate::outcome::TargetOutcome;
 use crate::streamer::StreamResult;
 use crate::text_utils::truncate_utf8;
 use crate::ui::colors::ColorScheme;
@@ -29,6 +30,23 @@ pub(crate) fn build_report_path(output: &str, report_name: &str, format: &str) -
         _ => "json",
     };
     format!("{}/{}_report.{}", output, report_name, extension)
+}
+
+pub(crate) fn save_aggregate_report(
+    path: &str,
+    total_targets: usize,
+    results: &[TargetOutcome],
+) -> std::io::Result<()> {
+    let body = serde_json::to_string_pretty(&serde_json::json!({
+        "tool": "GitRecon",
+        "version": env!("CARGO_PKG_VERSION"),
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "total_targets": total_targets,
+        "scanned_targets": results.len(),
+        "results": results,
+    }))
+    .unwrap_or_default();
+    std::fs::write(path, body)
 }
 
 // ════════════════════════════════════════════════
@@ -1298,6 +1316,29 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.path);
         }
+    }
+
+    #[test]
+    fn save_aggregate_report_preserves_schema() {
+        let path = std::env::temp_dir().join(format!(
+            "gitrecon-aggregate-report-{}.json",
+            std::process::id()
+        ));
+        let summary = crate::outcome::ScanSummary {
+            report_path: "out/target_report.json".to_string(),
+            findings_count: 2,
+            risk_score: 7,
+        };
+        let outcome = TargetOutcome::success("target", "URL", &summary);
+        save_aggregate_report(path.to_str().unwrap(), 3, &[outcome])
+            .expect("aggregate report should be written");
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(value["tool"], "GitRecon");
+        assert_eq!(value["total_targets"], 3);
+        assert_eq!(value["scanned_targets"], 1);
+        assert_eq!(value["results"][0]["findings_count"], 2);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
