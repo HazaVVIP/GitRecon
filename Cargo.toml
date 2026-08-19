@@ -5,6 +5,10 @@ edition = "2021"
 description = "GitRecon — Streaming Git Exposure Scanner (Rust rewrite)"
 authors = ["GitRecon Contributors"]
 license = "MIT"
+readme = "README.md"
+repository = "https://github.com/HazaVVIP/GitRecon"
+keywords = ["git", "security", "reconnaissance", "secrets", "scanner"]
+categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]
 name = "gitrecon"

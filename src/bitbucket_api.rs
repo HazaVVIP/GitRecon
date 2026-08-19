@@ -8,9 +8,9 @@
 
 use crate::forge::{EnumScope, Forge, Platform, RateLimitInfo, Repository, TreeEntry};
 use crate::http_client::{HttpClient, HttpConfig};
+use anyhow::Context;
 use async_trait::async_trait;
 use std::time::{Duration, Instant};
-use anyhow::Context;
 
 const DEFAULT_BB_API: &str = "https://api.bitbucket.org/2.0";
 
@@ -51,7 +51,9 @@ impl BitbucketForgeClient {
                     .map(|ts| {
                         let reset = std::time::UNIX_EPOCH + Duration::from_secs(ts);
                         let now = std::time::SystemTime::now();
-                        reset.duration_since(now).unwrap_or(Duration::from_secs(3600))
+                        reset
+                            .duration_since(now)
+                            .unwrap_or(Duration::from_secs(3600))
                     })
                     .unwrap_or(Duration::from_secs(3600));
 
@@ -68,12 +70,16 @@ impl BitbucketForgeClient {
         for attempt in 0..3u32 {
             let resp = self.client.get(url).await;
             if resp.status == 429 {
-                let wait_s = resp.headers.get("retry-after")
+                let wait_s = resp
+                    .headers
+                    .get("retry-after")
                     .and_then(|v| v.trim().parse::<u64>().ok())
-                    .unwrap_or(60).min(300);
+                    .unwrap_or(60)
+                    .min(300);
                 log::warn!(
                     "Bitbucket rate-limited (HTTP 429); sleeping {}s before retry {}/3",
-                    wait_s, attempt + 1,
+                    wait_s,
+                    attempt + 1,
                 );
                 tokio::time::sleep(std::time::Duration::from_secs(wait_s)).await;
                 continue;
@@ -85,7 +91,10 @@ impl BitbucketForgeClient {
             self.update_rate_limit(&headers);
             return Ok(resp);
         }
-        anyhow::bail!("Rate limit exhausted after 3 retries for {}", crate::validation::redact_url(url))
+        anyhow::bail!(
+            "Rate limit exhausted after 3 retries for {}",
+            crate::validation::redact_url(url)
+        )
     }
 
     /// Get the authenticated user's username.
@@ -104,7 +113,8 @@ impl BitbucketForgeClient {
         }
 
         let json: serde_json::Value = serde_json::from_slice(&resp.body)?;
-        let login = json["username"].as_str()
+        let login = json["username"]
+            .as_str()
             .or_else(|| json["display_name"].as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing username in response"))?
             .to_string();
@@ -128,9 +138,7 @@ impl BitbucketForgeClient {
             }
         };
         path.split('/')
-            .map(|segment| {
-                segment.bytes().map(encode_byte).collect::<String>()
-            })
+            .map(|segment| segment.bytes().map(encode_byte).collect::<String>())
             .collect::<Vec<_>>()
             .join("/")
     }
@@ -200,26 +208,40 @@ impl Forge for BitbucketForgeClient {
             EnumScope::User => {
                 // Get user's repositories
                 let username = self.get_username().await?;
-                let url = format!("{}/repositories/{}?pagelen=100", self.api_base, Self::encode_path(&username));
+                let url = format!(
+                    "{}/repositories/{}?pagelen=100",
+                    self.api_base,
+                    Self::encode_path(&username)
+                );
                 repos.extend(self.fetch_all_repos(url).await?);
             }
             EnumScope::Org(workspace) => {
                 // Get workspace repositories
                 let workspace_encoded = Self::encode_path(&workspace);
-                let url = format!("{}/repositories/{}?pagelen=100", self.api_base, workspace_encoded);
+                let url = format!(
+                    "{}/repositories/{}?pagelen=100",
+                    self.api_base, workspace_encoded
+                );
                 repos.extend(self.fetch_all_repos(url).await?);
             }
             EnumScope::All => {
                 // For "All", fetch user repos and then discover workspaces
                 let username = self.get_username().await?;
-                let user_url = format!("{}/repositories/{}?pagelen=100", self.api_base, Self::encode_path(&username));
+                let user_url = format!(
+                    "{}/repositories/{}?pagelen=100",
+                    self.api_base,
+                    Self::encode_path(&username)
+                );
                 repos.extend(self.fetch_all_repos(user_url).await?);
 
                 // Discover workspaces the user has access to
                 if let Ok(workspaces) = list_user_workspaces(&self.client, &self.api_base).await {
                     for workspace in workspaces {
                         let workspace_encoded = Self::encode_path(&workspace);
-                        let url = format!("{}/repositories/{}?pagelen=100", self.api_base, workspace_encoded);
+                        let url = format!(
+                            "{}/repositories/{}?pagelen=100",
+                            self.api_base, workspace_encoded
+                        );
                         if let Ok(ws_repos) = self.fetch_all_repos(url).await {
                             repos.extend(ws_repos);
                         }
@@ -301,7 +323,8 @@ impl Forge for BitbucketForgeClient {
                 }
 
                 // Follow `next` (absolute URL provided by Bitbucket) until null.
-                next_url = json["next"].as_str()
+                next_url = json["next"]
+                    .as_str()
                     .filter(|s| !s.is_empty())
                     .map(|s| s.to_string());
             }
@@ -315,20 +338,20 @@ impl Forge for BitbucketForgeClient {
     }
 
     fn rate_limit_remaining(&self) -> Option<(u32, Duration)> {
-        self.rate_limit_remaining
-            .lock()
-            .ok()
-            .and_then(|guard| guard.as_ref().map(|(remaining, reset)| {
+        self.rate_limit_remaining.lock().ok().and_then(|guard| {
+            guard.as_ref().map(|(remaining, reset)| {
                 (*remaining, reset.saturating_duration_since(Instant::now()))
-            }))
+            })
+        })
     }
 
     fn rate_limit_info(&self) -> Option<RateLimitInfo> {
-        self.rate_limit_remaining().map(|(remaining, reset_in)| RateLimitInfo {
-            remaining,
-            reset_in,
-            limit: Platform::Bitbucket.default_rate_limit(),
-        })
+        self.rate_limit_remaining()
+            .map(|(remaining, reset_in)| RateLimitInfo {
+                remaining,
+                reset_in,
+                limit: Platform::Bitbucket.default_rate_limit(),
+            })
     }
 
     fn platform(&self) -> Platform {
@@ -336,7 +359,14 @@ impl Forge for BitbucketForgeClient {
     }
 
     async fn get_head_sha(&self, repo: &Repository, branch: &str) -> anyhow::Result<String> {
-        get_head_sha(&self.client, &self.api_base, &repo.owner, &repo.name, branch).await
+        get_head_sha(
+            &self.client,
+            &self.api_base,
+            &repo.owner,
+            &repo.name,
+            branch,
+        )
+        .await
     }
 
     async fn whoami(&self) -> anyhow::Result<(String, String)> {
@@ -353,7 +383,11 @@ impl BitbucketForgeClient {
         while let Some(url) = next_url {
             let resp = self.get_with_rate_limit(&url).await?;
             if !resp.ok() {
-                anyhow::bail!("GET {} returned HTTP {}", crate::validation::redact_url(&url), resp.status);
+                anyhow::bail!(
+                    "GET {} returned HTTP {}",
+                    crate::validation::redact_url(&url),
+                    resp.status
+                );
             }
 
             let json: serde_json::Value = serde_json::from_slice(&resp.body)?;
@@ -429,7 +463,9 @@ pub fn build_bitbucket_client(
     let api_base = bitbucket_url.unwrap_or(DEFAULT_BB_API).to_string();
 
     // Bitbucket uses Bearer auth with App Password
-    base_cfg.extra_headers.push(("Authorization".to_string(), format!("Bearer {}", token)));
+    base_cfg
+        .extra_headers
+        .push(("Authorization".to_string(), format!("Bearer {}", token)));
     let client = HttpClient::new(base_cfg)?;
 
     Ok((client, api_base))
@@ -458,9 +494,7 @@ fn parse_repo(v: &serde_json::Value) -> Option<BbRepo> {
         .as_object()
         .and_then(|o| o.get("username"))
         .and_then(|u| u.as_str())
-        .or_else(|| {
-            full_name.split('/').next()
-        })
+        .or_else(|| full_name.split('/').next())
         .unwrap_or("")
         .to_string();
 
@@ -563,12 +597,14 @@ pub async fn whoami(client: &HttpClient, api_base: &str) -> anyhow::Result<(Stri
 
     let json: serde_json::Value = serde_json::from_slice(&resp.body)?;
     // BUG-LOGIC-003 FIX: Validate response structure before accessing fields
-    let login = json["username"].as_str()
+    let login = json["username"]
+        .as_str()
         .or_else(|| json["display_name"].as_str())
         .ok_or_else(|| anyhow::anyhow!("Missing username in /user response"))?
         .to_string();
 
-    let name = json["display_name"].as_str()
+    let name = json["display_name"]
+        .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing display_name in /user response"))?
         .to_string();
 
@@ -576,7 +612,10 @@ pub async fn whoami(client: &HttpClient, api_base: &str) -> anyhow::Result<(Stri
 }
 
 /// List all workspaces the authenticated user has access to.
-pub async fn list_user_workspaces(client: &HttpClient, api_base: &str) -> anyhow::Result<Vec<String>> {
+pub async fn list_user_workspaces(
+    client: &HttpClient,
+    api_base: &str,
+) -> anyhow::Result<Vec<String>> {
     let mut workspaces = Vec::new();
 
     // Bitbucket API: GET /workspaces
@@ -665,9 +704,7 @@ pub async fn get_blob_content(
 ) -> anyhow::Result<Vec<u8>> {
     // Bitbucket doesn't support blob-by-SHA lookup
     // Use get_file_by_path instead
-    anyhow::bail!(
-        "Bitbucket blob fetch requires file path. Use get_file_by_path instead."
-    );
+    anyhow::bail!("Bitbucket blob fetch requires file path. Use get_file_by_path instead.");
 }
 
 /// Fetch a file's content by path and commit SHA.
@@ -692,7 +729,11 @@ pub async fn get_file_by_path(
     let resp = client.get(&url).await;
 
     if !resp.ok() {
-        anyhow::bail!("GET file {} returned HTTP {}", crate::validation::redact_url(&url), resp.status);
+        anyhow::bail!(
+            "GET file {} returned HTTP {}",
+            crate::validation::redact_url(&url),
+            resp.status
+        );
     }
 
     Ok(resp.body.to_vec())
@@ -792,8 +833,14 @@ mod tests {
 
     #[test]
     fn test_encode_path() {
-        assert_eq!(BitbucketForgeClient::encode_path("src/main.rs"), "src/main.rs");
-        assert_eq!(BitbucketForgeClient::encode_path("path with spaces"), "path%20with%20spaces");
+        assert_eq!(
+            BitbucketForgeClient::encode_path("src/main.rs"),
+            "src/main.rs"
+        );
+        assert_eq!(
+            BitbucketForgeClient::encode_path("path with spaces"),
+            "path%20with%20spaces"
+        );
         assert_eq!(
             BitbucketForgeClient::encode_path("special/chars/测试"),
             "special/chars/%E6%B5%8B%E8%AF%95"

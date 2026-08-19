@@ -8,6 +8,7 @@
 //! - Support for unlimited mode (--rate 0)
 //! - BUG-CONC-005: Uses mutex to ensure atomic refill operations
 
+#[cfg(test)]
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -30,12 +31,16 @@ impl RateLimitMetrics {
         Arc::new(Self::default())
     }
 
-    /// Get summary as a map for reporting
+    /// Get summary as a map for reporting in rate-limiter tests.
+    #[cfg(test)]
     pub fn summary(&self) -> HashMap<String, u64> {
         let mut map = HashMap::new();
         map.insert("allowed".to_string(), self.allowed.load(Ordering::Relaxed));
         map.insert("dropped".to_string(), self.dropped.load(Ordering::Relaxed));
-        map.insert("total_wait_ms".to_string(), self.total_wait_ms.load(Ordering::Relaxed));
+        map.insert(
+            "total_wait_ms".to_string(),
+            self.total_wait_ms.load(Ordering::Relaxed),
+        );
         map
     }
 }
@@ -85,11 +90,7 @@ impl TokenBucket {
             // 10 RPS = 10000 thousandths
             (rps * 1000.0) as u64
         };
-        let refill_rate = if unlimited {
-            u64::MAX
-        } else {
-            capacity
-        };
+        let refill_rate = if unlimited { u64::MAX } else { capacity };
 
         Self {
             tokens: AtomicU64::new(capacity),
@@ -99,18 +100,13 @@ impl TokenBucket {
                 SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
-                    .as_millis() as u64
+                    .as_millis() as u64,
             ),
             metrics: RateLimitMetrics::new(),
             unlimited,
             // BUG-CONC-005: Initialize mutex for atomic refill operations
             refill_mutex: Arc::new(StdMutex::new(())),
         }
-    }
-
-    /// Get a reference to the metrics
-    pub fn metrics(&self) -> Arc<RateLimitMetrics> {
-        Arc::clone(&self.metrics)
     }
 
     /// Try to acquire a token. Returns true if successful, false if rate limited.
@@ -195,10 +191,10 @@ impl TokenBucket {
                     .tokens
                     .compare_exchange(current, current - 1000, Ordering::AcqRel, Ordering::Acquire)
                     .is_ok()
-                {
-                    self.metrics.allowed.fetch_add(1, Ordering::Relaxed);
-                    return;
-                }
+            {
+                self.metrics.allowed.fetch_add(1, Ordering::Relaxed);
+                return;
+            }
         }
 
         // BUG-LOGIC-010 FIX: If we exhaust retries, mark as dropped and return
@@ -273,12 +269,6 @@ impl TokenBucket {
         (needed as u128 * 1000 / self.refill_rate as u128) as u64
     }
 
-    /// Get current token count (for debugging/monitoring)
-    #[cfg(test)]
-    pub fn token_count(&self) -> u64 {
-        self.tokens.load(Ordering::Relaxed)
-    }
-
     /// Check if rate limiter is in unlimited mode
     #[cfg(test)]
     pub fn is_unlimited(&self) -> bool {
@@ -340,16 +330,6 @@ impl PerTargetRateLimiter {
         let bucket = Arc::new(TokenBucket::new(self.global_rps));
         buckets.insert(target.to_string(), Arc::clone(&bucket));
         bucket
-    }
-
-    /// Get all metrics from all buckets
-    pub async fn all_metrics(&self) -> HashMap<String, HashMap<String, u64>> {
-        let buckets = self.buckets.read().await;
-        let mut result = HashMap::new();
-        for (target, bucket) in buckets.iter() {
-            result.insert(target.clone(), bucket.metrics.summary());
-        }
-        result
     }
 
     /// Get aggregate metrics across all targets

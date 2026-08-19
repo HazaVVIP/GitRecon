@@ -2,21 +2,21 @@
 //! Intelligence Report: colored terminal summary + report files to disk (JSON, SARIF, CSV, NDJSON, Markdown, HTML).
 //! The only thing written to disk is the report file.
 
-use std::path::Path;
-use std::collections::HashMap;
-use std::io::IsTerminal;
-use colored::*;
-use hmac::{Hmac, Mac};
-use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
-use sha2::Sha256;
 use crate::detect::DetectResult;
 use crate::layout;
 use crate::mapper::MapResult;
 use crate::streamer::StreamResult;
 use crate::text_utils::truncate_utf8;
-use crate::ui::{self, BannerStyle};
 use crate::ui::colors::ColorScheme;
+use crate::ui::{self, BannerStyle};
 use crate::validation;
+use colored::*;
+use hmac::{Hmac, Mac};
+use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
+use sha2::Sha256;
+use std::collections::HashMap;
+use std::io::IsTerminal;
+use std::path::Path;
 
 // ════════════════════════════════════════════════
 // OUTPUT ESCAPING HELPERS (Sprint 2)
@@ -39,6 +39,7 @@ pub(crate) fn html_escape(s: &str) -> String {
             '>' => out.push_str("&gt;"),
             '"' => out.push_str("&quot;"),
             '\'' => out.push_str("&#39;"),
+            '=' => out.push_str("&#61;"),
             _ => out.push(ch),
         }
     }
@@ -86,8 +87,8 @@ pub(crate) fn write_report_secure<P: AsRef<Path>>(path: P, contents: &[u8]) -> s
     let path = path.as_ref();
     #[cfg(unix)]
     {
-        use std::os::unix::fs::OpenOptionsExt;
         use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create(true)
@@ -152,13 +153,16 @@ impl Reporter {
         if no_color {
             colored::control::set_override(false);
         }
-        Self { no_color, theme: theme.clone() }
+        Self {
+            no_color,
+            theme: theme.clone(),
+        }
     }
 
     pub fn banner(&self) {
         // Use theme's banner style instead of defaulting to Full
         let style = match self.theme.banner_style {
-            ui::theme::BannerStyle::Minimal => BannerStyle::Mini,  // Map Minimal -> Mini
+            ui::theme::BannerStyle::Minimal => BannerStyle::Mini, // Map Minimal -> Mini
             ui::theme::BannerStyle::Standard => BannerStyle::Full, // Map Standard -> Full
             ui::theme::BannerStyle::Full => BannerStyle::Full,
             ui::theme::BannerStyle::None => BannerStyle::None,
@@ -168,9 +172,7 @@ impl Reporter {
 
     /// Display banner with specified style
     pub fn banner_with_style(&self, style: BannerStyle) {
-        let banner = ui::Banner::new()
-            .style(style)
-            .colored(!self.no_color);
+        let banner = ui::Banner::new().style(style).colored(!self.no_color);
         banner.display_with_style(style);
     }
 
@@ -190,8 +192,15 @@ impl Reporter {
         println!("│  {:<14}: {}", "Target", r.url);
         println!("│  {:<14}: {}", "Git URL", r.git_url.cyan());
         println!("│  {:<14}: {}  {}", "Confidence", conf_colored, icon);
-        println!("│  {:<14}: {}", "Dir List",
-                 if r.listing { "⚠  ON".yellow().to_string() } else { "OFF".to_string() });
+        println!(
+            "│  {:<14}: {}",
+            "Dir List",
+            if r.listing {
+                "⚠  ON".yellow().to_string()
+            } else {
+                "OFF".to_string()
+            }
+        );
         println!("│  {:<14}: {}", "Server", r.server);
         if let Some(ref br) = r.branch {
             println!("│  {:<14}: {}", "Branch", br);
@@ -208,11 +217,18 @@ impl Reporter {
         println!("\n╔{}╗", "═".repeat(w));
         println!("║  {:<width$}║", "RECONNAISSANCE", width = w - 2);
         println!("╚{}╝", "═".repeat(w));
-        println!("│  {:<16}: {}", "SHA1 Objects", all.len().to_string().cyan());
+        println!(
+            "│  {:<16}: {}",
+            "SHA1 Objects",
+            all.len().to_string().cyan()
+        );
         println!("│  {:<16}: {}", "Blobs (index)", m.blob_sha1s.len());
         println!("│  {:<16}: {}", "Commits/Trees", m.commit_sha1s.len());
-        let branches_str = if m.branches.is_empty() { "—".to_string() }
-                           else { m.branches[..m.branches.len().min(8)].join(", ") };
+        let branches_str = if m.branches.is_empty() {
+            "—".to_string()
+        } else {
+            m.branches[..m.branches.len().min(8)].join(", ")
+        };
         println!("│  {:<16}: {}", "Branches", branches_str);
         if let Some(remote) = m.remote_urls.first() {
             if let Some(url) = remote.get("url") {
@@ -222,7 +238,11 @@ impl Reporter {
         if !m.pack_sha1s.is_empty() {
             println!("│  {:<16}: {}", "Pack Files", m.pack_sha1s.len());
         }
-        println!("│  {:<16}: {} (if --save)", "Est. Disk Size", m.size_human().green());
+        println!(
+            "│  {:<16}: {} (if --save)",
+            "Est. Disk Size",
+            m.size_human().green()
+        );
         println!("│");
     }
 
@@ -231,8 +251,10 @@ impl Reporter {
         println!("\n╔{}╗", "═".repeat(w));
         println!("║  {:<width$}║", "ANALYSIS", width = w - 2);
         println!("╚{}╝", "═".repeat(w));
-        println!("│  Scanning {} objects in memory (no disk write)...",
-                 total.to_string().cyan());
+        println!(
+            "│  Scanning {} objects in memory (no disk write)...",
+            total.to_string().cyan()
+        );
     }
 
     /// Create a new MultiProgress instance for multi-stage progress tracking.
@@ -289,7 +311,7 @@ impl Reporter {
 
         // Template: {spinner} {elapsed} {bar} {pos}/{len} ETA: {eta} [{per_sec}]
         let style = ProgressStyle::with_template(
-            "{spinner} {elapsed} {bar} {pos}/{len} ETA: {eta} [{per_sec}]"
+            "{spinner} {elapsed} {bar} {pos}/{len} ETA: {eta} [{per_sec}]",
         )
         .unwrap()
         .progress_chars("=> ")
@@ -310,7 +332,9 @@ impl Reporter {
     /// Simplified legacy progress bar (for backward compatibility).
     /// This maintains the original inline progress display behavior.
     pub fn progress_bar_legacy(&self, done: usize, total: usize, findings: usize) {
-        if total == 0 { return; }
+        if total == 0 {
+            return;
+        }
         let pct = done as f64 / total as f64;
         let bar = (pct * 30.0) as usize;
         let bar_s = format!("{}{}", "█".repeat(bar), "░".repeat(30 - bar));
@@ -319,8 +343,14 @@ impl Reporter {
         } else {
             findings.to_string().green().to_string()
         };
-        print!("\r  ▶  [{}] {:5.1}%  {}/{} objs  findings={}   ",
-               bar_s, pct * 100.0, done, total, f_str);
+        print!(
+            "\r  ▶  [{}] {:5.1}%  {}/{} objs  findings={}   ",
+            bar_s,
+            pct * 100.0,
+            done,
+            total,
+            f_str
+        );
         use std::io::Write;
         std::io::stdout().flush().ok();
     }
@@ -338,7 +368,7 @@ impl Reporter {
         let pb = ProgressBar::new(total as u64);
 
         let style = ProgressStyle::with_template(
-            "{spinner} {elapsed} {bar} {pos}/{len} ETA: {eta} [{per_sec}]"
+            "{spinner} {elapsed} {bar} {pos}/{len} ETA: {eta} [{per_sec}]",
         )
         .unwrap()
         .progress_chars("=> ")
@@ -373,7 +403,8 @@ impl Reporter {
     ) -> ProgressBar {
         let pb = ProgressBar::new(total as u64);
 
-        let tmpl = template.unwrap_or("{spinner} {elapsed} {bar} {pos}/{len} ETA: {eta} [{per_sec}]");
+        let tmpl =
+            template.unwrap_or("{spinner} {elapsed} {bar} {pos}/{len} ETA: {eta} [{per_sec}]");
         let style = ProgressStyle::with_template(tmpl)
             .unwrap()
             .progress_chars("=> ")
@@ -398,7 +429,10 @@ impl Reporter {
         println!("│  {:<16}: {}", "Blobs scanned", r.blobs_scanned);
         println!("│  {:<16}: {} KB", "Data processed", r.bytes_scanned / 1024);
         if r.files_saved > 0 || r.files_save_failed > 0 {
-            println!("│  {:<16}: {}  Failed: {}", "Files saved", r.files_saved, r.files_save_failed);
+            println!(
+                "│  {:<16}: {}  Failed: {}",
+                "Files saved", r.files_saved, r.files_save_failed
+            );
         }
         println!("│  {:<16}: {:.1}s", "Elapsed", r.elapsed_s);
         // PERF-005: Display cache stats
@@ -409,9 +443,15 @@ impl Reporter {
             } else {
                 0.0
             };
-            println!("│  {:<16}: {}/{} ({:.1}%)", "Cache hits", r.cache_hits, total_requests, hit_rate);
+            println!(
+                "│  {:<16}: {}/{} ({:.1}%)",
+                "Cache hits", r.cache_hits, total_requests, hit_rate
+            );
             if let Some(ref stats) = r.cache_stats {
-                println!("│  {:<16}: {} entries, {}", "Cache size", stats.total_entries, stats.size_human);
+                println!(
+                    "│  {:<16}: {} entries, {}",
+                    "Cache size", stats.total_entries, stats.size_human
+                );
             }
         }
         println!("│");
@@ -423,25 +463,31 @@ impl Reporter {
         let w = layout::calculate_box_width(60, layout::get_terminal_width());
         let sev_order = |s: &str| match s {
             "CRITICAL" => 0,
-            "HIGH"     => 1,
-            "MEDIUM"   => 2,
-            "LOW"      => 3,
-            _          => 99,
+            "HIGH" => 1,
+            "MEDIUM" => 2,
+            "LOW" => 3,
+            _ => 99,
         };
 
         let mut sorted = findings.to_vec();
         sorted.sort_by_key(|f| sev_order(&f.severity));
 
         let mut seen_keys = std::collections::HashSet::new();
-        let deduped: Vec<_> = sorted.iter().filter(|f| {
-            let key = (f.pattern_id.clone(), f.match_str.chars().take(40).collect::<String>());
-            seen_keys.insert(key)
-        }).collect();
+        let deduped: Vec<_> = sorted
+            .iter()
+            .filter(|f| {
+                let key = (
+                    f.pattern_id.clone(),
+                    f.match_str.chars().take(40).collect::<String>(),
+                );
+                seen_keys.insert(key)
+            })
+            .collect();
 
-        let crit  = deduped.iter().filter(|f| f.severity == "CRITICAL").count();
-        let high  = deduped.iter().filter(|f| f.severity == "HIGH").count();
-        let med   = deduped.iter().filter(|f| f.severity == "MEDIUM").count();
-        let low   = deduped.iter().filter(|f| f.severity == "LOW").count();
+        let crit = deduped.iter().filter(|f| f.severity == "CRITICAL").count();
+        let high = deduped.iter().filter(|f| f.severity == "HIGH").count();
+        let med = deduped.iter().filter(|f| f.severity == "MEDIUM").count();
+        let low = deduped.iter().filter(|f| f.severity == "LOW").count();
         let total = deduped.len();
 
         println!("\n╔{}╗", "═".repeat(w));
@@ -465,27 +511,51 @@ impl Reporter {
         let make_bar = |n: usize| "█".repeat((n as f64 * scale) as usize);
 
         if crit > 0 {
-            println!("│  {}  {:<8}  {:>3}  {}",
-                     "●".red().bold(), "CRITICAL".red().bold(), crit, make_bar(crit).red().bold());
+            println!(
+                "│  {}  {:<8}  {:>3}  {}",
+                "●".red().bold(),
+                "CRITICAL".red().bold(),
+                crit,
+                make_bar(crit).red().bold()
+            );
         }
         if high > 0 {
-            println!("│  {}  {:<8}  {:>3}  {}",
-                     "●".yellow().bold(), "HIGH".yellow().bold(), high, make_bar(high).yellow().bold());
+            println!(
+                "│  {}  {:<8}  {:>3}  {}",
+                "●".yellow().bold(),
+                "HIGH".yellow().bold(),
+                high,
+                make_bar(high).yellow().bold()
+            );
         }
         if med > 0 {
-            println!("│  {}  {:<8}  {:>3}  {}",
-                     "●".bright_yellow(), "MEDIUM".bright_yellow(), med, make_bar(med).bright_yellow());
+            println!(
+                "│  {}  {:<8}  {:>3}  {}",
+                "●".bright_yellow(),
+                "MEDIUM".bright_yellow(),
+                med,
+                make_bar(med).bright_yellow()
+            );
         }
         if low > 0 {
-            println!("│  {}  {:<8}  {:>3}  {}",
-                     "●".cyan(), "LOW".cyan(), low, make_bar(low).cyan());
+            println!(
+                "│  {}  {:<8}  {:>3}  {}",
+                "●".cyan(),
+                "LOW".cyan(),
+                low,
+                make_bar(low).cyan()
+            );
         }
         println!("│");
 
         // Individual finding cards (no cap — all findings shown)
         for (i, f) in deduped.iter().enumerate() {
             let sev_colored = ColorScheme::severity(&f.severity);
-            let del_tag = if f.is_deleted { " · DELETED".dimmed().to_string() } else { String::new() };
+            let del_tag = if f.is_deleted {
+                " · DELETED".dimmed().to_string()
+            } else {
+                String::new()
+            };
 
             // Calculate right-side dashes: total line = 60 chars
             // "┌─[ #N · SEVERITY ]" + dashes + "┐"
@@ -494,13 +564,18 @@ impl Reporter {
             let header_plain = format!(" #{} · {} ", i + 1, f.severity);
             let card_width = layout::calculate_box_width(60, layout::get_terminal_width());
             let right_dashes = (card_width - 5).saturating_sub(header_plain.len());
-            println!("\n┌─[ #{} · {} ]{}┐",
-                     (i + 1).to_string().bold(),
-                     sev_colored,
-                     "─".repeat(right_dashes));
+            println!(
+                "\n┌─[ #{} · {} ]{}┐",
+                (i + 1).to_string().bold(),
+                sev_colored,
+                "─".repeat(right_dashes)
+            );
             println!("│  {:<12}: {}{}", "Type", f.description, del_tag);
-            println!("│  {:<12}: {}", "File",
-                     format!("{}  ·  line {}", f.filename, f.line).cyan());
+            println!(
+                "│  {:<12}: {}",
+                "File",
+                format!("{}  ·  line {}", f.filename, f.line).cyan()
+            );
             let m = truncate_utf8(&f.match_str, 100);
             println!("│  {:<12}: {}", "Match", m);
             let ctx = truncate_utf8(&f.context, 120);
@@ -511,12 +586,26 @@ impl Reporter {
     }
 
     /// Compact intelligence report footer shown after saving the report file.
-    pub fn print_report(&self, _detect: &DetectResult, _map_r: &MapResult, stream_r: &StreamResult, report_path: &str) {
-        let counts  = stream_r.severity_counts();
+    pub fn print_report(
+        &self,
+        _detect: &DetectResult,
+        _map_r: &MapResult,
+        stream_r: &StreamResult,
+        report_path: &str,
+    ) {
+        let counts = stream_r.severity_counts();
         let (ai_total, _) = Self::ai_summary(&stream_r.findings);
-        let risk    = stream_r.risk_score();
-        let risk_label = if risk >= 70 { "CRITICAL" } else if risk >= 40 { "HIGH" } else if risk >= 15 { "MEDIUM" } else { "CLEAR" };
-        let risk_s  = format!("{}/100  {}", risk, risk_label);
+        let risk = stream_r.risk_score();
+        let risk_label = if risk >= 70 {
+            "CRITICAL"
+        } else if risk >= 40 {
+            "HIGH"
+        } else if risk >= 15 {
+            "MEDIUM"
+        } else {
+            "CLEAR"
+        };
+        let risk_s = format!("{}/100  {}", risk, risk_label);
         let risk_colored = ColorScheme::risk(risk, &risk_s);
 
         let w = layout::calculate_box_width(60, layout::get_terminal_width());
@@ -524,26 +613,45 @@ impl Reporter {
         println!("║  {:<width$}║", "INTELLIGENCE REPORT", width = w - 2);
         println!("╚{}╝", "═".repeat(w));
         println!("│  {:<14}: {}", "Risk Score", risk_colored);
-        println!("│  {:<14}: {}  [ {} {} {} ]",
-                 "Findings",
-                 stream_r.findings.len().to_string().bold(),
-                 format!("CRIT:{}", counts["CRITICAL"]).red().bold(),
-                 format!("HIGH:{}", counts["HIGH"]).yellow().bold(),
-                 format!("MED:{}", counts["MEDIUM"]).bright_yellow());
-        println!("│  {:<14}: {}", "AI Findings", ai_total.to_string().magenta());
+        println!(
+            "│  {:<14}: {}  [ {} {} {} ]",
+            "Findings",
+            stream_r.findings.len().to_string().bold(),
+            format!("CRIT:{}", counts["CRITICAL"]).red().bold(),
+            format!("HIGH:{}", counts["HIGH"]).yellow().bold(),
+            format!("MED:{}", counts["MEDIUM"]).bright_yellow()
+        );
+        println!(
+            "│  {:<14}: {}",
+            "AI Findings",
+            ai_total.to_string().magenta()
+        );
         if !stream_r.tech_stack.is_empty() {
-            println!("│  {:<14}: {}", "Tech Stack", stream_r.tech_stack.join(", "));
+            println!(
+                "│  {:<14}: {}",
+                "Tech Stack",
+                stream_r.tech_stack.join(", ")
+            );
         }
         if !stream_r.contributors.is_empty() {
-            println!("│  {:<14}: {} found", "Developers", stream_r.contributors.len());
+            println!(
+                "│  {:<14}: {} found",
+                "Developers",
+                stream_r.contributors.len()
+            );
         }
-        println!("│  {:<14}: {}  {}", "Report", report_path.green(), "✔".green().bold());
+        println!(
+            "│  {:<14}: {}  {}",
+            "Report",
+            report_path.green(),
+            "✔".green().bold()
+        );
         println!("│");
         println!("└{}┘\n", "─".repeat(w));
     }
 
     pub fn print_summary(&self, target: &str, stream_r: &StreamResult, report_path: &str) {
-        let risk_s  = format!("{}/100", stream_r.risk_score());
+        let risk_s = format!("{}/100", stream_r.risk_score());
         let risk_colored = ColorScheme::risk(stream_r.risk_score(), &risk_s);
         let w = layout::calculate_box_width(60, layout::get_terminal_width());
         println!("\n╔{}╗", "═".repeat(w));
@@ -568,7 +676,7 @@ impl Reporter {
         let now = chrono::Utc::now().to_rfc3339();
         let mut report = serde_json::json!({
             "tool":      "GitRecon",
-            "version":   "3.2.0",
+            "version":   env!("CARGO_PKG_VERSION"),
             "timestamp": now,
             "target":    target,
         });
@@ -624,8 +732,7 @@ impl Reporter {
 
         let parent = Path::new(path).parent().unwrap_or(Path::new("."));
         std::fs::create_dir_all(parent)?;
-        let json_str = serde_json::to_string_pretty(&report)
-            .map_err(std::io::Error::other)?;
+        let json_str = serde_json::to_string_pretty(&report).map_err(std::io::Error::other)?;
         write_report_secure(path, json_str.as_bytes())
     }
 
@@ -635,17 +742,17 @@ impl Reporter {
     /// distinguish it from URL-based `.git` exposure reports.
     pub fn save_token_report(
         &self,
-        path:       &str,
-        login:      &str,
+        path: &str,
+        login: &str,
         repo_count: usize,
-        stream_r:   &StreamResult,
+        stream_r: &StreamResult,
     ) -> std::io::Result<()> {
-        let now    = chrono::Utc::now().to_rfc3339();
+        let now = chrono::Utc::now().to_rfc3339();
         let counts = stream_r.severity_counts();
         let (ai_total, ai_categories) = Self::ai_summary(&stream_r.findings);
         let report = serde_json::json!({
             "tool":       "GitRecon",
-            "version":    "3.2.0",
+            "version":    env!("CARGO_PKG_VERSION"),
             "mode":       "token",
             "timestamp":  now,
             "token_user": login,
@@ -665,24 +772,31 @@ impl Reporter {
         });
         let parent = Path::new(path).parent().unwrap_or(Path::new("."));
         std::fs::create_dir_all(parent)?;
-        let json_str = serde_json::to_string_pretty(&report)
-            .map_err(std::io::Error::other)?;
+        let json_str = serde_json::to_string_pretty(&report).map_err(std::io::Error::other)?;
         write_report_secure(path, json_str.as_bytes())
     }
 
     /// Print the final intelligence report for a `--token` scan to the terminal.
     pub fn print_token_report(
         &self,
-        login:      &str,
+        login: &str,
         repo_count: usize,
-        stream_r:   &StreamResult,
+        stream_r: &StreamResult,
         report_path: &str,
     ) {
-        let counts     = stream_r.severity_counts();
+        let counts = stream_r.severity_counts();
         let (ai_total, _) = Self::ai_summary(&stream_r.findings);
-        let risk       = stream_r.risk_score();
-        let risk_label = if risk >= 70 { "CRITICAL" } else if risk >= 40 { "HIGH" } else if risk >= 15 { "MEDIUM" } else { "CLEAR" };
-        let risk_s     = format!("{}/100  {}", risk, risk_label);
+        let risk = stream_r.risk_score();
+        let risk_label = if risk >= 70 {
+            "CRITICAL"
+        } else if risk >= 40 {
+            "HIGH"
+        } else if risk >= 15 {
+            "MEDIUM"
+        } else {
+            "CLEAR"
+        };
+        let risk_s = format!("{}/100  {}", risk, risk_label);
         let risk_colored = ColorScheme::risk(risk, &risk_s);
 
         let w = layout::calculate_box_width(60, layout::get_terminal_width());
@@ -692,16 +806,31 @@ impl Reporter {
         println!("│  {:<14}: {}", "GitHub User", login.cyan().bold());
         println!("│  {:<14}: {}", "Repos Scanned", repo_count);
         println!("│  {:<14}: {}", "Risk Score", risk_colored);
-        println!("│  {:<14}: {}  [ {} {} {} ]",
-                 "Findings",
-                 stream_r.findings.len().to_string().bold(),
-                 format!("CRIT:{}", counts["CRITICAL"]).red().bold(),
-                 format!("HIGH:{}", counts["HIGH"]).yellow().bold(),
-                 format!("MED:{}", counts["MEDIUM"]).bright_yellow());
-        println!("│  {:<14}: {}", "AI Findings", ai_total.to_string().magenta());
-        println!("│  {:<14}: {} KB", "Data Processed", stream_r.bytes_scanned / 1024);
+        println!(
+            "│  {:<14}: {}  [ {} {} {} ]",
+            "Findings",
+            stream_r.findings.len().to_string().bold(),
+            format!("CRIT:{}", counts["CRITICAL"]).red().bold(),
+            format!("HIGH:{}", counts["HIGH"]).yellow().bold(),
+            format!("MED:{}", counts["MEDIUM"]).bright_yellow()
+        );
+        println!(
+            "│  {:<14}: {}",
+            "AI Findings",
+            ai_total.to_string().magenta()
+        );
+        println!(
+            "│  {:<14}: {} KB",
+            "Data Processed",
+            stream_r.bytes_scanned / 1024
+        );
         println!("│  {:<14}: {:.1}s", "Elapsed", stream_r.elapsed_s);
-        println!("│  {:<14}: {}  {}", "Report", report_path.green(), "✔".green().bold());
+        println!(
+            "│  {:<14}: {}  {}",
+            "Report",
+            report_path.green(),
+            "✔".green().bold()
+        );
         println!("│");
         println!("└{}┘\n", "─".repeat(w));
     }
@@ -716,7 +845,12 @@ impl Reporter {
     //   - Every rule carries `defaultConfiguration.level` matching the highest
     //     severity we observed for that pattern; consumers that surface rule
     //     configuration (GitHub code-scanning, Azure DevOps) render this correctly.
-    pub fn save_sarif(&self, path: &str, _target: &str, stream_r: Option<&StreamResult>) -> std::io::Result<()> {
+    pub fn save_sarif(
+        &self,
+        path: &str,
+        _target: &str,
+        stream_r: Option<&StreamResult>,
+    ) -> std::io::Result<()> {
         // pattern_id -> (level, description) so we emit each rule once.
         let mut rules_by_id: HashMap<String, (&'static str, String)> = HashMap::new();
         let mut results = Vec::new();
@@ -770,7 +904,8 @@ impl Reporter {
         // Emit rules in deterministic order so diffs across runs stay stable.
         let mut rule_ids: Vec<&String> = rules_by_id.keys().collect();
         rule_ids.sort();
-        let rules: Vec<serde_json::Value> = rule_ids.into_iter()
+        let rules: Vec<serde_json::Value> = rule_ids
+            .into_iter()
             .map(|id| {
                 let (level, desc) = &rules_by_id[id];
                 serde_json::json!({
@@ -810,10 +945,13 @@ impl Reporter {
         std::fs::create_dir_all(parent)?;
         // CSV schema:
         // file,line,severity,type,description,match,deleted,ai_related,ai_category,ai_tags
-        let mut out = String::from("file,line,severity,type,description,match,deleted,ai_related,ai_category,ai_tags\n");
+        let mut out = String::from(
+            "file,line,severity,type,description,match,deleted,ai_related,ai_category,ai_tags\n",
+        );
         if let Some(s) = stream_r {
             for f in &s.findings {
-                let (ai_related, ai_category, ai_tags) = crate::streamer::ai_metadata_for_finding(f);
+                let (ai_related, ai_category, ai_tags) =
+                    crate::streamer::ai_metadata_for_finding(f);
                 // Sprint 2 (S2.3): every field wrapped in double quotes uniformly, internal
                 // `"` escaped as `""` per RFC 4180. Previously `filename` and `pattern_id`
                 // were unquoted, so a legal comma or double-quote in a filename shifted
@@ -853,23 +991,31 @@ impl Reporter {
     }
 
     // O-3: Markdown output format
-    pub fn save_markdown(&self, path: &str, target: &str, stream_r: Option<&StreamResult>) -> std::io::Result<()> {
+    pub fn save_markdown(
+        &self,
+        path: &str,
+        target: &str,
+        stream_r: Option<&StreamResult>,
+    ) -> std::io::Result<()> {
         let parent = Path::new(path).parent().unwrap_or(Path::new("."));
         std::fs::create_dir_all(parent)?;
         // Sprint 2 (S2.2): target is attacker-controlled (repo URL). Escape it before
         // interpolating into the H1 line so a `[label](evil://x)` in the URL doesn't
         // turn into a live link.
-        let mut out = format!("# GitRecon Report\n\n**Target:** {}\n\n", md_cell_escape(target));
+        let mut out = format!(
+            "# GitRecon Report\n\n**Target:** {}\n\n",
+            md_cell_escape(target)
+        );
         out.push_str("| Severity | Type | File | Line | AI | Match |\n");
         out.push_str("|----------|------|------|------|----|-------|\n");
         if let Some(s) = stream_r {
             for f in &s.findings {
                 let emoji = match f.severity.as_str() {
                     "CRITICAL" => "🔴",
-                    "HIGH"     => "🟡",
-                    "MEDIUM"   => "🟠",
-                    "LOW"      => "🔵",
-                    _          => "⚪",
+                    "HIGH" => "🟡",
+                    "MEDIUM" => "🟠",
+                    "LOW" => "🔵",
+                    _ => "⚪",
                 };
                 let m = truncate_utf8(&f.match_str, 60);
                 let (ai_related, ai_category, _) = crate::streamer::ai_metadata_for_finding(f);
@@ -889,7 +1035,7 @@ impl Reporter {
                     md_cell_escape(&f.filename),
                     f.line,
                     md_cell_escape(&ai_col),
-                    md_cell_escape(&m),
+                    md_cell_escape(m),
                 ));
             }
         }
@@ -897,7 +1043,12 @@ impl Reporter {
     }
 
     // O-3: HTML output format
-    pub fn save_html(&self, path: &str, target: &str, stream_r: Option<&StreamResult>) -> std::io::Result<()> {
+    pub fn save_html(
+        &self,
+        path: &str,
+        target: &str,
+        stream_r: Option<&StreamResult>,
+    ) -> std::io::Result<()> {
         let parent = Path::new(path).parent().unwrap_or(Path::new("."));
         std::fs::create_dir_all(parent)?;
         let mut rows = String::new();
@@ -907,10 +1058,10 @@ impl Reporter {
                 // against known values only — the color itself never contains user input.
                 let color = match f.severity.as_str() {
                     "CRITICAL" => "#ff4444",
-                    "HIGH"     => "#ff8800",
-                    "MEDIUM"   => "#ffbb00",
-                    "LOW"      => "#4488ff",
-                    _          => "#888888",
+                    "HIGH" => "#ff8800",
+                    "MEDIUM" => "#ffbb00",
+                    "LOW" => "#4488ff",
+                    _ => "#888888",
                 };
                 let m = truncate_utf8(&f.match_str, 80);
                 let (ai_related, ai_category, _) = crate::streamer::ai_metadata_for_finding(f);
@@ -931,11 +1082,12 @@ impl Reporter {
                     html_escape(&f.filename),
                     f.line,
                     html_escape(&ai_col),
-                    html_escape(&m),
+                    html_escape(m),
                 ));
             }
         }
-        let html = format!(r#"<!DOCTYPE html>
+        let html = format!(
+            r#"<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>GitRecon Report</title>
 <style>body{{font-family:sans-serif;margin:2em}}table{{border-collapse:collapse;width:100%}}th,td{{border:1px solid #ddd;padding:8px;text-align:left}}th{{background:#222;color:#fff}}</style>
 </head><body>
@@ -943,7 +1095,10 @@ impl Reporter {
 <p><strong>Target:</strong> {}</p>
 <table><thead><tr><th>Severity</th><th>Type</th><th>File</th><th>Line</th><th>AI</th><th>Match</th></tr></thead>
 <tbody>{}</tbody></table>
-</body></html>"#, html_escape(target), rows);
+</body></html>"#,
+            html_escape(target),
+            rows
+        );
         write_report_secure(path, html.as_bytes())
     }
 
@@ -1093,7 +1248,8 @@ mod tests {
             description: "JWT Secret".to_string(),
             severity: "CRITICAL".to_string(),
             match_str: "secret🔐─你好🌍".repeat(16),
-            context: "const ECOMM_JWT_SECRET = process.env.ECOMM_JWT_SECRET || \"密钥─🔒\"".repeat(8),
+            context: "const ECOMM_JWT_SECRET = process.env.ECOMM_JWT_SECRET || \"密钥─🔒\""
+                .repeat(8),
             is_deleted: false,
             commit_sha1: Some("a".repeat(40)),
             confidence_adjustment: None,
@@ -1132,7 +1288,8 @@ mod tests {
     fn save_markdown_and_html_handle_unicode_without_panic() {
         let rep = Reporter::new(true, &ui::theme::Theme::default());
         let stream = unicode_stream_result();
-        let tmp = std::env::temp_dir().join(format!("gitrecon_reporter_test_{}", std::process::id()));
+        let tmp =
+            std::env::temp_dir().join(format!("gitrecon_reporter_test_{}", std::process::id()));
         let _guard = TempDirGuard::new(tmp.clone());
 
         let md_path = tmp.join("report.md");
@@ -1140,8 +1297,10 @@ mod tests {
         let md_str = md_path.to_string_lossy().to_string();
         let html_str = html_path.to_string_lossy().to_string();
 
-        rep.save_markdown(&md_str, "target", Some(&stream)).expect("save markdown");
-        rep.save_html(&html_str, "target", Some(&stream)).expect("save html");
+        rep.save_markdown(&md_str, "target", Some(&stream))
+            .expect("save markdown");
+        rep.save_html(&html_str, "target", Some(&stream))
+            .expect("save html");
     }
 
     // ── Sprint 2 — output escaping ───────────────────────────────────────────
@@ -1158,7 +1317,10 @@ mod tests {
     fn html_escape_neutralises_script_injection_from_filename() {
         let attacker = "<script>alert(1)</script>.txt";
         let escaped = html_escape(attacker);
-        assert!(!escaped.contains("<script"), "raw <script must not survive: {escaped}");
+        assert!(
+            !escaped.contains("<script"),
+            "raw <script must not survive: {escaped}"
+        );
         assert!(escaped.starts_with("&lt;script"));
     }
 
@@ -1195,8 +1357,10 @@ mod tests {
     fn csv_field_neutralises_formula_injection() {
         // sanitize_csv_field prepends `'` to `=`/`+`/`-`/`@` — csv_field then wraps.
         let out = csv_field("=CMD");
-        assert!(out.starts_with("\"'") || out.starts_with("\"\\'"),
-            "expected leading quote-prefix on formula, got {out}");
+        assert!(
+            out.starts_with("\"'") || out.starts_with("\"\\'"),
+            "expected leading quote-prefix on formula, got {out}"
+        );
     }
 
     #[test]
@@ -1219,12 +1383,22 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("gitrecon_xss_test_{}", std::process::id()));
         let _guard = TempDirGuard::new(tmp.clone());
         let html_path = tmp.join("report.html");
-        rep.save_html(&html_path.to_string_lossy(), "https://evil.example/<img onerror=x>",
-            Some(&sr)).expect("write");
+        rep.save_html(
+            &html_path.to_string_lossy(),
+            "https://evil.example/<img onerror=x>",
+            Some(&sr),
+        )
+        .expect("write");
         let body = std::fs::read_to_string(&html_path).expect("read");
         // Only expected <script> tags are ours (there are none in the template).
-        assert!(!body.contains("<script"), "attacker <script tag leaked into HTML report");
-        assert!(!body.contains("onerror="), "attacker onerror attribute leaked into HTML report");
+        assert!(
+            !body.contains("<script"),
+            "attacker <script tag leaked into HTML report"
+        );
+        assert!(
+            !body.contains("onerror="),
+            "attacker onerror attribute leaked into HTML report"
+        );
     }
 
     // ── Sprint 4 (S4.6) — SARIF rule dedup & spec compliance ─────────────────
@@ -1246,12 +1420,24 @@ mod tests {
 
     fn write_sarif(findings: Vec<Finding>) -> serde_json::Value {
         let rep = Reporter::new(true, &ui::theme::Theme::default());
-        let mut sr = StreamResult::default();
-        sr.findings = findings;
-        let tmp = std::env::temp_dir().join(format!("gitrecon_sarif_test_{}", std::process::id()));
+        let sr = StreamResult {
+            findings,
+            ..Default::default()
+        };
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after epoch")
+            .as_nanos();
+        let tmp = std::env::temp_dir().join(format!(
+            "gitrecon_sarif_test_{}_{}",
+            std::process::id(),
+            nonce
+        ));
         let _guard = TempDirGuard::new(tmp.clone());
+        std::fs::create_dir_all(&tmp).expect("create SARIF test directory");
         let sarif_path = tmp.join("out.sarif");
-        rep.save_sarif(&sarif_path.to_string_lossy(), "target", Some(&sr)).expect("write");
+        rep.save_sarif(&sarif_path.to_string_lossy(), "target", Some(&sr))
+            .expect("write");
         let body = std::fs::read_to_string(&sarif_path).expect("read");
         serde_json::from_str(&body).expect("parse")
     }
@@ -1265,7 +1451,9 @@ mod tests {
             make_finding("aws_key", "HIGH"),
         ];
         let sarif = write_sarif(findings);
-        let rules = sarif["runs"][0]["tool"]["driver"]["rules"].as_array().unwrap();
+        let rules = sarif["runs"][0]["tool"]["driver"]["rules"]
+            .as_array()
+            .unwrap();
         let results = sarif["runs"][0]["results"].as_array().unwrap();
         assert_eq!(rules.len(), 1, "duplicate rules must be deduped");
         assert_eq!(results.len(), 3, "results must NOT be deduped");
@@ -1281,18 +1469,26 @@ mod tests {
         ];
         let sarif = write_sarif(findings);
         let rule = &sarif["runs"][0]["tool"]["driver"]["rules"][0];
-        assert_eq!(rule["defaultConfiguration"]["level"].as_str().unwrap(), "error");
+        assert_eq!(
+            rule["defaultConfiguration"]["level"].as_str().unwrap(),
+            "error"
+        );
     }
 
     #[test]
     fn sarif_driver_includes_information_uri_and_version() {
         let sarif = write_sarif(vec![]);
         let driver = &sarif["runs"][0]["tool"]["driver"];
-        assert!(driver["informationUri"].as_str().is_some(),
-            "SARIF spec §3.19.3 informationUri missing");
+        assert!(
+            driver["informationUri"].as_str().is_some(),
+            "SARIF spec §3.19.3 informationUri missing"
+        );
         // Version should be the CARGO_PKG_VERSION, not the hardcoded literal.
         let version = driver["version"].as_str().unwrap();
-        assert!(!version.is_empty() && version != "3.2.0" || version == env!("CARGO_PKG_VERSION"),
-            "driver.version must match Cargo.toml, got: {}", version);
+        assert_eq!(
+            version,
+            env!("CARGO_PKG_VERSION"),
+            "driver.version must match Cargo.toml"
+        );
     }
 }

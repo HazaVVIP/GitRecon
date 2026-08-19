@@ -47,7 +47,9 @@ impl GiteaForgeClient {
                     .map(|ts| {
                         let reset = std::time::UNIX_EPOCH + Duration::from_secs(ts);
                         let now = std::time::SystemTime::now();
-                        reset.duration_since(now).unwrap_or(Duration::from_secs(3600))
+                        reset
+                            .duration_since(now)
+                            .unwrap_or(Duration::from_secs(3600))
                     })
                     .unwrap_or(Duration::from_secs(3600));
 
@@ -64,12 +66,16 @@ impl GiteaForgeClient {
         for attempt in 0..3u32 {
             let resp = self.client.get(url).await;
             if resp.status == 429 {
-                let wait_s = resp.headers.get("retry-after")
+                let wait_s = resp
+                    .headers
+                    .get("retry-after")
                     .and_then(|v| v.trim().parse::<u64>().ok())
-                    .unwrap_or(60).min(300);
+                    .unwrap_or(60)
+                    .min(300);
                 log::warn!(
                     "Gitea rate-limited (HTTP 429); sleeping {}s before retry {}/3",
-                    wait_s, attempt + 1,
+                    wait_s,
+                    attempt + 1,
                 );
                 tokio::time::sleep(std::time::Duration::from_secs(wait_s)).await;
                 continue;
@@ -81,7 +87,10 @@ impl GiteaForgeClient {
             self.update_rate_limit(&headers);
             return Ok(resp);
         }
-        anyhow::bail!("Rate limit exhausted after 3 retries for {}", crate::validation::redact_url(url))
+        anyhow::bail!(
+            "Rate limit exhausted after 3 retries for {}",
+            crate::validation::redact_url(url)
+        )
     }
 }
 
@@ -143,11 +152,18 @@ impl Forge for GiteaForgeClient {
 
     async fn get_tree(&self, repo: &Repository, branch: &str) -> anyhow::Result<Vec<TreeEntry>> {
         let sha = self.get_head_sha(repo, branch).await?;
-        let url = format!("{}/repos/{}/{}/git/trees/{}?recursive=true", self.api_base, repo.owner, repo.name, sha);
+        let url = format!(
+            "{}/repos/{}/{}/git/trees/{}?recursive=true",
+            self.api_base, repo.owner, repo.name, sha
+        );
         let resp = self.get_with_rate_limit(&url).await?;
 
         if !resp.ok() {
-            anyhow::bail!("GET tree {} returned HTTP {}", crate::validation::redact_url(&url), resp.status);
+            anyhow::bail!(
+                "GET tree {} returned HTTP {}",
+                crate::validation::redact_url(&url),
+                resp.status
+            );
         }
 
         let json: serde_json::Value = serde_json::from_slice(&resp.body)?;
@@ -171,20 +187,20 @@ impl Forge for GiteaForgeClient {
     }
 
     fn rate_limit_remaining(&self) -> Option<(u32, Duration)> {
-        self.rate_limit_remaining
-            .lock()
-            .ok()
-            .and_then(|guard| guard.as_ref().map(|(remaining, reset)| {
+        self.rate_limit_remaining.lock().ok().and_then(|guard| {
+            guard.as_ref().map(|(remaining, reset)| {
                 (*remaining, reset.saturating_duration_since(Instant::now()))
-            }))
+            })
+        })
     }
 
     fn rate_limit_info(&self) -> Option<RateLimitInfo> {
-        self.rate_limit_remaining().map(|(remaining, reset_in)| RateLimitInfo {
-            remaining,
-            reset_in,
-            limit: Platform::Gitea.default_rate_limit(),
-        })
+        self.rate_limit_remaining()
+            .map(|(remaining, reset_in)| RateLimitInfo {
+                remaining,
+                reset_in,
+                limit: Platform::Gitea.default_rate_limit(),
+            })
     }
 
     fn platform(&self) -> Platform {
@@ -192,7 +208,14 @@ impl Forge for GiteaForgeClient {
     }
 
     async fn get_head_sha(&self, repo: &Repository, branch: &str) -> anyhow::Result<String> {
-        get_head_sha(&self.client, &self.api_base, &repo.owner, &repo.name, branch).await
+        get_head_sha(
+            &self.client,
+            &self.api_base,
+            &repo.owner,
+            &repo.name,
+            branch,
+        )
+        .await
     }
 
     async fn whoami(&self) -> anyhow::Result<(String, String)> {
@@ -214,13 +237,17 @@ impl GiteaForgeClient {
 
             let resp = self.get_with_rate_limit(&url).await?;
             if !resp.ok() {
-                anyhow::bail!("GET {} returned HTTP {}", crate::validation::redact_url(&url), resp.status);
+                anyhow::bail!(
+                    "GET {} returned HTTP {}",
+                    crate::validation::redact_url(&url),
+                    resp.status
+                );
             }
 
             let json: serde_json::Value = serde_json::from_slice(&resp.body)?;
-            let arr = json.as_array().ok_or_else(|| {
-                anyhow::anyhow!("Expected JSON array from repos endpoint")
-            })?;
+            let arr = json
+                .as_array()
+                .ok_or_else(|| anyhow::anyhow!("Expected JSON array from repos endpoint"))?;
 
             if arr.is_empty() {
                 break;
@@ -266,22 +293,22 @@ impl GiteaForgeClient {
 /// A Gitea repository accessible to the authenticated user.
 #[derive(Debug, Clone)]
 pub struct GtRepo {
-    pub full_name:      String,
-    pub owner:          String,
-    pub name:           String,
-    pub private:        bool,
+    pub full_name: String,
+    pub owner: String,
+    pub name: String,
+    pub private: bool,
     pub default_branch: String,
-    pub clone_url:      String,
+    pub clone_url: String,
 }
 
 /// A single entry (blob or tree) from a Gitea tree API response.
 #[derive(Debug, Clone)]
 pub struct GtTreeEntry {
-    pub path:     String,
-    pub obj_type: String,   // "blob" or "tree"
-    pub sha:      String,
-    pub size:     Option<u64>,
-    pub mode:     Option<String>,
+    pub path: String,
+    pub obj_type: String, // "blob" or "tree"
+    pub sha: String,
+    pub size: Option<u64>,
+    pub mode: Option<String>,
 }
 
 // ════════════════════════════════════════════════
@@ -292,7 +319,11 @@ pub struct GtTreeEntry {
 ///
 /// Clones `base_cfg` and injects the required Gitea header:
 /// - `Authorization: token <PAT>`
-pub fn build_gitea_client(mut base_cfg: HttpConfig, token: &str, gitea_url: Option<&str>) -> anyhow::Result<(HttpClient, String)> {
+pub fn build_gitea_client(
+    mut base_cfg: HttpConfig,
+    token: &str,
+    gitea_url: Option<&str>,
+) -> anyhow::Result<(HttpClient, String)> {
     let api_base = gitea_url.unwrap_or(DEFAULT_GT_API).to_string();
 
     // Ensure API base ends with /api/v1
@@ -306,7 +337,9 @@ pub fn build_gitea_client(mut base_cfg: HttpConfig, token: &str, gitea_url: Opti
         format!("{}/api/v1", api_base.trim_end_matches('/'))
     };
 
-    base_cfg.extra_headers.push(("Authorization".to_string(), format!("token {}", token)));
+    base_cfg
+        .extra_headers
+        .push(("Authorization".to_string(), format!("token {}", token)));
     let client = HttpClient::new(base_cfg)?;
 
     Ok((client, api_base))
@@ -317,29 +350,44 @@ pub fn build_gitea_client(mut base_cfg: HttpConfig, token: &str, gitea_url: Opti
 // ════════════════════════════════════════════════
 
 fn parse_repo(v: &serde_json::Value) -> Option<GtRepo> {
-    let full_name      = v["full_name"].as_str()?.to_string();
-    let owner          = v["owner"]["login"].as_str().unwrap_or("").to_string();
-    let name           = v["name"].as_str().unwrap_or("").to_string();
-    let private        = v["private"].as_bool().unwrap_or(false);
+    let full_name = v["full_name"].as_str()?.to_string();
+    let owner = v["owner"]["login"].as_str().unwrap_or("").to_string();
+    let name = v["name"].as_str().unwrap_or("").to_string();
+    let private = v["private"].as_bool().unwrap_or(false);
     let default_branch = v["default_branch"].as_str().unwrap_or("main").to_string();
-    let clone_url      = v["clone_url"].as_str().unwrap_or("").to_string();
-    Some(GtRepo { full_name, owner, name, private, default_branch, clone_url })
+    let clone_url = v["clone_url"].as_str().unwrap_or("").to_string();
+    Some(GtRepo {
+        full_name,
+        owner,
+        name,
+        private,
+        default_branch,
+        clone_url,
+    })
 }
 
 fn parse_tree_entries(json: &serde_json::Value) -> Vec<GtTreeEntry> {
     let tree = match json["tree"].as_array() {
         Some(a) => a,
-        None    => return Vec::new(),
+        None => return Vec::new(),
     };
     tree.iter()
         .filter_map(|item| {
-            let path     = item["path"].as_str().unwrap_or("").to_string();
+            let path = item["path"].as_str().unwrap_or("").to_string();
             let obj_type = item["type"].as_str().unwrap_or("").to_string();
-            let sha      = item["sha"].as_str().unwrap_or("").to_string();
-            let size     = item["size"].as_u64();
-            let mode     = item["mode"].as_str().map(|s| s.to_string());
-            if path.is_empty() || sha.is_empty() { return None; }
-            Some(GtTreeEntry { path, obj_type, sha, size, mode })
+            let sha = item["sha"].as_str().unwrap_or("").to_string();
+            let size = item["size"].as_u64();
+            let mode = item["mode"].as_str().map(|s| s.to_string());
+            if path.is_empty() || sha.is_empty() {
+                return None;
+            }
+            Some(GtTreeEntry {
+                path,
+                obj_type,
+                sha,
+                size,
+                mode,
+            })
         })
         .collect()
 }
@@ -353,7 +401,7 @@ fn parse_tree_entries(json: &serde_json::Value) -> Vec<GtTreeEntry> {
 /// Calls `GET /user` and returns `(login, full_name)`.
 /// Returns an error on HTTP 401 (invalid/expired token) or any non-200 status.
 pub async fn whoami(client: &HttpClient, api_base: &str) -> anyhow::Result<(String, String)> {
-    let url  = format!("{}/user", api_base);
+    let url = format!("{}/user", api_base);
     let resp = client.get(&url).await;
     if resp.status == 401 {
         anyhow::bail!("Invalid or expired token (HTTP 401)");
@@ -375,11 +423,13 @@ pub async fn list_user_orgs(client: &HttpClient, api_base: &str) -> anyhow::Resu
     loop {
         let url = format!("{}/user/orgs?limit=50&page={}", api_base, page);
         let resp = client.get(&url).await;
-        if !resp.ok() { break; }
+        if !resp.ok() {
+            break;
+        }
         let json: serde_json::Value = serde_json::from_slice(&resp.body).unwrap_or_default();
-        let arr  = match json.as_array() {
+        let arr = match json.as_array() {
             Some(a) => a,
-            None    => break,
+            None => break,
         };
 
         if arr.is_empty() {
@@ -400,19 +450,24 @@ pub async fn list_user_orgs(client: &HttpClient, api_base: &str) -> anyhow::Resu
 ///
 /// Uses `GET /repos/{owner}/{repo}/git/refs/heads/{branch}`.
 pub async fn get_head_sha(
-    client:  &HttpClient,
+    client: &HttpClient,
     api_base: &str,
-    owner:   &str,
-    repo:    &str,
-    branch:  &str,
+    owner: &str,
+    repo: &str,
+    branch: &str,
 ) -> anyhow::Result<String> {
-    let url  = format!("{}/repos/{}/{}/git/refs/heads/{}", api_base, owner, repo, branch);
+    let url = format!(
+        "{}/repos/{}/{}/git/refs/heads/{}",
+        api_base, owner, repo, branch
+    );
     let resp = client.get(&url).await;
     if resp.ok() {
         let json: serde_json::Value = serde_json::from_slice(&resp.body)?;
         // Response can be a single object or an array of matching refs
         let sha = if let Some(arr) = json.as_array() {
-            arr.first().and_then(|r| r["object"]["sha"].as_str()).map(|s| s.to_string())
+            arr.first()
+                .and_then(|r| r["object"]["sha"].as_str())
+                .map(|s| s.to_string())
         } else {
             json["object"]["sha"].as_str().map(|s| s.to_string())
         };
@@ -423,7 +478,10 @@ pub async fn get_head_sha(
 
     anyhow::bail!(
         "Cannot resolve HEAD SHA for {}/{} branch '{}' (HTTP {})",
-        owner, repo, branch, resp.status
+        owner,
+        repo,
+        branch,
+        resp.status
     )
 }
 
@@ -432,24 +490,31 @@ pub async fn get_head_sha(
 /// Uses `GET /repos/{owner}/{repo}/git/blobs/{sha}`.
 /// Gitea returns content as base64; this function decodes it automatically.
 pub async fn get_blob_content(
-    client:  &HttpClient,
+    client: &HttpClient,
     api_base: &str,
-    owner:   &str,
-    repo:    &str,
-    sha:     &str,
+    owner: &str,
+    repo: &str,
+    sha: &str,
 ) -> anyhow::Result<Vec<u8>> {
-    let url  = format!("{}/repos/{}/{}/git/blobs/{}", api_base, owner, repo, sha);
+    let url = format!("{}/repos/{}/{}/git/blobs/{}", api_base, owner, repo, sha);
     let resp = client.get(&url).await;
     if !resp.ok() {
-        anyhow::bail!("GET blob {} returned HTTP {}", crate::validation::redact_url(&url), resp.status);
+        anyhow::bail!(
+            "GET blob {} returned HTTP {}",
+            crate::validation::redact_url(&url),
+            resp.status
+        );
     }
     let json: serde_json::Value = serde_json::from_slice(&resp.body)?;
-    let encoding    = json["encoding"].as_str().unwrap_or("base64");
+    let encoding = json["encoding"].as_str().unwrap_or("base64");
     let content_str = json["content"].as_str().unwrap_or("");
 
     if encoding == "base64" {
         // Gitea embeds newlines in the base64 payload — strip them before decoding
-        let cleaned: String = content_str.chars().filter(|&c| c != '\n' && c != '\r').collect();
+        let cleaned: String = content_str
+            .chars()
+            .filter(|&c| c != '\n' && c != '\r')
+            .collect();
         use base64::Engine;
         base64::engine::general_purpose::STANDARD
             .decode(&cleaned)
@@ -545,12 +610,22 @@ mod tests {
         };
 
         // Test with full URL
-        let (client1, api_base1) = build_gitea_client(base_cfg.clone(), "test_token", Some("https://gitea.example.com/api/v1")).unwrap();
+        let (client1, api_base1) = build_gitea_client(
+            base_cfg.clone(),
+            "test_token",
+            Some("https://gitea.example.com/api/v1"),
+        )
+        .unwrap();
         assert_eq!(api_base1, "https://gitea.example.com/api/v1");
         drop(client1);
 
         // Test with base URL (should append /api/v1)
-        let (client2, api_base2) = build_gitea_client(base_cfg.clone(), "test_token", Some("https://gitea.example.com")).unwrap();
+        let (client2, api_base2) = build_gitea_client(
+            base_cfg.clone(),
+            "test_token",
+            Some("https://gitea.example.com"),
+        )
+        .unwrap();
         assert_eq!(api_base2, "https://gitea.example.com/api/v1");
         drop(client2);
 

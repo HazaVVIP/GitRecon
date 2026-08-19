@@ -1,327 +1,183 @@
 # GitRecon
 
-**GitRecon** is a high-performance, streaming Git exposure scanner written in Rust.  
-It detects exposed `.git` directories on web servers and recovers secrets, credentials, and source code hidden inside — all in memory, without writing to disk.
+GitRecon is a high-performance Rust scanner for exposed Git repositories, local source trees, and forge-accessible repositories. It detects exposed `.git` metadata, maps Git objects, scans recovered content for secret candidates, and emits structured reports.
 
-**v3.1.0** · 127 secret patterns · 61 metadata probes · 59 tech stack fingerprints · ~4800 lines of Rust
+> Use GitRecon only against systems and repositories that you own or are explicitly authorized to assess.
 
----
+## Capabilities
 
-## Features
+GitRecon provides a four-stage remote pipeline: exposure detection, Git metadata and object mapping, concurrent streaming analysis, and report generation. It also supports local-directory scanning, binary and archive string extraction, multiple forge APIs, bounded multi-target concurrency, checkpoint/resume, cache isolation, proxy and rate-control options, and JSON, SARIF, CSV, NDJSON, Markdown, and HTML output.
 
-- 🔍 **Phase 1 – Detect** — Discovers exposed `.git` directories with confidence scoring and optional path fuzzing  
-- 🗺️ **Phase 2 – Map** — Reconstructs the full object graph (commits, trees, blobs) from the exposed repo  
-- 🌊 **Phase 3 – Stream & Scan** — Fetches every object concurrently, scans in-memory for 110+ secret patterns (API keys, passwords, tokens, private keys, …), AI config/path artifacts (`.claude`, `.cursor`, `.continue`, `.aider`, Copilot prompts), plus Shannon entropy analysis  
-- 📄 **Phase 4 – Report** — Outputs a structured JSON report and optional on-disk source reconstruction  
-
----
+The scanner is intentionally discovery-oriented. Normal mode filters common template placeholders to reduce noise. `--exhaustive` retains placeholder-like candidates for investigative workflows. Object verification and local binary scanning are enabled by default and can be disabled explicitly.
 
 ## Installation
 
-### One-liner (recommended)
-
-```bash
-curl -sSf https://raw.githubusercontent.com/HazaVVIP/GitRecon/main/install.sh | bash
-```
-
-The installer will:
-1. Try to download a pre-built binary from the [Releases](https://github.com/HazaVVIP/GitRecon/releases) page.  
-2. If no pre-built binary is available for your platform, it will build from source using Cargo.
-
 ### Build from source
 
-Requires [Rust](https://rustup.rs/) ≥ 1.75.
+Install [Rust](https://rustup.rs/) and run:
 
 ```bash
 git clone https://github.com/HazaVVIP/GitRecon.git
 cd GitRecon
 cargo build --release
-# Binary is at: ./target/release/gitrecon
+./target/release/gitrecon --help
 ```
 
----
+A release installer is also available when published binaries exist:
+
+```bash
+curl -sSf https://raw.githubusercontent.com/HazaVVIP/GitRecon/main/install.sh | bash
+```
 
 ## Usage
 
-```
+```bash
 gitrecon <URL> [OPTIONS]
+gitrecon --targets targets.ndjson [OPTIONS]
+gitrecon --dir ./project [OPTIONS]
 gitrecon --token <PAT> [OPTIONS]
-gitrecon --dir <PATH> [OPTIONS]
+gitrecon --gitlab-token <PAT> [OPTIONS]
+gitrecon --bitbucket-token <APP_PASSWORD> [OPTIONS]
+gitrecon --gitea-token <TOKEN> [OPTIONS]
+gitrecon --azure-token <PAT> [OPTIONS]
 ```
 
-### Basic examples
+Examples:
 
 ```bash
-# Detect and scan a target
-gitrecon https://target.com
+# Scan an exposed Git endpoint
+gitrecon https://target.example
 
-# Scan a local directory recursively (text files)
-gitrecon --dir ./my-project
+# Probe non-standard Git paths
+gitrecon https://target.example --fuzz
 
-# Save reconstructed source to disk
-gitrecon https://target.com --save
+# Scan a local project, including binaries by default
+gitrecon --dir ./project --output ./results
 
-# Use a SOCKS5 proxy (e.g., Tor)
-gitrecon https://target.com --proxy socks5://127.0.0.1:9050
+# Retain template-like candidates
+gitrecon --dir ./project --exhaustive
 
-# Add request delay and custom timeout
-gitrecon https://target.com --delay 1.5 --timeout 15
+# Disable binary scanning explicitly
+gitrecon --dir ./project --no-scan-binaries
 
-# Token mode (interactive repo picker: single, comma list, or all)
-gitrecon --token ghp_xxxxxxxxxxxxxxxxxxxx
+# Verify an authenticated forge token and scan selected repositories
+gitrecon --token "$GITHUB_TOKEN" --quiet --format sarif --output ./results
 
-# Fuzz non-standard .git paths (api/.git, admin/.git, .git.bak, _git, …)
-gitrecon https://target.com --fuzz
+# Scan targets concurrently while preserving deterministic aggregate ordering
+gitrecon --targets targets.ndjson --parallel-targets 8 --workers 50
 
-# Stop on first critical finding
-gitrecon https://target.com --stop-on-critical
+# Use adaptive timeout and entropy tuning for a large remote scan
+gitrecon https://target.example --max-history 0 --max-blob-size 8 \
+  --entropy-threshold 4.2 --max-timeout 120
 
-# Load custom patterns from a JSON file
-gitrecon https://target.com --patterns my_patterns.json
+# Add custom patterns and false-positive context keywords
+gitrecon --dir ./project --patterns ./patterns.json \
+  --false-positive-keywords example,test,fixture
 
-# Quiet mode, save output to a custom directory
-gitrecon https://target.com --no-color -q --output ./results
+# Validate configuration and target input without scanning
+gitrecon --targets targets.ndjson --dry-run
 ```
 
-### All options
+## Target Files and Custom Patterns
 
-| Flag | Default | Description |
-|---|---|---|
-| `--dir PATH` | — | Scan local directory recursively (cannot be combined with URL/`--targets`/`--token`) |
-| `--save` | off | Reconstruct source code to disk after scan (for `--token`, used as default only in non-interactive `--quiet`/`--pipe`) |
-| `-o`, `--output DIR` | `./gitrecon_output` | Output directory |
-| `--proxy URL` | — | Proxy URL (`socks5://`, `socks4://`, `http://`) |
-| `--timeout SEC` | 10 | HTTP request timeout |
-| `--retries N` | 3 | Retry count per request |
-| `--delay SEC` | 0 | Delay between requests |
-| `--jitter SEC` | 0 | Random jitter added to delay |
-| `--user-agent UA` | — | Custom User-Agent string |
-| `--header NAME:VALUE` | — | Extra HTTP header (repeatable) |
-| `--fuzz` | off | Try non-standard `.git` paths (including backups, build dirs) |
-| `-w`, `--workers N` | 50 | Concurrent worker tasks |
-| `--mem-limit MB` | 256 | Memory limit for streaming |
-| `--max-findings N` | 0 | Stop after N findings (0 = unlimited) |
-| `--stop-on-critical` | off | Stop scan immediately on first CRITICAL finding |
-| `--patterns FILE` | — | Load additional detection patterns from a JSON file |
-| `--min-confidence PCT` | 45 | Minimum confidence to continue (0–100) |
-| `--no-color` | off | Disable terminal colours |
-| `-q`, `--quiet` | off | Reduce terminal output |
+The `--targets` file accepts one target per line. Blank lines and lines beginning with `#` are ignored. Each line may be a plain URL, or a JSON object matching one of the typed target forms:
 
-Mode selection:
-- `--token` mode: enumerate repositories accessible by GitHub PAT, show numbered list, ask selection (`1`, `1,3,7`, or `all`), then ask whether to save reconstruction (`Y/N`) before scanning.
-- `--dir` mode: scan local directory files directly (no HTTP/.git detection pipeline).
-- URL/`--targets` mode: scan exposed `.git` endpoints remotely.
+```text
+https://target-one.example
+{"url":"https://target-two.example","fuzz":true}
+{"dir":"./local-project"}
+{"token":"YOUR_TOKEN","repos":["owner/repository"]}
+```
 
-`--dir` notes: symbolic links are skipped to avoid traversal loops, binary-like extensions are skipped, and files larger than `--max-blob-size` are ignored.
+For custom detectors, `--patterns-help` prints the current schema. The file must contain a top-level `patterns` array, and each entry requires `id`, `severity`, `description`, and `regex`:
 
----
+```json
+{
+  "patterns": [
+    {
+      "id": "internal_service_token",
+      "severity": "HIGH",
+      "description": "Internal service bearer token",
+      "regex": "internal_[A-Za-z0-9_]{20,}"
+    }
+  ]
+}
+```
 
-## Output
+Replace the example quantifier with a valid regular-expression bound appropriate for the token format you are detecting. Custom patterns are validated before scanning.
 
-Results are written as JSON to `<output>/<target>_report.json`.  
-When `--save` is used, reconstructed source files are placed under `<output>/<target>/`.
+## Important Options
 
----
+| Option | Default | Purpose |
+|---|---:|---|
+| `--dir PATH` | — | Recursively scan a local directory |
+| `--targets FILE` | — | Read plain URLs or typed JSON targets, one per line |
+| `--parallel-targets N` | `1` | Bound concurrent target orchestration |
+| `--workers N` | `50` | Bound concurrent object or file scanning work |
+| `--timeout SEC` | `10` | Per-request timeout |
+| `--retries N` | `3` | Retry count |
+| `--mem-limit MB` | `256` | Streaming memory limit |
+| `--max-findings N` | `0` | Stop after a limit; zero means unlimited |
+| `--fuzz` | disabled | Probe additional Git exposure paths |
+| `--exhaustive` | disabled | Retain placeholder-like candidates |
+| `--no-scan-binaries` | disabled | Opt out of local binary/archive scanning |
+| `--no-verify-objects` | disabled | Skip object accessibility verification |
+| `--save` | disabled | Reconstruct recovered source to disk |
+| `--resume` | disabled | Resume from a verified checkpoint |
+| `--no-cache` | disabled | Bypass the SQLite object cache |
+| `--format FORMAT` | `json` | Select `json`, `sarif`, `csv`, `ndjson`, `md`, or `html` |
+| `--live` | disabled | Emit findings as they arrive |
+| `--pipe` | disabled | Emit machine-readable pipeline output |
+| `--webhook URL` | — | Deliver a completed report to a validated webhook |
+| `--dry-run` | disabled | Validate target/configuration input without scanning |
+| `--patterns FILE` | — | Load validated custom JSON detection patterns |
+| `--false-positive-keywords LIST` | built-in list | Extend context keywords used for false-positive scoring |
+| `--max-blob-size MB` | `4` | Maximum individual blob or local file size |
+| `--max-history COMMITS` | `500` | Commit traversal depth; `0` means unlimited |
+| `--entropy-threshold FLOAT` | `4.5` | High-entropy candidate threshold |
+| `--max-timeout SEC` | `60` | Maximum adaptive request timeout |
+| `--rate N` | — | Global request rate limit |
+| `--proxy-list FILE` | — | Rotate proxies from a newline-delimited file |
+| `--ua-file FILE` | — | Load User-Agent values from a file |
+| `--retry-strategy STRATEGY` | `standard` | Select retry behavior |
+| `--checkpoint-dir DIR` | — | Checkpoint storage directory |
+| `--checkpoint-interval N` | `1000` | Checkpoint cadence in processed objects |
+| `--theme PATH` | — | Load a TOML terminal theme |
+| `--banner-style STYLE` | `standard` | Select `minimal`, `standard`, `full`, or `none` |
+| `--no-unicode` | disabled | Use ASCII-compatible terminal symbols |
+| `--insecure` | disabled | Disable TLS verification; use only in controlled environments |
 
-## Detected Secret Types (110 patterns)
+Run `gitrecon --help` for the complete option list, including forge-specific URLs, proxy rotation, user-agent pools, rate limiting, checkpoint intervals, themes, and webhook controls.
 
-**Cloud providers:**  
-AWS Access Key ID · AWS Secret Access Key · AWS MFA Serial · GCP Service Account · GCP API Key · Azure Storage Connection String · Azure SAS Token · Azure AD Client Secret · Oracle OCI API Key Fingerprint · Alibaba Cloud Access Key · IBM Cloud API Key
+## Outputs
 
-**Version control & CI/CD:**  
-GitHub PAT · GitHub OAuth · GitHub App Token · GitLab PAT · Bitbucket App Password · CircleCI Token · Travis CI Token · Jenkins API Token
-
-**AI providers & tooling:**  
-OpenAI API keys (legacy, project-scoped, service account) · Anthropic API keys · HuggingFace tokens · Cohere API Key · OpenRouter API key · AI provider env-style key variables (Gemini/Google AI/xAI/DeepSeek/Mistral/Perplexity) · AI-sensitive config and workspace paths (`.claude`, `.cursor`, `.continue`, `.aider`, Copilot prompt/config files)
-
-**Payments & e-commerce:**  
-Stripe secret/publishable/webhook keys · PayPal Client ID/Secret · Shopify Admin API Token · Shopify Shared Secret · Square API Key · Adyen API Key · Razorpay API Key · Braintree Access Token · Coinbase API Key
-
-**Messaging & communications:**  
-Slack tokens/webhooks/signing secrets · Discord bot tokens/webhooks · Telegram bot tokens · SendGrid · Twilio API Key/Account SID · Mailgun · Pusher · Mailchimp
-
-**Infrastructure & PaaS:**  
-HashiCorp Vault tokens · DigitalOcean PATs · Databricks tokens · Cloudflare Global API Key/Token · Heroku API Key · Vercel Token · Netlify PAT · Linode/Akamai PAT · Vultr API Key · Hetzner Cloud Token · Scaleway Secret Key · Fly.io Token · Render API Key · Terraform Cloud Token
-
-**Database & DBaaS:**  
-Database connection URLs (MySQL, PostgreSQL, MongoDB, Redis, MSSQL, CockroachDB, ClickHouse) · Database passwords · MongoDB Atlas Connection String · PlanetScale Token · Supabase Service Role Key · Neon Database Token · Upstash Redis · Fauna Secret · Xata API Key · Turso Auth Token
-
-**Secrets management:**  
-Doppler Service Token · Linear API Key
-
-**Project management & collaboration:**  
-Jira/Atlassian API Token · Confluence API Token · Asana PAT · Notion Integration Token
-
-**Observability & monitoring:**  
-Datadog API Key · New Relic License Key · Grafana Service Account Token · Sentry DSN · PagerDuty API Key
-
-**Keys & certificates:**  
-Private keys (RSA/EC/DSA/OpenSSH/PGP) · PKCS12/PFX references · JWT tokens · JWT secrets
-
-**Application frameworks:**  
-Generic API/secret keys · Access tokens · Bearer tokens · Hardcoded passwords · Env passwords · WordPress config credentials · Django/Flask SECRET_KEY · Rails secret_key_base · Laravel APP_KEY · OAuth Client Secret
-
-**Other services:**  
-Firebase FCM Key · Firebase RTDB Auth · NPM Token · Docker Hub PAT · Twitch OAuth · Algolia API Key · Cloudinary URL · Okta API Token · Mapbox Token · Infura Project Key · Railway Token
-
-**Advanced detection:**  
-Shannon entropy analysis (context-aware, threshold 4.5 bits/char) · YAML next-line secret detection · Minified JS segment scanning · Placeholder filtering (54 patterns) · Sensitive filename priority scoring
-
----
-
-## Git Exposure Vectors Detected (--fuzz)
-
-In fuzz mode GitRecon probes all common `.git` locations, including:
-
-| Path | Use case |
-|---|---|
-| `/.git/` | Standard location |
-| `/api/.git/`, `/v1/.git/`, … | Versioned API backends |
-| `/admin/.git/`, `/backend/.git/` | Admin panels |
-| `/_git/` | Azure DevOps / VSTS local clones |
-| `/dist/.git/`, `/build/.git/` | Accidentally committed build artefacts |
-| `/assets/.git/` | Static-asset directories |
-| `/.git.bak/`, `/.git.old/` | Backup copies of `.git` |
-| `/wp-content/.git/` | WordPress installs |
-
----
+Reports are written below the selected output directory. The default JSON report contains detection metadata, mapping information, findings, severity counts, risk score, scan statistics, and technology fingerprints. `--save` writes reconstructed source under a target-specific directory. Treat reports and reconstructed source as sensitive because findings may contain plaintext credential material.
 
 ## Architecture
 
-GitRecon operates in a **4-phase streaming pipeline**, each phase feeding into the next:
-
-```
-Phase 1 — DETECT        Phase 2 — MAP           Phase 3 — STREAM & SCAN       Phase 4 — REPORT
-┌──────────────────┐    ┌──────────────────┐    ┌───────────────────────────┐   ┌──────────────────┐
-│ Probe .git paths │    │ Fetch metadata   │    │ Concurrent object fetch   │   │ Risk scoring     │
-│ Confidence score │ ──▶│ Collect SHA1s    │ ──▶│ Zlib decompress           │──▶│ JSON report      │
-│ Fuzz variants    │    │ Parse pack index │    │ 110 regex secret patterns │   │ Terminal display  │
-│ Branch & remote  │    │ Estimate size    │    │ Entropy analysis          │   │ Source reconstruct│
-└──────────────────┘    └──────────────────┘    │ Tech stack fingerprint    │   └──────────────────┘
-                                                │ Memory-limited streaming  │
-                                                └───────────────────────────┘
-```
-
-### Modules
-
-| Module | Lines | Responsibility |
+| Domain | Modules | Responsibility |
 |---|---|---|
-| `main.rs` | ~330 | CLI parsing (clap), phase orchestration, configuration |
-| `detect.rs` | ~410 | Phase 1 — probe 8 metadata files, confidence scoring (0–100 %), fuzz 18+ paths |
-| `mapper.rs` | ~485 | Phase 2 — fetch 46 metadata files, collect SHA1s, parse pack indexes (v1 & v2) |
-| `streamer.rs` | ~2020 | Phase 3 — concurrent fetch, 110 secret patterns, Shannon entropy, YAML multi-line, minified JS |
-| `reporter.rs` | ~290 | Phase 4 — risk score, coloured terminal output, JSON report |
-| `git_parser.rs` | ~545 | Git object parser (loose objects, DIRC index v2–v4, pack index v1/v2, packed-refs, config) |
-| `http_client.rs` | ~200 | HTTP wrapper — exponential backoff, proxy (SOCKS5/HTTP), rate limiting, UA rotation |
-| `reconstructor.rs` | ~120 | Optional source reconstruction to disk (`--save`), path-traversal defence |
+| Orchestration | `main.rs`, `target_utils.rs`, `outcome.rs` | CLI routing, target concurrency, deterministic outcomes, and error classification |
+| Forge clients | `forge.rs`, `forge_factory.rs`, `*_api.rs` | Provider authentication, pagination, repository enumeration, and object retrieval |
+| Git pipeline | `detect.rs`, `mapper.rs`, `git_parser.rs`, `pack_reader.rs` | Exposure detection, object mapping, index parsing, pack parsing, and delta resolution |
+| Scanner | `streamer.rs`, `binary_scanner.rs`, `binary_adapter.rs` | Pattern, entropy, multiline, database, AI-path, text, binary, and archive analysis |
+| Reliability | `http_client.rs`, `cache.rs`, `checkpoint.rs`, `rate_limiter.rs`, `temp_cleanup.rs` | HTTP resilience, caching, checkpoint integrity, rate control, and cleanup |
+| Reporting | `reporter.rs`, `validation.rs`, `layout.rs`, `ui/theme.rs` | Report formats, input validation, terminal presentation, and optional themes |
 
-### Tech Stack
+## Quality Gates
 
-- **Language:** Rust (edition 2021)
-- **Async runtime:** Tokio (full features)
-- **HTTP:** reqwest (rustls-tls, SOCKS, gzip/deflate)
-- **CLI:** clap 4 (derive)
-- **Concurrency:** futures `buffer_unordered`, rayon, lock-free atomics
-- **Compression:** flate2 (zlib)
-- **Hashing:** sha1, hex
-- **Output:** serde_json, colored, indicatif
-
-### Testing
-
-GitRecon includes **110 unit tests** across all modules:
+Run the following before committing or publishing a release:
 
 ```bash
-cargo test           # Run all tests
-cargo clippy         # Lint check (zero warnings)
-cargo fmt --check    # Format check
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-targets
+cargo build --release
 ```
 
-| Module | Tests | Coverage |
-|---|---|---|
-| `detect.rs` | 14 | Confidence scoring, path variants, verifiers |
-| `mapper.rs` | 12 | MapResult methods, META_FILES coverage |
-| `git_parser.rs` | 5 | HEAD/ref parsing, SHA1 extraction, packed-refs |
-| `streamer.rs` | 79 | All 110 secret patterns, entropy, tech detection, placeholder filtering, YAML/minified scanning |
+The repository includes unit tests and binary-level integration tests using temporary fixtures. Tests do not require live credentials or external network access.
 
----
-
-## Roadmap
-
-Peningkatan diurutkan berdasarkan **dampak × kompleksitas**. Setiap tahap bersifat independen dan dapat di-release secara terpisah.
-
-### Tahap 1 — Resilience & Reliability
-
-| ID | Peningkatan | Prioritas |
-|---|---|---|
-| R-1 | **Checkpoint & Resume** — Simpan progress ke checkpoint file, flag `--resume` | **P0** |
-| R-2 | **Smart Retry per Status Code** — `404` skip, `429` respect Retry-After, `503` backoff | **P1** |
-| R-3 | **Adaptive Per-Object Timeout** — Moving average latency × 3 | **P2** |
-
-### Tahap 2 — Performance & Throughput
-
-| ID | Peningkatan | Prioritas |
-|---|---|---|
-| P-1 | **Adaptive Concurrency** — Auto-tune workers berdasarkan error rate | **P1** |
-| P-2 | **HTTP/2 Multiplexing** — Flag `--http2` | **P2** |
-| P-3 | **Prefetching Berbasis Graf** — Queue child blob SHA1s dari tree objects | **P3** |
-| P-4 | **Streaming Decompression** — `async_compression` untuk lower peak memory | **P3** |
-
-### Tahap 3 — Scanning Quality
-
-| ID | Peningkatan | Prioritas |
-|---|---|---|
-| S-1 | **Context-Aware Confidence** — Turunkan confidence jika ada `# example` di sekitar match | **P2** |
-| S-2 | **Full Multi-Line Pattern** — Regex dot-all untuk PEM, JSON nested, YAML block | **P2** |
-| S-3 | **Binary File Scanning** — SQLite string extraction, JAR/ZIP scanning | **P3** |
-| S-4 | **Multi-Line DB Credentials** — Python/Ruby/PHP database config detection | **P3** |
-
-### Tahap 4 — Stealth & Evasion
-
-| ID | Peningkatan | Prioritas |
-|---|---|---|
-| E-1 | **Token Bucket Rate Limiter** — Flag `--rate N` req/s | **P2** |
-| E-2 | **Multi-Proxy Rotation** — Flag `--proxy-list FILE` | **P3** |
-| E-3 | **Request Fingerprint Diversification** — Header variation, decoy requests | **P4** |
-| E-4 | **Extended UA Pool** — 20+ UAs, `--ua-file FILE`, `--ua git/2.x.x` | **P4** |
-
-### Tahap 5 — Output & Integration
-
-| ID | Peningkatan | Prioritas |
-|---|---|---|
-| O-1 | **Real-Time Streaming Output** — Flag `--live` | **P2** |
-| O-2 | **SARIF Format** — Flag `--format sarif` untuk GitHub Security tab | **P3** |
-| O-3 | **Additional Formats** — CSV, NDJSON, Markdown, HTML | **P4** |
-| O-4 | **Webhook Integration** — Flag `--webhook URL` | **P4** |
-
-### Tahap 6 — Architecture & Scalability
-
-| ID | Peningkatan | Prioritas |
-|---|---|---|
-| A-1 | **Multi-Target Scanning** — Flag `--targets FILE` | **P3** |
-| A-2 | **SQLite Cache** — Cache di `~/.gitrecon/cache.db`, `--no-cache` | **P3** |
-| A-3 | **Smart HTTP Protocol** — `git-upload-pack` negotiation | **P4** |
-| A-4 | **Delta Object Resolution** — `OBJ_REF_DELTA` / `OBJ_OFS_DELTA` decompression | **P4** |
-| A-5 | **Plugin Architecture** — Trait `Scanner` + shared library loader | **P5** |
-| A-6 | **Pipeline Mode** — Flag `--pipe` untuk NDJSON stdout | **P3** |
-
----
-
-## Contributing
-
-1. Fork repositori
-2. Buat branch fitur (`git checkout -b feature/R-1-checkpoint`)
-3. Gunakan ID dari roadmap sebagai prefix branch dan commit
-4. Pastikan `cargo test`, `cargo clippy`, dan `cargo fmt --check` bersih
-5. Buat pull request dengan deskripsi perubahan
-
----
-
-## Legal
-
-This tool is intended for **authorised security testing and research only**.  
-Do not use it against systems you do not own or have explicit permission to test.
-
----
+See [DEVELOPMENT.md](DEVELOPMENT.md) for production defaults, maintenance rules, architecture details, and the release checklist.
 
 ## License
 

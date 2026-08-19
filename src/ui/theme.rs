@@ -1,6 +1,6 @@
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
-use serde::{Deserialize, Serialize};
 
 /// Banner display style for output formatting
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -92,8 +92,7 @@ impl Theme {
     /// Save theme to configuration file
     #[allow(dead_code)]
     pub fn save(&self) -> Result<(), String> {
-        let config_path = Self::config_path()
-            .ok_or("Failed to determine config directory")?;
+        let config_path = Self::config_path().ok_or("Failed to determine config directory")?;
 
         // Create parent directory if it doesn't exist
         if let Some(parent) = config_path.parent() {

@@ -36,6 +36,10 @@
 //! **Custom directories:** GITRECON_CHECKPOINT_DIR env var allows custom checkpoint locations
 //! for pentesting scenarios. Custom directories undergo the same validation.
 
+use anyhow::{Context, Result};
+use hmac::{Hmac, Mac};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::fs::File;
 use std::io::{BufReader, Read};
@@ -44,10 +48,6 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
-use serde::{Deserialize, Serialize};
-use anyhow::{Context, Result};
-use hmac::{Hmac, Mac};
-use sha2::{Sha256, Digest};
 use subtle::ConstantTimeEq;
 
 /// Default checkpoint directory
@@ -128,11 +128,7 @@ pub struct Checkpoint {
 impl Checkpoint {
     /// Create a new checkpoint with the current version
     #[allow(dead_code)]
-    pub fn new(
-        target: String,
-        phase: CheckpointPhase,
-        config_fingerprint: String,
-    ) -> Self {
+    pub fn new(target: String, phase: CheckpointPhase, config_fingerprint: String) -> Self {
         // Sprint 3 (S3.6): panic-safe timestamp — see safe_now_secs comment near save_checkpoint.
         let now = safe_now_secs();
 
@@ -181,9 +177,9 @@ impl Checkpoint {
 
         // Derive a key from target and config fingerprint
         // This ensures each checkpoint has a unique key while being deterministic
-        let key_material = format!("{}:{}:gitrecon-integrity",
-            checkpoint_without_hmac.target,
-            checkpoint_without_hmac.config_fingerprint
+        let key_material = format!(
+            "{}:{}:gitrecon-integrity",
+            checkpoint_without_hmac.target, checkpoint_without_hmac.config_fingerprint
         );
 
         // Use SHA256 to derive a 32-byte key
@@ -360,14 +356,36 @@ pub fn compute_config_fingerprint(
     entropy_threshold: f64,
     max_blob_size: usize,
 ) -> String {
-    use std::hash::{Hash, Hasher};
     use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
 
     let mut hasher = DefaultHasher::new();
     fuzz.hash(&mut hasher);
     min_confidence.hash(&mut hasher);
     entropy_threshold.to_bits().hash(&mut hasher);
     max_blob_size.hash(&mut hasher);
+    format!("{:x}", hasher.finish())
+}
+
+/// Compute a checkpoint fingerprint including scan-policy identity.
+///
+/// The legacy function remains stable for old checkpoint fixtures; new Streamer
+/// checkpoints use this variant so normal and exhaustive scans cannot resume
+/// from one another's object-processing state.
+pub fn compute_config_fingerprint_with_policy(
+    fuzz: bool,
+    min_confidence: u32,
+    entropy_threshold: f64,
+    max_blob_size: usize,
+    exhaustive: bool,
+) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    compute_config_fingerprint(fuzz, min_confidence, entropy_threshold, max_blob_size)
+        .hash(&mut hasher);
+    exhaustive.hash(&mut hasher);
     format!("{:x}", hasher.finish())
 }
 
@@ -399,7 +417,10 @@ fn validate_directory_safe(path: &Path) -> Result<()> {
 
     // Check: not a symlink
     if path.is_symlink() {
-        anyhow::bail!("Security violation: checkpoint path is a symlink: {}", path.display());
+        anyhow::bail!(
+            "Security violation: checkpoint path is a symlink: {}",
+            path.display()
+        );
     }
 
     // Sprint 5 (S5.8): Unix-only ownership + mode checks. See validate_checkpoint_file
@@ -449,11 +470,20 @@ pub fn ensure_checkpoint_dir() -> Result<PathBuf> {
         #[cfg(unix)]
         {
             let mut perms = fs::metadata(&dir)
-                .with_context(|| format!("Failed to get metadata for checkpoint directory: {}", dir.display()))?
+                .with_context(|| {
+                    format!(
+                        "Failed to get metadata for checkpoint directory: {}",
+                        dir.display()
+                    )
+                })?
                 .permissions();
             perms.set_mode(0o700);
-            fs::set_permissions(&dir, perms)
-                .with_context(|| format!("Failed to set permissions on checkpoint directory: {}", dir.display()))?;
+            fs::set_permissions(&dir, perms).with_context(|| {
+                format!(
+                    "Failed to set permissions on checkpoint directory: {}",
+                    dir.display()
+                )
+            })?;
         }
     }
 
@@ -470,7 +500,13 @@ pub fn checkpoint_path(target: &str) -> PathBuf {
         .trim_start_matches("http://")
         .replace('/', "_")
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '.' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect::<String>();
 
     checkpoint_dir().join(format!("{}.json", target_name))
@@ -488,7 +524,8 @@ pub fn checkpoint_path(target: &str) -> PathBuf {
 /// - File is a regular file (not symlink, device, etc.)
 /// - File size is reasonable (< 10MB to prevent DoS)
 fn validate_checkpoint_file(file: &File) -> Result<()> {
-    let metadata = file.metadata()
+    let metadata = file
+        .metadata()
         .context("Failed to get file metadata for checkpoint")?;
 
     // Check: regular file (not symlink, directory, device, etc.)
@@ -534,7 +571,8 @@ fn validate_checkpoint_file(file: &File) -> Result<()> {
     if file_size > MAX_CHECKPOINT_SIZE {
         anyhow::bail!(
             "Security violation: checkpoint file too large ({} bytes, max {})",
-            file_size, MAX_CHECKPOINT_SIZE
+            file_size,
+            MAX_CHECKPOINT_SIZE
         );
     }
 
@@ -566,18 +604,24 @@ fn validate_checkpoint_file(file: &File) -> Result<()> {
 /// checkpoint dir and (worse) potentially colliding with future timestamps at
 /// extreme edge cases. Called opportunistically by `save_checkpoint` on entry.
 fn sweep_orphan_tmp_files(dir: &Path) {
-    let Ok(entries) = fs::read_dir(dir) else { return };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
     let cutoff = SystemTime::now()
         .checked_sub(std::time::Duration::from_secs(5 * 60))
         .unwrap_or(UNIX_EPOCH);
     for entry in entries.flatten() {
-        let Ok(name) = entry.file_name().into_string() else { continue };
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
         // Match the exact temp-file convention: <basename>.tmp-<ts>-<pid>
         if !name.contains(".tmp-") {
             continue;
         }
         let Ok(meta) = entry.metadata() else { continue };
-        if !meta.is_file() { continue; }
+        if !meta.is_file() {
+            continue;
+        }
         let Ok(mtime) = meta.modified() else { continue };
         if mtime < cutoff {
             let _ = fs::remove_file(entry.path());
@@ -637,7 +681,8 @@ pub fn save_checkpoint(checkpoint: &Checkpoint) -> Result<()> {
 
     // BUG-SEC-005 FIX: Update HMAC before saving
     let mut checkpoint_with_hmac = checkpoint.clone();
-    checkpoint_with_hmac.update_hmac()
+    checkpoint_with_hmac
+        .update_hmac()
         .context("Failed to compute checkpoint HMAC")?;
 
     let json = serde_json::to_string_pretty(&checkpoint_with_hmac)
@@ -664,19 +709,25 @@ pub fn save_checkpoint(checkpoint: &Checkpoint) -> Result<()> {
                 .create_new(true)
                 .mode(0o600)
                 .open(&temp_path)
-                .with_context(|| format!("Failed to create temp checkpoint: {}", temp_path.display()))?;
+                .with_context(|| {
+                    format!("Failed to create temp checkpoint: {}", temp_path.display())
+                })?;
             #[cfg(not(unix))]
             let mut file = fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .open(&temp_path)
-                .with_context(|| format!("Failed to create temp checkpoint: {}", temp_path.display()))?;
+                .with_context(|| {
+                    format!("Failed to create temp checkpoint: {}", temp_path.display())
+                })?;
 
-            file.write_all(json.as_bytes())
-                .with_context(|| format!("Failed to write temp checkpoint: {}", temp_path.display()))?;
+            file.write_all(json.as_bytes()).with_context(|| {
+                format!("Failed to write temp checkpoint: {}", temp_path.display())
+            })?;
 
-            file.sync_all()
-                .with_context(|| format!("Failed to sync temp checkpoint: {}", temp_path.display()))?;
+            file.sync_all().with_context(|| {
+                format!("Failed to sync temp checkpoint: {}", temp_path.display())
+            })?;
 
             Ok::<(), anyhow::Error>(())
         })();
@@ -708,7 +759,13 @@ pub fn save_checkpoint(checkpoint: &Checkpoint) -> Result<()> {
                 std::thread::sleep(std::time::Duration::from_millis(delay_ms));
                 continue;
             }
-            return Err(e).with_context(|| format!("Failed to rename checkpoint: {} -> {}", temp_path.display(), path.display()));
+            return Err(e).with_context(|| {
+                format!(
+                    "Failed to rename checkpoint: {} -> {}",
+                    temp_path.display(),
+                    path.display()
+                )
+            });
         }
 
         // Sprint 3 (S3.6): fsync the parent directory so the rename itself is
@@ -722,7 +779,10 @@ pub fn save_checkpoint(checkpoint: &Checkpoint) -> Result<()> {
     }
 
     // Should not reach here, but handle the case
-    anyhow::bail!("Failed to save checkpoint after {} retries", MAX_SAVE_RETRIES)
+    anyhow::bail!(
+        "Failed to save checkpoint after {} retries",
+        MAX_SAVE_RETRIES
+    )
 }
 
 /// Load checkpoint for a target
@@ -757,7 +817,8 @@ pub fn load_checkpoint(target: &str) -> Result<Option<Checkpoint>> {
     // Read and parse the checkpoint
     let mut reader = BufReader::new(file);
     let mut json = String::new();
-    reader.read_to_string(&mut json)
+    reader
+        .read_to_string(&mut json)
         .with_context(|| format!("Failed to read checkpoint: {}", path.display()))?;
 
     let mut checkpoint: Checkpoint = serde_json::from_str(&json)
@@ -803,11 +864,15 @@ pub fn delete_checkpoint(target: &str) -> Result<()> {
     };
 
     // BUG-SEC-001 FIX: Validate on OPENED handle (not path)
-    let metadata = file.metadata()
+    let metadata = file
+        .metadata()
         .with_context(|| format!("Failed to get metadata for checkpoint: {}", path.display()))?;
 
     if !metadata.file_type().is_file() {
-        anyhow::bail!("Security violation: checkpoint path is not a regular file: {}", path.display());
+        anyhow::bail!(
+            "Security violation: checkpoint path is not a regular file: {}",
+            path.display()
+        );
     }
 
     // Sprint 5 (S5.8): Unix-only ownership check.
@@ -815,7 +880,10 @@ pub fn delete_checkpoint(target: &str) -> Result<()> {
     {
         let current_uid = unsafe { libc::getuid() };
         if metadata.uid() != current_uid {
-            anyhow::bail!("Security violation: checkpoint file not owned by current user: {}", path.display());
+            anyhow::bail!(
+                "Security violation: checkpoint file not owned by current user: {}",
+                path.display()
+            );
         }
     }
 
@@ -885,7 +953,12 @@ pub fn cleanup_old_checkpoints() -> Result<usize> {
 
         // Check age
         let should_delete = if let Ok(modified) = metadata.modified() {
-            let age_secs = now.saturating_sub(modified.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs());
+            let age_secs = now.saturating_sub(
+                modified
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+            );
             age_secs > MAX_CHECKPOINT_AGE_SECS
         } else {
             false
@@ -914,12 +987,8 @@ pub fn verify_config_fingerprint(
     entropy_threshold: f64,
     max_blob_size: usize,
 ) -> Result<bool> {
-    let current_fingerprint = compute_config_fingerprint(
-        fuzz,
-        min_confidence,
-        entropy_threshold,
-        max_blob_size,
-    );
+    let current_fingerprint =
+        compute_config_fingerprint(fuzz, min_confidence, entropy_threshold, max_blob_size);
 
     Ok(checkpoint.config_fingerprint == current_fingerprint)
 }
@@ -1196,7 +1265,8 @@ mod tests {
         // Verify 0600 (rw-------)
         // Note: mode includes file type bits, so we check the permission bits
         assert_eq!(
-            mode & 0o777, 0o600,
+            mode & 0o777,
+            0o600,
             "Checkpoint file should have 0600 permissions (owner rw only)"
         );
 
@@ -1219,7 +1289,10 @@ mod tests {
         // Test 5a: Loading non-existent checkpoint returns None (not error)
         let result = load_checkpoint("https://nonexistent.example.com");
         assert!(result.is_ok(), "Loading non-existent should not error");
-        assert!(result.unwrap().is_none(), "Should return None for non-existent");
+        assert!(
+            result.unwrap().is_none(),
+            "Should return None for non-existent"
+        );
 
         // Test 5b: Saving with invalid directory should fail gracefully
         // Save a valid checkpoint first
@@ -1425,9 +1498,15 @@ mod tests {
         let fp1 = compute_config_fingerprint(true, 45, 4.5, 4);
         let fp2 = compute_config_fingerprint(true, 45, 4.5, 4);
         let fp3 = compute_config_fingerprint(false, 45, 4.5, 4);
+        let normal_policy = compute_config_fingerprint_with_policy(true, 45, 4.5, 4, false);
+        let exhaustive_policy = compute_config_fingerprint_with_policy(true, 45, 4.5, 4, true);
+        let exhaustive_policy_again =
+            compute_config_fingerprint_with_policy(true, 45, 4.5, 4, true);
 
         assert_eq!(fp1, fp2);
         assert_ne!(fp1, fp3);
+        assert_ne!(normal_policy, exhaustive_policy);
+        assert_eq!(exhaustive_policy, exhaustive_policy_again);
     }
 
     #[test]
@@ -1496,7 +1575,10 @@ mod tests {
         // positive value. The point of the helper is not to change the value but
         // to never panic — regression asserts here.
         let ts = safe_now_secs();
-        assert!(ts > 1_600_000_000, "expected recent epoch seconds, got {ts}");
+        assert!(
+            ts > 1_600_000_000,
+            "expected recent epoch seconds, got {ts}"
+        );
     }
 
     #[test]
@@ -1504,8 +1586,13 @@ mod tests {
         let secs = safe_now_secs();
         let nanos = safe_now_nanos();
         // nanos should be at least secs * 1e9 in the same reference frame.
-        assert!(nanos as u64 >= secs.saturating_mul(1_000_000_000).saturating_sub(1_000_000_000),
-            "nanos vs secs skew unexpectedly large");
+        assert!(
+            nanos as u64
+                >= secs
+                    .saturating_mul(1_000_000_000)
+                    .saturating_sub(1_000_000_000),
+            "nanos vs secs skew unexpectedly large"
+        );
     }
 
     #[test]
@@ -1515,7 +1602,8 @@ mod tests {
         //
         // We can't easily backdate mtime without an extra dep, so we assert the
         // KEEP direction: fresh files must NOT be removed.
-        let dir = std::env::temp_dir().join(format!("gitrecon_ckpt_sweep_test_{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("gitrecon_ckpt_sweep_test_{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
 
@@ -1526,7 +1614,10 @@ mod tests {
 
         sweep_orphan_tmp_files(&dir);
 
-        assert!(fresh.exists(), "fresh .tmp file (< 5 min old) must survive sweep");
+        assert!(
+            fresh.exists(),
+            "fresh .tmp file (< 5 min old) must survive sweep"
+        );
         assert!(unrelated.exists(), "non-.tmp files must never be swept");
 
         let _ = fs::remove_dir_all(&dir);

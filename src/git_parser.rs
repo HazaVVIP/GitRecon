@@ -2,12 +2,12 @@
 //! Pure Rust parsers for all Git binary formats:
 //! Index (DIRC), loose objects, pack index (.idx), packed-refs, logs, config, HEAD.
 
-use std::collections::HashMap;
 use flate2::read::ZlibDecoder;
-use std::io::Read;
-use regex::Regex;
 use lazy_static::lazy_static;
-use sha1::{Sha1, Digest};
+use regex::Regex;
+use sha1::{Digest, Sha1};
+use std::collections::HashMap;
+use std::io::Read;
 
 // ════════════════════════════════════════════════
 // HELPER FUNCTIONS
@@ -115,7 +115,11 @@ impl TreeEntry {
     /// tree encoding omits the leading zero, but some third-party writers pad it.
     fn normalized_mode(&self) -> &str {
         let trimmed = self.mode.trim_start_matches('0');
-        if trimmed.is_empty() { "0" } else { trimmed }
+        if trimmed.is_empty() {
+            "0"
+        } else {
+            trimmed
+        }
     }
 }
 
@@ -149,28 +153,26 @@ impl IndexParser {
             None => return Err("Invalid index file: truncated entry count".into()),
         };
 
-        if !matches!(version, 2..=3) {
-            // Index v4 uses path-prefix compression: each entry's filename is preceded by a
-            // varint indicating how many bytes are shared with the previous entry's path.
-            // Without that decoder every entry after the first would have garbled filenames
-            // AND misaligned offsets — silently corrupting the SHA1→path map. Reject rather
-            // than pretend to support it. Callers can ask the source repo to downgrade with
-            // `git update-index --index-version=3`.
-            return Err(format!(
-                "Unsupported index version: {version} (v4 path-prefix compression not implemented — \
-                 downgrade with `git update-index --index-version=3` on source repo)"
-            ));
+        if !matches!(version, 2..=4) {
+            return Err(format!("Unsupported index version: {version}"));
         }
 
         let mut entries = Vec::new();
         let mut offset = 12usize;
+        let mut previous_name = String::new();
 
         for _ in 0..n {
             if offset + 62 > data.len() {
                 break;
             }
-            match Self::parse_entry(data, offset, version) {
+            let parsed = if version == 4 {
+                Self::parse_entry_v4(data, offset, &previous_name)
+            } else {
+                Self::parse_entry(data, offset, version)
+            };
+            match parsed {
                 Some((entry, next)) => {
+                    previous_name = entry.filename.clone();
                     entries.push(entry);
                     offset = next;
                 }
@@ -179,6 +181,72 @@ impl IndexParser {
         }
 
         Ok(entries)
+    }
+
+    /// Parse a Git index v4 entry. Unlike v2/v3, v4 stores no per-entry padding;
+    /// the pathname is encoded as a varint prefix-strip count followed by a NUL-terminated
+    /// suffix relative to the previous entry's pathname.
+    fn parse_entry_v4(
+        data: &[u8],
+        offset: usize,
+        previous_name: &str,
+    ) -> Option<(IndexEntry, usize)> {
+        if offset.checked_add(62)? > data.len() {
+            return None;
+        }
+        let mode = u32::from_be_bytes(data.get(offset + 24..offset + 28)?.try_into().ok()?);
+        let size = u32::from_be_bytes(data.get(offset + 36..offset + 40)?.try_into().ok()?);
+        let sha1 = hex::encode(data.get(offset + 40..offset + 60)?);
+        let flags = u16::from_be_bytes(data.get(offset + 60..offset + 62)?.try_into().ok()?);
+        let extended = (flags >> 14) & 1 == 1;
+        let extra = if extended { 2 } else { 0 };
+        let mut cursor = offset.checked_add(62)?.checked_add(extra)?;
+
+        let mut strip_len = 0usize;
+        loop {
+            let byte = *data.get(cursor)?;
+            cursor = cursor.checked_add(1)?;
+            strip_len = strip_len
+                .checked_shl(7)?
+                .checked_add((byte & 0x7f) as usize)?;
+            if byte & 0x80 == 0 {
+                break;
+            }
+            if strip_len > previous_name.len() {
+                return None;
+            }
+        }
+        if strip_len > previous_name.len() {
+            return None;
+        }
+        let suffix_end = data.get(cursor..)?.iter().position(|&b| b == 0)?;
+        let suffix = std::str::from_utf8(data.get(cursor..cursor + suffix_end)?).ok()?;
+        let filename = format!(
+            "{}{}",
+            &previous_name[..previous_name.len() - strip_len],
+            suffix
+        );
+        let next = cursor.checked_add(suffix_end)?.checked_add(1)?;
+        if filename.contains("..") || filename.starts_with('/') {
+            return Some((
+                IndexEntry {
+                    sha1: String::new(),
+                    filename: String::new(),
+                    mode: 0,
+                    file_size: 0,
+                },
+                next,
+            ));
+        }
+        Some((
+            IndexEntry {
+                sha1,
+                filename,
+                mode,
+                file_size: size,
+            },
+            next,
+        ))
     }
 
     fn parse_entry(data: &[u8], offset: usize, version: u32) -> Option<(IndexEntry, usize)> {
@@ -209,15 +277,22 @@ impl IndexParser {
         let name_start = offset.checked_add(62).and_then(|v| v.checked_add(extra))?;
 
         let (raw_name, end) = if name_len < 0xFFF {
-            if name_start.checked_add(name_len).is_none_or(|v| v > data.len()) {
+            if name_start
+                .checked_add(name_len)
+                .is_none_or(|v| v > data.len())
+            {
                 return None;
             }
-            let name_end = name_start.checked_add(name_len).and_then(|v| v.checked_add(1))?;
+            let name_end = name_start
+                .checked_add(name_len)
+                .and_then(|v| v.checked_add(1))?;
             (data.get(name_start..name_start + name_len)?, name_end)
         } else {
             // Safe nul search with get()
             let nul_offset = data.get(name_start..)?.iter().position(|&b| b == 0)?;
-            let nul_absolute = name_start.checked_add(nul_offset).and_then(|v| v.checked_add(1))?;
+            let nul_absolute = name_start
+                .checked_add(nul_offset)
+                .and_then(|v| v.checked_add(1))?;
             let raw_name = data.get(name_start..name_start + nul_offset)?;
             (raw_name, nul_absolute)
         };
@@ -237,12 +312,25 @@ impl IndexParser {
         // Security: reject path traversal
         if filename.contains("..") || filename.starts_with('/') {
             return Some((
-                IndexEntry { sha1: String::new(), filename: String::new(), mode: 0, file_size: 0 },
+                IndexEntry {
+                    sha1: String::new(),
+                    filename: String::new(),
+                    mode: 0,
+                    file_size: 0,
+                },
                 padded,
             ));
         }
 
-        Some((IndexEntry { sha1, filename, mode, file_size: size }, padded))
+        Some((
+            IndexEntry {
+                sha1,
+                filename,
+                mode,
+                file_size: size,
+            },
+            padded,
+        ))
     }
 }
 
@@ -450,7 +538,11 @@ impl ObjectParser {
         if !is_valid_sha1(&target) {
             return None;
         }
-        Some(TagInfo { target, target_type, tag_name })
+        Some(TagInfo {
+            target,
+            target_type,
+            tag_name,
+        })
     }
 
     pub fn parse_tree(&self, obj: &GitObject) -> Vec<TreeEntry> {
@@ -691,13 +783,19 @@ impl GitConfigParser {
         result
     }
 
-    pub fn remote_urls(&self, cfg: &HashMap<String, HashMap<String, String>>) -> Vec<HashMap<String, String>> {
+    pub fn remote_urls(
+        &self,
+        cfg: &HashMap<String, HashMap<String, String>>,
+    ) -> Vec<HashMap<String, String>> {
         let mut out = Vec::new();
         for (sec, data) in cfg {
             if sec.starts_with("remote.") {
                 if let Some(url) = data.get("url") {
                     let mut m = HashMap::new();
-                    m.insert("remote".into(), sec.split_once('.').map(|x| x.1).unwrap_or("").to_string());
+                    m.insert(
+                        "remote".into(),
+                        sec.split_once('.').map(|x| x.1).unwrap_or("").to_string(),
+                    );
                     m.insert("url".into(), url.clone());
                     out.push(m);
                 }
@@ -817,7 +915,8 @@ mod tests {
     }
 
     // ── TreeWalker tests ─────────────────────────────────────────────────────
-    // TODO: Re-enable when TreeWalker is implemented
+    // Legacy TreeWalker sketches are retained below only as historical context;
+    // active coverage targets the implemented ObjectParser::parse_tree API.
     /*
     #[test]
     fn test_tree_walker_traverse_sync_with_blob() {
@@ -862,6 +961,40 @@ mod tests {
     */
 
     #[test]
+    fn parse_tree_extracts_blob_entry() {
+        let mut data = b"100644 README.md\0".to_vec();
+        data.extend_from_slice(&[0x11; 20]);
+        let obj = GitObject {
+            sha1: "a".repeat(40),
+            obj_type: "tree".to_string(),
+            size: data.len(),
+            data,
+        };
+        let entries = ObjectParser.parse_tree(&obj);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].mode, "100644");
+        assert_eq!(entries[0].name, "README.md");
+        assert_eq!(entries[0].sha1, "11".repeat(20));
+    }
+
+    #[test]
+    fn parse_tree_preserves_nested_tree_entry() {
+        let mut data = b"40000 src\0".to_vec();
+        data.extend_from_slice(&[0x22; 20]);
+        let obj = GitObject {
+            sha1: "b".repeat(40),
+            obj_type: "tree".to_string(),
+            size: data.len(),
+            data,
+        };
+        let entries = ObjectParser.parse_tree(&obj);
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].is_tree());
+        assert_eq!(entries[0].name, "src");
+        assert_eq!(entries[0].sha1, "22".repeat(20));
+    }
+
+    #[test]
     fn test_is_valid_sha1() {
         assert!(is_valid_sha1("a3b4c5d6e7f8a3b4c5d6e7f8a3b4c5d6e7f8a3b4"));
         assert!(is_valid_sha1("0000000000000000000000000000000000000000"));
@@ -880,12 +1013,19 @@ mod tests {
         let refs = parser.parse(text);
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].ref_name, "refs/heads/main");
-        assert_eq!(refs[0].peeled.as_deref(), Some("b3b4c5d6e7f8a3b4c5d6e7f8a3b4c5d6e7f8a3b4"));
+        assert_eq!(
+            refs[0].peeled.as_deref(),
+            Some("b3b4c5d6e7f8a3b4c5d6e7f8a3b4c5d6e7f8a3b4")
+        );
     }
 
     // ── Sprint 1 — TreeEntry mode classification ─────────────────────────────
     fn te(mode: &str) -> TreeEntry {
-        TreeEntry { mode: mode.to_string(), name: "x".into(), sha1: "a".repeat(40) }
+        TreeEntry {
+            mode: mode.to_string(),
+            name: "x".into(),
+            sha1: "a".repeat(40),
+        }
     }
 
     #[test]
@@ -930,18 +1070,41 @@ mod tests {
         assert!(!te("160000").is_tree());
     }
 
-    // ── Sprint 1 — IndexParser version guard ─────────────────────────────────
+    // ── IndexParser version coverage ──────────────────────────────────────────
     #[test]
-    fn index_parser_rejects_v4_with_actionable_error() {
-        // Craft a minimal DIRC v4 header. Parser must refuse it — v4 uses path-prefix
-        // compression that would corrupt every entry past the first.
-        let mut data = Vec::from(b"DIRC" as &[u8]);
-        data.extend_from_slice(&4u32.to_be_bytes()); // version = 4
-        data.extend_from_slice(&0u32.to_be_bytes()); // entry count = 0
+    fn index_parser_decodes_v4_path_prefix_compression() {
+        fn entry(sha: u8, path: &[u8], strip: u8) -> Vec<u8> {
+            let mut raw = vec![0u8; 62];
+            raw[24..28].copy_from_slice(&0o100644u32.to_be_bytes());
+            raw[36..40].copy_from_slice(&1u32.to_be_bytes());
+            raw[40..60].fill(sha);
+            raw.extend_from_slice(&[strip]);
+            raw.extend_from_slice(path);
+            raw.push(0);
+            raw
+        }
 
-        let err = IndexParser.parse(&data).expect_err("v4 must be rejected");
-        assert!(err.contains("Unsupported index version: 4"), "unexpected message: {err}");
-        assert!(err.contains("index-version=3"), "message should hint at the downgrade command: {err}");
+        let mut data = Vec::from(b"DIRC" as &[u8]);
+        data.extend_from_slice(&4u32.to_be_bytes());
+        data.extend_from_slice(&2u32.to_be_bytes());
+        data.extend(entry(0x11, b"src/a.txt", 0));
+        data.extend(entry(0x22, b"b.txt", 5)); // strip "src/a"; retain "src/"
+        data.extend_from_slice(&[0u8; 20]); // checksum is not validated by IndexParser
+
+        let entries = IndexParser.parse(&data).expect("v4 fixture must parse");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].filename, "src/a.txt");
+        assert_eq!(entries[0].sha1, "11".repeat(20));
+        assert_eq!(entries[1].filename, "src/b.txt");
+        assert_eq!(entries[1].sha1, "22".repeat(20));
+    }
+
+    #[test]
+    fn index_parser_rejects_unsupported_version() {
+        let mut data = Vec::from(b"DIRC" as &[u8]);
+        data.extend_from_slice(&1u32.to_be_bytes());
+        data.extend_from_slice(&0u32.to_be_bytes());
+        assert!(IndexParser.parse(&data).is_err());
     }
 
     #[test]
@@ -985,7 +1148,9 @@ mod tests {
     #[test]
     fn object_parser_accepts_valid_blob() {
         let (compressed, sha1) = encode_object("blob", b"hello world");
-        let obj = ObjectParser.parse(&compressed, &sha1).expect("valid blob must parse");
+        let obj = ObjectParser
+            .parse(&compressed, &sha1)
+            .expect("valid blob must parse");
         assert_eq!(obj.obj_type, "blob");
         assert_eq!(obj.data, b"hello world");
     }
@@ -995,8 +1160,10 @@ mod tests {
         // S3.3: content whose canonical SHA1 differs from `expected` must be refused.
         let (compressed, _real_sha1) = encode_object("blob", b"attacker payload");
         let fake_sha = "0".repeat(40);
-        assert!(ObjectParser.parse(&compressed, &fake_sha).is_none(),
-            "MITM-swapped content must fail hash verification");
+        assert!(
+            ObjectParser.parse(&compressed, &fake_sha).is_none(),
+            "MITM-swapped content must fail hash verification"
+        );
     }
 
     #[test]
@@ -1007,13 +1174,18 @@ mod tests {
         // Ensure the SHA1 CHECK isn't the reason we fail — pass `verify_sha1=false`.
         let compressed = deflate(&raw);
         let sha = "a".repeat(40);
-        assert!(ObjectParser.parse_with_limit(&compressed, &sha, 4096, false).is_none(),
-            "header size mismatch must be refused even with SHA1 check off");
+        assert!(
+            ObjectParser
+                .parse_with_limit(&compressed, &sha, 4096, false)
+                .is_none(),
+            "header size mismatch must be refused even with SHA1 check off"
+        );
 
         // Also verify that WITH a correctly declared size (12), we accept.
         raw = b"blob 4\x00AAAA".to_vec();
         let compressed = deflate(&raw);
-        let obj = ObjectParser.parse_with_limit(&compressed, &sha, 4096, false)
+        let obj = ObjectParser
+            .parse_with_limit(&compressed, &sha, 4096, false)
             .expect("size-correct payload must parse");
         assert_eq!(obj.data, b"AAAA");
     }
@@ -1029,12 +1201,18 @@ mod tests {
 
         // With small cap: refuse.
         let sha = "a".repeat(40);
-        assert!(ObjectParser.parse_with_limit(&compressed, &sha, 1024, false).is_none(),
-            "inflated size > max_output must be refused");
+        assert!(
+            ObjectParser
+                .parse_with_limit(&compressed, &sha, 1024, false)
+                .is_none(),
+            "inflated size > max_output must be refused"
+        );
 
         // With generous cap: accepts (size validation still passes since we
         // declared the correct size in the header).
-        assert!(ObjectParser.parse_with_limit(&compressed, &sha, 8 * 1024 * 1024, false).is_some());
+        assert!(ObjectParser
+            .parse_with_limit(&compressed, &sha, 8 * 1024 * 1024, false)
+            .is_some());
     }
 
     #[test]

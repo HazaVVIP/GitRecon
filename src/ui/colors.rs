@@ -3,8 +3,8 @@
 //! Terminal color definitions and formatting utilities for consistent theming.
 //! Includes severity, confidence, and risk score coloring functions.
 
+use colored::{ColoredString, Colorize};
 use std::fmt;
-use colored::{Colorize, ColoredString};
 
 /// ANSI color codes for terminal output
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -212,10 +212,10 @@ impl ColorScheme {
     pub fn severity(sev: &str) -> ColoredString {
         match sev {
             "CRITICAL" => sev.red().bold(),
-            "HIGH"     => sev.yellow().bold(),
-            "MEDIUM"   => sev.bright_yellow(),
-            "LOW"      => sev.cyan(),
-            _          => sev.normal(),
+            "HIGH" => sev.yellow().bold(),
+            "MEDIUM" => sev.bright_yellow(),
+            "LOW" => sev.cyan(),
+            _ => sev.normal(),
         }
     }
 
@@ -224,10 +224,10 @@ impl ColorScheme {
     pub fn confidence(label: &str, text: &str) -> ColoredString {
         match label {
             "CONFIRMED" => text.red().bold(),
-            "HIGH"      => text.yellow().bold(),
-            "MEDIUM"    => text.bright_yellow(),
-            "LOW"       => text.cyan(),
-            _           => text.dimmed(),
+            "HIGH" => text.yellow().bold(),
+            "MEDIUM" => text.bright_yellow(),
+            "LOW" => text.cyan(),
+            _ => text.dimmed(),
         }
     }
 
@@ -238,15 +238,20 @@ impl ColorScheme {
     /// - `text`: Text to color (typically the score and label)
     #[allow(dead_code)]
     pub fn risk(score: u32, text: &str) -> ColoredString {
-        let sev = if score >= 70      { "CRITICAL" }
-                  else if score >= 40 { "HIGH" }
-                  else if score >= 15 { "MEDIUM" }
-                  else                { "CLEAR" };
+        let sev = if score >= 70 {
+            "CRITICAL"
+        } else if score >= 40 {
+            "HIGH"
+        } else if score >= 15 {
+            "MEDIUM"
+        } else {
+            "CLEAR"
+        };
         match sev {
             "CRITICAL" => text.red().bold(),
-            "HIGH"     => text.yellow().bold(),
-            "MEDIUM"   => text.bright_yellow(),
-            _          => text.green(),
+            "HIGH" => text.yellow().bold(),
+            "MEDIUM" => text.bright_yellow(),
+            _ => text.green(),
         }
     }
 
@@ -255,20 +260,25 @@ impl ColorScheme {
     pub fn severity_color(sev: &str) -> Color {
         match sev {
             "CRITICAL" => Color::Red,
-            "HIGH"     => Color::Yellow,
-            "MEDIUM"   => Color::BrightYellow,
-            "LOW"      => Color::Cyan,
-            _          => Color::White,
+            "HIGH" => Color::Yellow,
+            "MEDIUM" => Color::BrightYellow,
+            "LOW" => Color::Cyan,
+            _ => Color::White,
         }
     }
 
     /// Get the color for a risk score as a Color enum
     #[allow(dead_code)]
     pub fn risk_color(score: u32) -> Color {
-        if score >= 70      { Color::Red }
-        else if score >= 40 { Color::Yellow }
-        else if score >= 15 { Color::BrightYellow }
-        else                { Color::Green }
+        if score >= 70 {
+            Color::Red
+        } else if score >= 40 {
+            Color::Yellow
+        } else if score >= 15 {
+            Color::BrightYellow
+        } else {
+            Color::Green
+        }
     }
 
     /// Get the color for a confidence label as a Color enum
@@ -276,10 +286,10 @@ impl ColorScheme {
     pub fn confidence_color(label: &str) -> Color {
         match label {
             "CONFIRMED" => Color::Red,
-            "HIGH"      => Color::Yellow,
-            "MEDIUM"    => Color::BrightYellow,
-            "LOW"       => Color::Cyan,
-            _           => Color::BrightBlack,
+            "HIGH" => Color::Yellow,
+            "MEDIUM" => Color::BrightYellow,
+            "LOW" => Color::Cyan,
+            _ => Color::BrightBlack,
         }
     }
 }

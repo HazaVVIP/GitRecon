@@ -74,17 +74,15 @@ fn get_winsize() -> Option<usize> {
 
         // Try to get the window size from stdout
         let stdout_fd = std::io::stdout().as_raw_fd();
-        if ioctl(stdout_fd, TIOCGWINSZ, &mut winsize) == 0
-            && winsize.ws_col > 0 {
-                return Some(winsize.ws_col as usize);
-            }
+        if ioctl(stdout_fd, TIOCGWINSZ, &mut winsize) == 0 && winsize.ws_col > 0 {
+            return Some(winsize.ws_col as usize);
+        }
 
         // Try stderr as fallback
         let stderr_fd = std::io::stderr().as_raw_fd();
-        if ioctl(stderr_fd, TIOCGWINSZ, &mut winsize) == 0
-            && winsize.ws_col > 0 {
-                return Some(winsize.ws_col as usize);
-            }
+        if ioctl(stderr_fd, TIOCGWINSZ, &mut winsize) == 0 && winsize.ws_col > 0 {
+            return Some(winsize.ws_col as usize);
+        }
 
         None
     }
@@ -105,6 +103,9 @@ fn get_winsize() -> Option<usize> {
 /// A width value clamped between `MIN_BOX_WIDTH` and `MAX_BOX_WIDTH`,
 /// but never exceeding the terminal width.
 pub fn calculate_box_width(content_width: usize, terminal_width: usize) -> usize {
+    if terminal_width == 0 {
+        return MIN_BOX_WIDTH;
+    }
     let max_allowed = terminal_width.min(MAX_BOX_WIDTH);
     let min_required = MIN_BOX_WIDTH.min(max_allowed);
 
@@ -204,6 +205,6 @@ mod tests {
         // but we can ensure the function doesn't panic
         let has_unicode = supports_unicode();
         // Result is always a boolean
-        assert!(has_unicode == true || has_unicode == false);
+        assert!(has_unicode || !has_unicode);
     }
 }

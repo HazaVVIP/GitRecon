@@ -1,2 +1,19 @@
 /target/
 gitrecon_output/
+
+# Local credentials and environment files
+.env
+.env.*
+!.env.example
+
+# Generated reports and runtime state
+*.log
+*.tmp
+*.checkpoint
+*.checkpoint.json
+
+# Operating-system and editor metadata
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

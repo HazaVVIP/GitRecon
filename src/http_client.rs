@@ -3,19 +3,18 @@
 //! PERF-002: Smart retry per status code with configurable strategies.
 //! PERF-004: Token bucket rate limiting with metrics tracking.
 
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
 use futures::StreamExt;
 use rand::seq::IndexedRandom;
 use rand::Rng;
 use reqwest::{Client, ClientBuilder, Proxy};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::Mutex as TokioMutex;
 use tokio::time::sleep;
 
 // PERF-004: Use the dedicated rate limiter module
-use crate::rate_limiter::{TokenBucket, RateLimitMetrics};
+use crate::rate_limiter::TokenBucket;
 
 // E-4: Expanded USER_AGENTS to 25+ entries
 const USER_AGENTS: &[&str] = &[
@@ -105,7 +104,10 @@ impl std::str::FromStr for RetryStrategy {
             "aggressive" => Ok(Self::Aggressive),
             "standard" => Ok(Self::Standard),
             "conservative" => Ok(Self::Conservative),
-            _ => Err(format!("Invalid retry strategy: {}. Valid options: aggressive, standard, conservative", s)),
+            _ => Err(format!(
+                "Invalid retry strategy: {}. Valid options: aggressive, standard, conservative",
+                s
+            )),
         }
     }
 }
@@ -140,14 +142,13 @@ fn classify_tls_error(err: &reqwest::Error) -> Option<TlsErrorType> {
             || err_str.contains("invalid")
             || err_str.contains("verify")
             || err_str.contains("hostname")
-            || err_str.contains("authority") {
+            || err_str.contains("authority")
+        {
             return Some(TlsErrorType::CertInvalid);
         }
 
         // Other TLS errors (limited retries)
-        if err_str.contains("tls")
-            || err_str.contains("ssl")
-            || err_str.contains("handshake") {
+        if err_str.contains("tls") || err_str.contains("ssl") || err_str.contains("handshake") {
             return Some(TlsErrorType::Other);
         }
     }
@@ -201,22 +202,6 @@ impl RetryMetrics {
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
     }
-
-    /// Get summary as a map for reporting
-    pub fn summary(&self) -> HashMap<String, usize> {
-        let mut map = HashMap::new();
-        map.insert("404_no_retry".to_string(), self.retry_404.load(Ordering::Relaxed));
-        map.insert("403_no_retry".to_string(), self.retry_403.load(Ordering::Relaxed));
-        map.insert("429_retried".to_string(), self.retry_429.load(Ordering::Relaxed));
-        map.insert("500_retried".to_string(), self.retry_500.load(Ordering::Relaxed));
-        map.insert("502_retried".to_string(), self.retry_502.load(Ordering::Relaxed));
-        map.insert("503_retried".to_string(), self.retry_503.load(Ordering::Relaxed));
-        map.insert("504_retried".to_string(), self.retry_504.load(Ordering::Relaxed));
-        map.insert("network_errors".to_string(), self.network_errors.load(Ordering::Relaxed));
-        map.insert("success".to_string(), self.success.load(Ordering::Relaxed));
-        map.insert("failed".to_string(), self.failed.load(Ordering::Relaxed));
-        map
-    }
 }
 
 // PERF-004: Old TokenBucket implementation removed - now using rate_limiter module
@@ -251,7 +236,7 @@ impl Default for HttpConfig {
             delay: Duration::ZERO,
             jitter: Duration::ZERO,
             proxy: None,
-            verify_ssl: true,  // BUG-HTTP-003: Default to SECURE (SSL verification enabled)
+            verify_ssl: true, // BUG-HTTP-003: Default to SECURE (SSL verification enabled)
             custom_ua: None,
             extra_headers: vec![],
             max_size: 100 * 1024 * 1024,
@@ -302,8 +287,6 @@ pub struct HttpClient {
     proxy_index: Arc<AtomicUsize>,
     /// PERF-002: Retry metrics tracking
     pub retry_metrics: Arc<RetryMetrics>,
-    /// PERF-004: Rate limit metrics tracking
-    pub rate_limit_metrics: Option<Arc<RateLimitMetrics>>,
 }
 
 impl HttpClient {
@@ -344,39 +327,45 @@ impl HttpClient {
         }
 
         // PERF-004: Create token bucket for rate limiting
-        let token_bucket = cfg.rate_limit_rps.map(|rps| {
-            Arc::new(TokenBucket::new(rps))
-        });
-
-        // PERF-004: Extract rate limit metrics from the token bucket
-        let rate_limit_metrics = token_bucket.as_ref().map(|tb| tb.metrics());
+        let token_bucket = cfg
+            .rate_limit_rps
+            .map(|rps| Arc::new(TokenBucket::new(rps)));
 
         Ok(Self {
             client,
             cfg,
-            latency_window: Arc::new(TokioMutex::new(std::collections::VecDeque::with_capacity(20))),
+            latency_window: Arc::new(TokioMutex::new(std::collections::VecDeque::with_capacity(
+                20,
+            ))),
             token_bucket,
             proxy_clients,
             proxy_index: Arc::new(AtomicUsize::new(0)),
             retry_metrics: RetryMetrics::new(),
-            rate_limit_metrics,
         })
     }
 
     /// PERF-002: Parse Retry-After header for 429 responses.
     /// Supports both delay-seconds and HTTP-date formats.
-    fn parse_retry_after(headers: &std::collections::HashMap<String, String>, strategy: RetryStrategy) -> Duration {
+    fn parse_retry_after(
+        headers: &std::collections::HashMap<String, String>,
+        strategy: RetryStrategy,
+    ) -> Duration {
         headers
             .get("retry-after")
             .and_then(|v| {
                 // Try parsing as seconds first
                 if let Ok(secs) = v.parse::<u64>() {
-                    return Some(Duration::from_secs(secs.min(strategy.max_backoff().as_secs())));
+                    return Some(Duration::from_secs(
+                        secs.min(strategy.max_backoff().as_secs()),
+                    ));
                 }
                 // Try parsing as HTTP-date (e.g., "Wed, 21 Oct 2015 07:28:00 GMT")
                 if let Ok(dt) = chrono::DateTime::parse_from_rfc2822(v) {
-                    let delay = (dt.timestamp() as u64).saturating_sub(chrono::Utc::now().timestamp() as u64);
-                    return Some(Duration::from_secs(delay.min(strategy.max_backoff().as_secs())));
+                    let delay = (dt.timestamp() as u64)
+                        .saturating_sub(chrono::Utc::now().timestamp() as u64);
+                    return Some(Duration::from_secs(
+                        delay.min(strategy.max_backoff().as_secs()),
+                    ));
                 }
                 None
             })
@@ -413,12 +402,18 @@ impl HttpClient {
             429 => true,
             // PERF-002: 500/502/503/504 - retry based on strategy
             500 | 502 | 503 | 504 => {
-                matches!(strategy, RetryStrategy::Standard | RetryStrategy::Aggressive)
+                matches!(
+                    strategy,
+                    RetryStrategy::Standard | RetryStrategy::Aggressive
+                )
             }
             // Other 4xx errors - don't retry (client errors)
             400..=499 => false,
             // Other 5xx errors - retry with standard/aggressive strategy
-            500..=599 => matches!(strategy, RetryStrategy::Standard | RetryStrategy::Aggressive),
+            500..=599 => matches!(
+                strategy,
+                RetryStrategy::Standard | RetryStrategy::Aggressive
+            ),
             _ => false,
         }
     }
@@ -527,7 +522,10 @@ impl HttpClient {
                         }
                         // Other 5xx errors (excluding 500, 502-504 which are handled above): retry with aggressive strategy
                         501 | 505..=599 => {
-                            if matches!(strategy, RetryStrategy::Standard | RetryStrategy::Aggressive) {
+                            if matches!(
+                                strategy,
+                                RetryStrategy::Standard | RetryStrategy::Aggressive
+                            ) {
                                 self.retry_metrics.failed.fetch_add(1, Ordering::Relaxed);
                                 if attempt >= max_retries {
                                     return r;
@@ -548,7 +546,9 @@ impl HttpClient {
                     }
                 }
                 Err(e) => {
-                    self.retry_metrics.network_errors.fetch_add(1, Ordering::Relaxed);
+                    self.retry_metrics
+                        .network_errors
+                        .fetch_add(1, Ordering::Relaxed);
 
                     let last_err = e.to_string();
                     if let Some(status) = e.status() {
@@ -643,11 +643,18 @@ impl HttpClient {
         // E-4: UA pool selection
         let ua = if !self.cfg.ua_pool.is_empty() {
             let mut rng = rand::rng();
-            self.cfg.ua_pool.choose(&mut rng).map(|s| s.as_str()).unwrap_or(USER_AGENTS[0])
+            self.cfg
+                .ua_pool
+                .choose(&mut rng)
+                .map(|s| s.as_str())
+                .unwrap_or(USER_AGENTS[0])
         } else {
             self.cfg.custom_ua.as_deref().unwrap_or_else(|| {
                 let mut rng = rand::rng();
-                USER_AGENTS.choose(&mut rng).copied().unwrap_or(USER_AGENTS[0])
+                USER_AGENTS
+                    .choose(&mut rng)
+                    .copied()
+                    .unwrap_or(USER_AGENTS[0])
             })
         };
 
@@ -662,7 +669,7 @@ impl HttpClient {
                         } else {
                             None
                         }
-                    },
+                    }
                     Err(_) => None, // Skip latency tracking this round if lock is held
                 }
             };
@@ -705,7 +712,9 @@ impl HttpClient {
         // R-3: Update latency window (BUG-ERR-010: use try_lock to avoid deadlock)
         if self.cfg.adaptive_timeout {
             if let Ok(mut w) = self.latency_window.try_lock() {
-                if w.len() >= 20 { w.pop_front(); }
+                if w.len() >= 20 {
+                    w.pop_front();
+                }
                 w.push_back(elapsed_ms as u64);
             }
             // If lock is held, skip latency tracking this round
@@ -750,7 +759,8 @@ impl HttpClient {
                     headers,
                     elapsed_ms,
                     error: Some(format!(
-                        "response body exceeds max_size ({} > {})", cl, max_size
+                        "response body exceeds max_size ({} > {})",
+                        cl, max_size
                     )),
                 });
             }
@@ -759,7 +769,7 @@ impl HttpClient {
         let mut body_bytes: Vec<u8> = Vec::with_capacity(
             resp.content_length()
                 .map(|c| (c as usize).min(max_size))
-                .unwrap_or(8192)
+                .unwrap_or(8192),
         );
         let mut stream = resp.bytes_stream();
         while let Some(chunk) = stream.next().await {
@@ -776,7 +786,8 @@ impl HttpClient {
                     headers,
                     elapsed_ms,
                     error: Some(format!(
-                        "response body streamed past max_size ({} > {})", would_be, max_size
+                        "response body streamed past max_size ({} > {})",
+                        would_be, max_size
                     )),
                 });
             }
@@ -795,7 +806,12 @@ impl HttpClient {
 
     // O-4: POST method for webhook integration
     // BUG-HTTP-005 FIX: Added retry logic for POST requests
-    pub async fn post(&self, url: &str, body: &str, extra_headers: &[(String, String)]) -> Response {
+    pub async fn post(
+        &self,
+        url: &str,
+        body: &str,
+        extra_headers: &[(String, String)],
+    ) -> Response {
         // PERF-004: Apply rate limiting to POST requests as well
         if let Some(ref tb) = self.token_bucket {
             tb.acquire().await;
@@ -850,7 +866,9 @@ impl HttpClient {
                                 _ => unreachable!(),
                             };
 
-                            if attempt >= max_retries || !Self::should_retry_status(r.status, strategy) {
+                            if attempt >= max_retries
+                                || !Self::should_retry_status(r.status, strategy)
+                            {
                                 self.retry_metrics.failed.fetch_add(1, Ordering::Relaxed);
                                 return r;
                             }
@@ -871,7 +889,10 @@ impl HttpClient {
                         }
                         // Other 5xx errors (excluding 500, 502-504 which are handled above): retry with aggressive strategy
                         501 | 505..=599 => {
-                            if matches!(strategy, RetryStrategy::Standard | RetryStrategy::Aggressive) {
+                            if matches!(
+                                strategy,
+                                RetryStrategy::Standard | RetryStrategy::Aggressive
+                            ) {
                                 self.retry_metrics.failed.fetch_add(1, Ordering::Relaxed);
                                 if attempt >= max_retries {
                                     return r;
@@ -892,7 +913,9 @@ impl HttpClient {
                     }
                 }
                 Err(e) => {
-                    self.retry_metrics.network_errors.fetch_add(1, Ordering::Relaxed);
+                    self.retry_metrics
+                        .network_errors
+                        .fetch_add(1, Ordering::Relaxed);
 
                     let last_err = e.to_string();
                     if let Some(status) = e.status() {
@@ -984,15 +1007,27 @@ impl HttpClient {
     }
 
     /// BUG-HTTP-005: Helper method for POST requests
-    async fn do_post(&self, url: &str, body: &str, extra_headers: &[(String, String)]) -> Result<Response, reqwest::Error> {
+    async fn do_post(
+        &self,
+        url: &str,
+        body: &str,
+        extra_headers: &[(String, String)],
+    ) -> Result<Response, reqwest::Error> {
         // E-4: UA pool selection
         let ua = if !self.cfg.ua_pool.is_empty() {
             let mut rng = rand::rng();
-            self.cfg.ua_pool.choose(&mut rng).map(|s| s.as_str()).unwrap_or(USER_AGENTS[0])
+            self.cfg
+                .ua_pool
+                .choose(&mut rng)
+                .map(|s| s.as_str())
+                .unwrap_or(USER_AGENTS[0])
         } else {
             self.cfg.custom_ua.as_deref().unwrap_or_else(|| {
                 let mut rng = rand::rng();
-                USER_AGENTS.choose(&mut rng).copied().unwrap_or(USER_AGENTS[0])
+                USER_AGENTS
+                    .choose(&mut rng)
+                    .copied()
+                    .unwrap_or(USER_AGENTS[0])
             })
         };
 
@@ -1028,7 +1063,9 @@ impl HttpClient {
         // R-3: Update latency window (BUG-ERR-010: use try_lock to avoid deadlock)
         if self.cfg.adaptive_timeout {
             if let Ok(mut w) = self.latency_window.try_lock() {
-                if w.len() >= 20 { w.pop_front(); }
+                if w.len() >= 20 {
+                    w.pop_front();
+                }
                 w.push_back(elapsed_ms as u64);
             }
         }

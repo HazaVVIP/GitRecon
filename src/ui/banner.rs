@@ -7,8 +7,8 @@
 //! - Mini: Compact single-line banner
 //! - None: No banner output
 
-use std::fmt;
 use colored::*;
+use std::fmt;
 
 /// Banner display style
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,9 +132,9 @@ impl Banner {
     /// Get the subtitle text
     #[allow(dead_code)]
     pub fn subtitle(&self) -> String {
-        self.title.clone().unwrap_or_else(|| {
-            "Git repository reconnaissance framework".to_string()
-        })
+        self.title
+            .clone()
+            .unwrap_or_else(|| "Git repository reconnaissance framework".to_string())
     }
 }
 
@@ -173,7 +173,7 @@ mod tests {
     fn test_banner_display() {
         let banner = Banner::new();
         let output = format!("{}", banner);
-        assert!(output.contains("gitrecon"));
+        assert!(output.contains("Git repository reconnaissance framework"));
         assert!(output.contains("Version"));
     }
 

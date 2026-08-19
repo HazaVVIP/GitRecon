@@ -16,8 +16,8 @@
 //! outlived their creator.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use tokio::sync::OnceCell;
@@ -34,9 +34,7 @@ static CLEANUP_PATHS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 /// Returns the global flag that is set to true when shutdown is triggered.
 pub async fn init_global_cleanup() -> Arc<AtomicBool> {
     GLOBAL_CLEANUP_FLAG
-        .get_or_init(|| async {
-            Arc::new(AtomicBool::new(false))
-        })
+        .get_or_init(|| async { Arc::new(AtomicBool::new(false)) })
         .await
         .clone()
 }
@@ -65,11 +63,15 @@ pub fn cleanup_registered_paths() {
 /// PID, and modern OSes recycle PIDs quickly.
 pub fn sweep_orphan_temp_dirs(max_age: Duration) {
     let tmp = std::env::temp_dir();
-    let Ok(entries) = std::fs::read_dir(&tmp) else { return };
+    let Ok(entries) = std::fs::read_dir(&tmp) else {
+        return;
+    };
     let now = SystemTime::now();
 
     for entry in entries.flatten() {
-        let Ok(name) = entry.file_name().into_string() else { continue };
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
         // Match anything a GitRecon run would have created:
         //   gitrecon_token_scan_<pid>_<nanos>
         //   gitrecon_gitlab_scan_<pid>_<nanos>
@@ -79,9 +81,15 @@ pub fn sweep_orphan_temp_dirs(max_age: Duration) {
             continue;
         }
         let Ok(meta) = entry.metadata() else { continue };
-        if !meta.is_dir() { continue; }
+        if !meta.is_dir() {
+            continue;
+        }
         let Ok(mtime) = meta.modified() else { continue };
-        if now.duration_since(mtime).map(|d| d > max_age).unwrap_or(false) {
+        if now
+            .duration_since(mtime)
+            .map(|d| d > max_age)
+            .unwrap_or(false)
+        {
             let _ = std::fs::remove_dir_all(entry.path());
         }
     }
@@ -179,9 +187,7 @@ impl TempFileGuard {
     /// Create a new guard for the given file path.
     #[allow(dead_code)]
     pub fn new(path: PathBuf) -> Self {
-        Self {
-            path: Some(path),
-        }
+        Self { path: Some(path) }
     }
 
     /// Get the path being guarded.
@@ -220,10 +226,7 @@ pub mod atomic {
     ///
     /// # Errors
     /// Returns an error if the write or rename fails.
-    pub fn write_atomically<P: AsRef<Path>>(
-        path: P,
-        data: &[u8],
-    ) -> std::io::Result<()> {
+    pub fn write_atomically<P: AsRef<Path>>(path: P, data: &[u8]) -> std::io::Result<()> {
         let path = path.as_ref();
         let temp_path = path.with_extension("tmp");
 
@@ -245,10 +248,7 @@ pub mod atomic {
     /// # Errors
     /// Returns an error if the write or rename fails.
     #[allow(dead_code)]
-    pub fn write_string_atomically<P: AsRef<Path>>(
-        path: P,
-        data: &str,
-    ) -> std::io::Result<()> {
+    pub fn write_string_atomically<P: AsRef<Path>>(path: P, data: &str) -> std::io::Result<()> {
         write_atomically(path, data.as_bytes())
     }
 }
@@ -256,6 +256,8 @@ pub mod atomic {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    static CLEANUP_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_temp_dir_guard_cleanup() {
@@ -339,7 +341,9 @@ mod tests {
 
     #[test]
     fn temp_dir_guard_registers_and_deregisters_on_drop() {
-        let dir = std::env::temp_dir().join(format!("gitrecon_registry_test_{}", std::process::id()));
+        let _lock = CLEANUP_TEST_LOCK.lock().unwrap();
+        let dir =
+            std::env::temp_dir().join(format!("gitrecon_registry_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -347,7 +351,10 @@ mod tests {
             let _guard = TempDirGuard::new(dir.clone());
             // While guard alive, path is in registry.
             let registered = CLEANUP_PATHS.lock().unwrap();
-            assert!(registered.contains(&dir), "guard construction should register path");
+            assert!(
+                registered.contains(&dir),
+                "guard construction should register path"
+            );
         }
         // After Drop, path deregistered (so signal handler doesn't try to remove twice).
         let registered = CLEANUP_PATHS.lock().unwrap();
@@ -356,6 +363,7 @@ mod tests {
 
     #[test]
     fn cleanup_registered_paths_removes_all_tracked_dirs() {
+        let _lock = CLEANUP_TEST_LOCK.lock().unwrap();
         let dir_a = std::env::temp_dir().join(format!("gitrecon_sig_a_{}", std::process::id()));
         let dir_b = std::env::temp_dir().join(format!("gitrecon_sig_b_{}", std::process::id()));
         for d in [&dir_a, &dir_b] {
@@ -370,18 +378,21 @@ mod tests {
 
         assert!(!dir_a.exists(), "signal cleanup must remove {dir_a:?}");
         assert!(!dir_b.exists(), "signal cleanup must remove {dir_b:?}");
-        assert!(CLEANUP_PATHS.lock().unwrap().is_empty(), "registry drained after cleanup");
+        assert!(
+            CLEANUP_PATHS.lock().unwrap().is_empty(),
+            "registry drained after cleanup"
+        );
     }
 
     #[test]
     fn sweep_orphan_temp_dirs_removes_only_stale_gitrecon_workspaces() {
         // Create a fresh dir (should be kept) and a manually-aged dir (should be removed).
-        let fresh = std::env::temp_dir()
-            .join(format!("gitrecon_scan_fresh_{}_{}", std::process::id(), 42));
-        let stale = std::env::temp_dir()
-            .join(format!("gitrecon_scan_stale_{}_{}", std::process::id(), 43));
-        let unrelated = std::env::temp_dir()
-            .join(format!("not_gitrecon_{}_{}", std::process::id(), 44));
+        let fresh =
+            std::env::temp_dir().join(format!("gitrecon_scan_fresh_{}_{}", std::process::id(), 42));
+        let stale =
+            std::env::temp_dir().join(format!("gitrecon_scan_stale_{}_{}", std::process::id(), 43));
+        let unrelated =
+            std::env::temp_dir().join(format!("not_gitrecon_{}_{}", std::process::id(), 44));
         for d in [&fresh, &stale, &unrelated] {
             let _ = std::fs::remove_dir_all(d);
             std::fs::create_dir_all(d).unwrap();

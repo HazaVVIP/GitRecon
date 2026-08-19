@@ -48,7 +48,9 @@ impl AzureForgeClient {
                     .map(|ts| {
                         let reset = std::time::UNIX_EPOCH + Duration::from_secs(ts);
                         let now = std::time::SystemTime::now();
-                        reset.duration_since(now).unwrap_or(Duration::from_secs(3600))
+                        reset
+                            .duration_since(now)
+                            .unwrap_or(Duration::from_secs(3600))
                     })
                     .unwrap_or(Duration::from_secs(60));
 
@@ -65,12 +67,16 @@ impl AzureForgeClient {
         for attempt in 0..3u32 {
             let resp = self.client.get(url).await;
             if resp.status == 429 {
-                let wait_s = resp.headers.get("retry-after")
+                let wait_s = resp
+                    .headers
+                    .get("retry-after")
                     .and_then(|v| v.trim().parse::<u64>().ok())
-                    .unwrap_or(60).min(300);
+                    .unwrap_or(60)
+                    .min(300);
                 log::warn!(
                     "Azure DevOps rate-limited (HTTP 429); sleeping {}s before retry {}/3",
-                    wait_s, attempt + 1,
+                    wait_s,
+                    attempt + 1,
                 );
                 tokio::time::sleep(std::time::Duration::from_secs(wait_s)).await;
                 continue;
@@ -82,7 +88,10 @@ impl AzureForgeClient {
             self.update_rate_limit(&headers);
             return Ok(resp);
         }
-        anyhow::bail!("Rate limit exhausted after 3 retries for {}", crate::validation::redact_url(url))
+        anyhow::bail!(
+            "Rate limit exhausted after 3 retries for {}",
+            crate::validation::redact_url(url)
+        )
     }
 
     /// URL-encode a path for Azure DevOps API.
@@ -98,9 +107,7 @@ impl AzureForgeClient {
             }
         };
         path.split('/')
-            .map(|segment| {
-                segment.bytes().map(encode_byte).collect::<String>()
-            })
+            .map(|segment| segment.bytes().map(encode_byte).collect::<String>())
             .collect::<Vec<_>>()
             .join("/")
     }
@@ -188,14 +195,21 @@ impl Forge for AzureForgeClient {
                     let resp = self.get_with_rate_limit(&projects_url).await?;
 
                     if !resp.ok() {
-                        anyhow::bail!("GET {} returned HTTP {}", crate::validation::redact_url(&projects_url), resp.status);
+                        anyhow::bail!(
+                            "GET {} returned HTTP {}",
+                            crate::validation::redact_url(&projects_url),
+                            resp.status
+                        );
                     }
 
                     let json: serde_json::Value = serde_json::from_slice(&resp.body)?;
                     if let Some(arr) = json["value"].as_array() {
                         for project in arr {
                             if let Some(project_name) = project["name"].as_str() {
-                                if let Ok(project_repos) = self.list_org_project_repos(&org_api_base, project_name).await {
+                                if let Ok(project_repos) = self
+                                    .list_org_project_repos(&org_api_base, project_name)
+                                    .await
+                                {
                                     repos.extend(project_repos);
                                 }
                             }
@@ -300,20 +314,20 @@ impl Forge for AzureForgeClient {
     }
 
     fn rate_limit_remaining(&self) -> Option<(u32, Duration)> {
-        self.rate_limit_remaining
-            .lock()
-            .ok()
-            .and_then(|guard| guard.as_ref().map(|(remaining, reset)| {
+        self.rate_limit_remaining.lock().ok().and_then(|guard| {
+            guard.as_ref().map(|(remaining, reset)| {
                 (*remaining, reset.saturating_duration_since(Instant::now()))
-            }))
+            })
+        })
     }
 
     fn rate_limit_info(&self) -> Option<RateLimitInfo> {
-        self.rate_limit_remaining().map(|(remaining, reset_in)| RateLimitInfo {
-            remaining,
-            reset_in,
-            limit: Platform::AzureDevOps.default_rate_limit(),
-        })
+        self.rate_limit_remaining()
+            .map(|(remaining, reset_in)| RateLimitInfo {
+                remaining,
+                reset_in,
+                limit: Platform::AzureDevOps.default_rate_limit(),
+            })
     }
 
     fn platform(&self) -> Platform {
@@ -361,15 +375,16 @@ impl AzureForgeClient {
     async fn list_project_repos(&self, project: &str) -> anyhow::Result<Vec<Repository>> {
         let mut repos = Vec::new();
         let _encoded_project = Self::encode_path(project);
-        let url = format!(
-            "{}/_apis/git/repositories?api-version=7.0",
-            self.api_base
-        );
+        let url = format!("{}/_apis/git/repositories?api-version=7.0", self.api_base);
 
         let resp = self.get_with_rate_limit(&url).await?;
 
         if resp.status != 200 {
-            anyhow::bail!("GET {} returned HTTP {}", crate::validation::redact_url(&url), resp.status);
+            anyhow::bail!(
+                "GET {} returned HTTP {}",
+                crate::validation::redact_url(&url),
+                resp.status
+            );
         }
 
         let json: serde_json::Value = serde_json::from_slice(&resp.body)?;
@@ -397,17 +412,22 @@ impl AzureForgeClient {
     }
 
     /// List all repositories in a specific organization's project (for cloud).
-    async fn list_org_project_repos(&self, org_api_base: &str, project: &str) -> anyhow::Result<Vec<Repository>> {
+    async fn list_org_project_repos(
+        &self,
+        org_api_base: &str,
+        project: &str,
+    ) -> anyhow::Result<Vec<Repository>> {
         let mut repos = Vec::new();
-        let url = format!(
-            "{}/_apis/git/repositories?api-version=7.0",
-            org_api_base
-        );
+        let url = format!("{}/_apis/git/repositories?api-version=7.0", org_api_base);
 
         let resp = self.get_with_rate_limit(&url).await?;
 
         if resp.status != 200 {
-            anyhow::bail!("GET {} returned HTTP {}", crate::validation::redact_url(&url), resp.status);
+            anyhow::bail!(
+                "GET {} returned HTTP {}",
+                crate::validation::redact_url(&url),
+                resp.status
+            );
         }
 
         let json: serde_json::Value = serde_json::from_slice(&resp.body)?;
@@ -468,14 +488,22 @@ pub struct AzTreeEntry {
 /// Create a new [`HttpClient`] configured for Azure DevOps API calls.
 ///
 /// Azure DevOps uses Basic authentication with the PAT as the username.
-pub fn build_azure_client(mut base_cfg: HttpConfig, token: &str, azure_url: Option<&str>) -> anyhow::Result<(HttpClient, String)> {
+pub fn build_azure_client(
+    mut base_cfg: HttpConfig,
+    token: &str,
+    azure_url: Option<&str>,
+) -> anyhow::Result<(HttpClient, String)> {
     let api_base = azure_url.unwrap_or(DEFAULT_AZURE_API).to_string();
 
     // Azure DevOps uses Basic auth with PAT as username (empty password)
     use base64::Engine;
     let encoded = base64::engine::general_purpose::STANDARD.encode(format!("{}:", token));
-    base_cfg.extra_headers.push(("Authorization".to_string(), format!("Basic {}", encoded)));
-    base_cfg.extra_headers.push(("Accept".to_string(), "application/json".to_string()));
+    base_cfg
+        .extra_headers
+        .push(("Authorization".to_string(), format!("Basic {}", encoded)));
+    base_cfg
+        .extra_headers
+        .push(("Accept".to_string(), "application/json".to_string()));
 
     let client = HttpClient::new(base_cfg)?;
 
@@ -490,7 +518,10 @@ fn parse_repo(v: &serde_json::Value, _project: &str) -> Option<AzRepo> {
     let id = v["id"].as_str()?.to_string();
     let name = v["name"].as_str()?.to_string();
     let private = match v.get("project") {
-        Some(p) => p["visibility"].as_str() == Some("private") || p["visibility"].as_str() == Some("organization"),
+        Some(p) => {
+            p["visibility"].as_str() == Some("private")
+                || p["visibility"].as_str() == Some("organization")
+        }
         None => true, // Default to private if visibility not specified
     };
     let default_branch = v["defaultBranch"].as_str().unwrap_or("main").to_string();
@@ -553,7 +584,10 @@ pub async fn whoami(client: &HttpClient, api_base: &str) -> anyhow::Result<(Stri
     if resp.ok() {
         let json: serde_json::Value = serde_json::from_slice(&resp.body)?;
         let id = json["id"].as_str().unwrap_or("azure-user").to_string();
-        let display_name = json["displayName"].as_str().unwrap_or("Azure DevOps User").to_string();
+        let display_name = json["displayName"]
+            .as_str()
+            .unwrap_or("Azure DevOps User")
+            .to_string();
         return Ok((id, display_name));
     }
 
@@ -572,14 +606,17 @@ pub async fn get_head_sha(
 ) -> anyhow::Result<String> {
     let url = format!(
         "{}/_apis/git/repositories/{}/refs?filter=heads/{}&api-version=7.0",
-        api_base,
-        repo_id,
-        branch
+        api_base, repo_id, branch
     );
     let resp = client.get(&url).await;
 
     if !resp.ok() {
-        anyhow::bail!("Cannot resolve HEAD SHA for repo '{}' branch '{}' (HTTP {})", repo_id, branch, resp.status);
+        anyhow::bail!(
+            "Cannot resolve HEAD SHA for repo '{}' branch '{}' (HTTP {})",
+            repo_id,
+            branch,
+            resp.status
+        );
     }
 
     let json: serde_json::Value = serde_json::from_slice(&resp.body)?;
@@ -591,7 +628,11 @@ pub async fn get_head_sha(
         }
     }
 
-    anyhow::bail!("Missing commit SHA in response for repo '{}' branch '{}'", repo_id, branch);
+    anyhow::bail!(
+        "Missing commit SHA in response for repo '{}' branch '{}'",
+        repo_id,
+        branch
+    );
 }
 
 /// Fetch the raw content of a blob by its SHA.
@@ -605,14 +646,16 @@ pub async fn get_blob_content(
 ) -> anyhow::Result<Vec<u8>> {
     let url = format!(
         "{}/_apis/git/repositories/{}/blobs/{}?api-version=7.0",
-        api_base,
-        repo_id,
-        sha
+        api_base, repo_id, sha
     );
     let resp = client.get(&url).await;
 
     if !resp.ok() {
-        anyhow::bail!("GET blob {} returned HTTP {}", crate::validation::redact_url(&url), resp.status);
+        anyhow::bail!(
+            "GET blob {} returned HTTP {}",
+            crate::validation::redact_url(&url),
+            resp.status
+        );
     }
 
     Ok(resp.body.to_vec())
@@ -704,7 +747,13 @@ mod tests {
     #[test]
     fn test_encode_path() {
         assert_eq!(AzureForgeClient::encode_path("src/main.rs"), "src/main.rs");
-        assert_eq!(AzureForgeClient::encode_path("path with spaces"), "path%20with%20spaces");
-        assert_eq!(AzureForgeClient::encode_path("特殊字符"), "%E7%89%B9%E6%AE%8A%E5%AD%97%E7%AC%A6");
+        assert_eq!(
+            AzureForgeClient::encode_path("path with spaces"),
+            "path%20with%20spaces"
+        );
+        assert_eq!(
+            AzureForgeClient::encode_path("特殊字符"),
+            "%E7%89%B9%E6%AE%8A%E5%AD%97%E7%AC%A6"
+        );
     }
 }

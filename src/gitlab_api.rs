@@ -7,9 +7,9 @@
 
 use crate::forge::{EnumScope, Forge, Platform, RateLimitInfo, Repository, TreeEntry};
 use crate::http_client::{HttpClient, HttpConfig};
+use anyhow::Context;
 use async_trait::async_trait;
 use std::time::{Duration, Instant};
-use anyhow::Context;
 
 const DEFAULT_GL_API: &str = "https://gitlab.com/api/v4";
 
@@ -48,7 +48,9 @@ impl GitLabForgeClient {
                     .map(|ts| {
                         let reset = std::time::UNIX_EPOCH + Duration::from_secs(ts);
                         let now = std::time::SystemTime::now();
-                        reset.duration_since(now).unwrap_or(Duration::from_secs(3600))
+                        reset
+                            .duration_since(now)
+                            .unwrap_or(Duration::from_secs(3600))
                     })
                     .unwrap_or(Duration::from_secs(3600));
 
@@ -65,12 +67,16 @@ impl GitLabForgeClient {
         for attempt in 0..3u32 {
             let resp = self.client.get(url).await;
             if resp.status == 429 {
-                let wait_s = resp.headers.get("retry-after")
+                let wait_s = resp
+                    .headers
+                    .get("retry-after")
                     .and_then(|v| v.trim().parse::<u64>().ok())
-                    .unwrap_or(60).min(300);
+                    .unwrap_or(60)
+                    .min(300);
                 log::warn!(
                     "GitLab rate-limited (HTTP 429); sleeping {}s before retry {}/3",
-                    wait_s, attempt + 1,
+                    wait_s,
+                    attempt + 1,
                 );
                 tokio::time::sleep(std::time::Duration::from_secs(wait_s)).await;
                 continue;
@@ -82,13 +88,15 @@ impl GitLabForgeClient {
             self.update_rate_limit(&headers);
             return Ok(resp);
         }
-        anyhow::bail!("Rate limit exhausted after 3 retries for {}", crate::validation::redact_url(url))
+        anyhow::bail!(
+            "Rate limit exhausted after 3 retries for {}",
+            crate::validation::redact_url(url)
+        )
     }
 
     /// URL-encode a file path for GitLab API.
     fn encode_path(path: &str) -> String {
-        url::form_urlencoded::byte_serialize(path.as_bytes())
-            .collect::<String>()
+        url::form_urlencoded::byte_serialize(path.as_bytes()).collect::<String>()
     }
 }
 
@@ -124,25 +132,37 @@ impl Forge for GitLabForgeClient {
         match scope {
             EnumScope::User => {
                 // Get user projects via /projects?membership=true
-                let url = format!("{}/projects?membership=true&per_page=100&order_by=updated&sort=desc", self.api_base);
+                let url = format!(
+                    "{}/projects?membership=true&per_page=100&order_by=updated&sort=desc",
+                    self.api_base
+                );
                 repos.extend(self.fetch_all_projects(url).await?);
             }
             EnumScope::Org(group) => {
                 // Get group projects
                 let group_encoded = Self::encode_path(&group);
-                let url = format!("{}/groups/{}/projects?per_page=100&order_by=updated&sort=desc", self.api_base, group_encoded);
+                let url = format!(
+                    "{}/groups/{}/projects?per_page=100&order_by=updated&sort=desc",
+                    self.api_base, group_encoded
+                );
                 repos.extend(self.fetch_all_projects(url).await?);
             }
             EnumScope::All => {
                 // For "All", fetch user projects and then group projects
-                let user_url = format!("{}/projects?membership=true&per_page=100&order_by=updated&sort=desc", self.api_base);
+                let user_url = format!(
+                    "{}/projects?membership=true&per_page=100&order_by=updated&sort=desc",
+                    self.api_base
+                );
                 repos.extend(self.fetch_all_projects(user_url).await?);
 
                 // Also fetch groups the user belongs to and their projects
                 if let Ok(groups) = list_user_groups(&self.client, &self.api_base).await {
                     for group in groups {
                         let group_encoded = Self::encode_path(&group);
-                        let url = format!("{}/groups/{}/projects?per_page=100&order_by=updated&sort=desc", self.api_base, group_encoded);
+                        let url = format!(
+                            "{}/groups/{}/projects?per_page=100&order_by=updated&sort=desc",
+                            self.api_base, group_encoded
+                        );
                         if let Ok(group_repos) = self.fetch_all_projects(url).await {
                             repos.extend(group_repos);
                         }
@@ -169,9 +189,15 @@ impl Forge for GitLabForgeClient {
         while let Some(current_path) = stack.pop() {
             let path_encoded = Self::encode_path(&current_path);
             let url = if current_path.is_empty() {
-                format!("{}/projects/{}/repository/tree?ref={}", self.api_base, project_encoded, branch)
+                format!(
+                    "{}/projects/{}/repository/tree?ref={}",
+                    self.api_base, project_encoded, branch
+                )
             } else {
-                format!("{}/projects/{}/repository/tree?ref={}&path={}", self.api_base, project_encoded, branch, path_encoded)
+                format!(
+                    "{}/projects/{}/repository/tree?ref={}&path={}",
+                    self.api_base, project_encoded, branch, path_encoded
+                )
             };
 
             let resp = self.get_with_rate_limit(&url).await?;
@@ -182,9 +208,9 @@ impl Forge for GitLabForgeClient {
             }
 
             let json: serde_json::Value = serde_json::from_slice(&resp.body)?;
-            let arr = json.as_array().ok_or_else(|| {
-                anyhow::anyhow!("Expected JSON array from tree endpoint")
-            })?;
+            let arr = json
+                .as_array()
+                .ok_or_else(|| anyhow::anyhow!("Expected JSON array from tree endpoint"))?;
 
             for entry in arr {
                 if let Some(gl_entry) = parse_tree_entry(entry, &current_path) {
@@ -211,20 +237,20 @@ impl Forge for GitLabForgeClient {
     }
 
     fn rate_limit_remaining(&self) -> Option<(u32, Duration)> {
-        self.rate_limit_remaining
-            .lock()
-            .ok()
-            .and_then(|guard| guard.as_ref().map(|(remaining, reset)| {
+        self.rate_limit_remaining.lock().ok().and_then(|guard| {
+            guard.as_ref().map(|(remaining, reset)| {
                 (*remaining, reset.saturating_duration_since(Instant::now()))
-            }))
+            })
+        })
     }
 
     fn rate_limit_info(&self) -> Option<RateLimitInfo> {
-        self.rate_limit_remaining().map(|(remaining, reset_in)| RateLimitInfo {
-            remaining,
-            reset_in,
-            limit: Platform::GitLab.default_rate_limit(),
-        })
+        self.rate_limit_remaining()
+            .map(|(remaining, reset_in)| RateLimitInfo {
+                remaining,
+                reset_in,
+                limit: Platform::GitLab.default_rate_limit(),
+            })
     }
 
     fn platform(&self) -> Platform {
@@ -232,7 +258,14 @@ impl Forge for GitLabForgeClient {
     }
 
     async fn get_head_sha(&self, repo: &Repository, branch: &str) -> anyhow::Result<String> {
-        get_head_sha(&self.client, &self.api_base, &repo.owner, &repo.name, branch).await
+        get_head_sha(
+            &self.client,
+            &self.api_base,
+            &repo.owner,
+            &repo.name,
+            branch,
+        )
+        .await
     }
 
     async fn whoami(&self) -> anyhow::Result<(String, String)> {
@@ -248,13 +281,17 @@ impl GitLabForgeClient {
         loop {
             let resp = self.get_with_rate_limit(&url).await?;
             if !resp.ok() {
-                anyhow::bail!("GET {} returned HTTP {}", crate::validation::redact_url(&url), resp.status);
+                anyhow::bail!(
+                    "GET {} returned HTTP {}",
+                    crate::validation::redact_url(&url),
+                    resp.status
+                );
             }
 
             let json: serde_json::Value = serde_json::from_slice(&resp.body)?;
-            let arr = json.as_array().ok_or_else(|| {
-                anyhow::anyhow!("Expected JSON array from projects endpoint")
-            })?;
+            let arr = json
+                .as_array()
+                .ok_or_else(|| anyhow::anyhow!("Expected JSON array from projects endpoint"))?;
 
             for p in arr {
                 if let Some(gl_repo) = parse_repo(p) {
@@ -319,10 +356,16 @@ pub struct GlTreeEntry {
 ///
 /// Clones `base_cfg` and injects the required GitLab header:
 /// - `PRIVATE-TOKEN: <PAT>`
-pub fn build_gitlab_client(mut base_cfg: HttpConfig, token: &str, gitlab_url: Option<&str>) -> anyhow::Result<(HttpClient, String)> {
+pub fn build_gitlab_client(
+    mut base_cfg: HttpConfig,
+    token: &str,
+    gitlab_url: Option<&str>,
+) -> anyhow::Result<(HttpClient, String)> {
     let api_base = gitlab_url.unwrap_or(DEFAULT_GL_API).to_string();
 
-    base_cfg.extra_headers.push(("PRIVATE-TOKEN".to_string(), token.to_string()));
+    base_cfg
+        .extra_headers
+        .push(("PRIVATE-TOKEN".to_string(), token.to_string()));
     let client = HttpClient::new(base_cfg)?;
 
     Ok((client, api_base))
@@ -362,11 +405,19 @@ fn parse_repo(v: &serde_json::Value) -> Option<GlProject> {
     let owner = parts[0].to_string();
     let name = parts[1].to_string();
     let full_name = path_with_namespace.to_string();
-    let private = v["visibility"].as_str() == Some("private") || v["visibility"].as_str() == Some("internal");
+    let private =
+        v["visibility"].as_str() == Some("private") || v["visibility"].as_str() == Some("internal");
     let default_branch = v["default_branch"].as_str().unwrap_or("main").to_string();
     let clone_url = v["http_url_to_repo"].as_str().unwrap_or("").to_string();
 
-    Some(GlProject { full_name, owner, name, private, default_branch, clone_url })
+    Some(GlProject {
+        full_name,
+        owner,
+        name,
+        private,
+        default_branch,
+        clone_url,
+    })
 }
 
 fn parse_tree_entry(v: &serde_json::Value, base_path: &str) -> Option<GlTreeEntry> {
@@ -382,7 +433,12 @@ fn parse_tree_entry(v: &serde_json::Value, base_path: &str) -> Option<GlTreeEntr
 
     let size = v["size"].as_u64();
 
-    Some(GlTreeEntry { path, obj_type, sha, size })
+    Some(GlTreeEntry {
+        path,
+        obj_type,
+        sha,
+        size,
+    })
 }
 
 /// Identify the authenticated user.
@@ -450,11 +506,20 @@ pub async fn get_head_sha(
     branch: &str,
 ) -> anyhow::Result<String> {
     let project_encoded = GitLabForgeClient::encode_path(&format!("{}/{}", owner, repo));
-    let url = format!("{}/projects/{}/repository/commits/{}", api_base, project_encoded, branch);
+    let url = format!(
+        "{}/projects/{}/repository/commits/{}",
+        api_base, project_encoded, branch
+    );
     let resp = client.get(&url).await;
 
     if !resp.ok() {
-        anyhow::bail!("Cannot resolve HEAD SHA for {}/{} branch '{}' (HTTP {})", owner, repo, branch, resp.status);
+        anyhow::bail!(
+            "Cannot resolve HEAD SHA for {}/{} branch '{}' (HTTP {})",
+            owner,
+            repo,
+            branch,
+            resp.status
+        );
     }
 
     let json: serde_json::Value = serde_json::from_slice(&resp.body)?;
@@ -482,11 +547,18 @@ pub async fn get_blob_content(
     // GitLab's API: GET /projects/:id/repository/blobs/:sha
     // This returns raw content directly
     let project_encoded = GitLabForgeClient::encode_path(&format!("{}/{}", owner, repo));
-    let url = format!("{}/projects/{}/repository/blobs/{}", api_base, project_encoded, sha);
+    let url = format!(
+        "{}/projects/{}/repository/blobs/{}",
+        api_base, project_encoded, sha
+    );
     let resp = client.get(&url).await;
 
     if !resp.ok() {
-        anyhow::bail!("GET blob {} returned HTTP {}", crate::validation::redact_url(&url), resp.status);
+        anyhow::bail!(
+            "GET blob {} returned HTTP {}",
+            crate::validation::redact_url(&url),
+            resp.status
+        );
     }
 
     Ok(resp.body.to_vec())

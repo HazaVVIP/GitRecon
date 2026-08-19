@@ -1,8 +1,8 @@
 //! validation.rs
 //! Input validation and sanitization for all user-supplied data.
 
+use anyhow::{anyhow, Result};
 use std::path::{Path, PathBuf};
-use anyhow::{Result, anyhow};
 
 /// Maximum URL length to prevent DoS
 const MAX_URL_LENGTH: usize = 2048;
@@ -29,15 +29,23 @@ const MAX_PATH_LENGTH: usize = 4096;
 pub fn validate_and_normalize_url(url_str: &str) -> Result<String> {
     // Check length first (DoS protection)
     if url_str.len() > MAX_URL_LENGTH {
-        return Err(anyhow!("URL exceeds maximum length of {} characters", MAX_URL_LENGTH));
+        return Err(anyhow!(
+            "URL exceeds maximum length of {} characters",
+            MAX_URL_LENGTH
+        ));
     }
 
     let trimmed = url_str.trim();
 
     // Block dangerous protocols
     let lower = trimmed.to_lowercase();
-    if lower.starts_with("javascript:") || lower.starts_with("data:") || lower.starts_with("vbscript:") {
-        return Err(anyhow!("Dangerous protocol detected: URL must use http:// or https://"));
+    if lower.starts_with("javascript:")
+        || lower.starts_with("data:")
+        || lower.starts_with("vbscript:")
+    {
+        return Err(anyhow!(
+            "Dangerous protocol detected: URL must use http:// or https://"
+        ));
     }
 
     // Ensure it looks like a URL
@@ -56,17 +64,23 @@ pub fn validate_and_normalize_url(url_str: &str) -> Result<String> {
     };
 
     // Validate URL structure
-    let parsed = url::Url::parse(&normalized)
-        .map_err(|e| anyhow!("Invalid URL format: {}", e))?;
+    let parsed = url::Url::parse(&normalized).map_err(|e| anyhow!("Invalid URL format: {}", e))?;
 
     // Ensure it's HTTP or HTTPS
     match parsed.scheme() {
-        "http" | "https" => {},
-        s => return Err(anyhow!("Unsupported scheme '{}': only http and https are allowed", s)),
+        "http" | "https" => {}
+        s => {
+            return Err(anyhow!(
+                "Unsupported scheme '{}': only http and https are allowed",
+                s
+            ))
+        }
     }
 
     // Reject localhost and local IP ranges by default (security measure)
-    let host = parsed.host().ok_or_else(|| anyhow!("URL must have a valid host"))?;
+    let host = parsed
+        .host()
+        .ok_or_else(|| anyhow!("URL must have a valid host"))?;
     let host_str = host.to_string().to_lowercase();
 
     // Check for potentially dangerous hosts
@@ -101,7 +115,10 @@ pub fn validate_github_token(token: &str) -> Result<()> {
     }
 
     if trimmed.len() > MAX_TOKEN_LENGTH {
-        return Err(anyhow!("GitHub token exceeds maximum length of {} characters", MAX_TOKEN_LENGTH));
+        return Err(anyhow!(
+            "GitHub token exceeds maximum length of {} characters",
+            MAX_TOKEN_LENGTH
+        ));
     }
 
     // GitHub PATs typically start with specific prefixes
@@ -118,13 +135,18 @@ pub fn validate_github_token(token: &str) -> Result<()> {
     }
 
     // GitHub tokens are alphanumeric and underscores
-    if !trimmed.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-') {
+    if !trimmed
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+    {
         return Err(anyhow!("GitHub token contains invalid characters (only alphanumeric, underscore, and hyphen allowed)"));
     }
 
     // Validate length (GitHub tokens are typically 36-40 characters)
     if trimmed.len() < 20 {
-        return Err(anyhow!("GitHub token appears too short (minimum 20 characters)"));
+        return Err(anyhow!(
+            "GitHub token appears too short (minimum 20 characters)"
+        ));
     }
 
     Ok(())
@@ -152,7 +174,10 @@ pub fn validate_gitlab_token(token: &str) -> Result<()> {
     }
 
     if trimmed.len() > MAX_TOKEN_LENGTH {
-        return Err(anyhow!("GitLab token exceeds maximum length of {} characters", MAX_TOKEN_LENGTH));
+        return Err(anyhow!(
+            "GitLab token exceeds maximum length of {} characters",
+            MAX_TOKEN_LENGTH
+        ));
     }
 
     // GitLab PATs typically start with 'glpat-' prefix
@@ -168,14 +193,19 @@ pub fn validate_gitlab_token(token: &str) -> Result<()> {
     }
 
     // GitLab tokens are alphanumeric with underscores and hyphens (glpat- prefix)
-    if !trimmed.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-') {
+    if !trimmed
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+    {
         return Err(anyhow!("GitLab token contains invalid characters (only alphanumeric, underscore, and hyphen allowed)"));
     }
 
     // Validate length (GitLab tokens are typically 20-32 characters after glpat- prefix)
     // glpat- prefix with 20 characters is the standard format
     if trimmed.len() < 20 {
-        return Err(anyhow!("GitLab token appears too short (minimum 20 characters)"));
+        return Err(anyhow!(
+            "GitLab token appears too short (minimum 20 characters)"
+        ));
     }
 
     Ok(())
@@ -197,7 +227,10 @@ pub fn validate_gitlab_token(token: &str) -> Result<()> {
 pub fn validate_directory_path(path_str: &str) -> Result<String> {
     // Check length first
     if path_str.len() > MAX_PATH_LENGTH {
-        return Err(anyhow!("Path exceeds maximum length of {} characters", MAX_PATH_LENGTH));
+        return Err(anyhow!(
+            "Path exceeds maximum length of {} characters",
+            MAX_PATH_LENGTH
+        ));
     }
 
     let trimmed = path_str.trim();
@@ -218,7 +251,8 @@ pub fn validate_directory_path(path_str: &str) -> Result<String> {
     }
 
     // Return the canonical path as String
-    canonical.into_os_string()
+    canonical
+        .into_os_string()
         .into_string()
         .map_err(|_| anyhow!("Path contains invalid UTF-8 characters"))
 }
@@ -244,13 +278,18 @@ pub fn validate_proxy_url(proxy_url: &str) -> Result<()> {
     }
 
     // Parse the URL
-    let parsed = url::Url::parse(trimmed)
-        .map_err(|e| anyhow!("Invalid proxy URL format: {}", e))?;
+    let parsed =
+        url::Url::parse(trimmed).map_err(|e| anyhow!("Invalid proxy URL format: {}", e))?;
 
     // Ensure supported scheme
     match parsed.scheme() {
-        "http" | "https" | "socks4" | "socks4a" | "socks5" | "socks5h" => {},
-        s => return Err(anyhow!("Unsupported proxy scheme '{}': supported schemes are http, https, socks4, socks5", s)),
+        "http" | "https" | "socks4" | "socks4a" | "socks5" | "socks5h" => {}
+        s => {
+            return Err(anyhow!(
+                "Unsupported proxy scheme '{}': supported schemes are http, https, socks4, socks5",
+                s
+            ))
+        }
     }
 
     // Must have a host
@@ -291,25 +330,30 @@ pub fn validate_webhook_url(
         return Err(anyhow!("Webhook URL exceeds {} chars", MAX_URL_LENGTH));
     }
 
-    let parsed = url::Url::parse(trimmed)
-        .map_err(|e| anyhow!("Invalid webhook URL: {}", e))?;
+    let parsed = url::Url::parse(trimmed).map_err(|e| anyhow!("Invalid webhook URL: {}", e))?;
 
     match parsed.scheme() {
         "https" => {}
         "http" if allow_http => {}
-        "http" => return Err(anyhow!(
-            "Webhook URL must be https:// (bodies contain matched secret plaintext). \
+        "http" => {
+            return Err(anyhow!(
+                "Webhook URL must be https:// (bodies contain matched secret plaintext). \
              Pass --webhook-allow-http to override."
-        )),
-        s => return Err(anyhow!(
-            "Unsupported webhook scheme '{}': only http/https accepted (got scheme via {:?})",
-            s, parsed
-        )),
+            ))
+        }
+        s => {
+            return Err(anyhow!(
+                "Unsupported webhook scheme '{}': only http/https accepted (got scheme via {:?})",
+                s,
+                parsed
+            ))
+        }
     }
 
     let host = parsed
         .host_str()
         .ok_or_else(|| anyhow!("Webhook URL must include a host"))?
+        .trim_matches(['[', ']'])
         .to_ascii_lowercase();
 
     if !allow_internal && host_is_internal(&host) {
@@ -332,7 +376,10 @@ pub fn validate_webhook_url(
 /// `localhost`, RFC1918 literals) so the common misconfigurations don't ship secrets.
 fn host_is_internal(host: &str) -> bool {
     // Hostname allowlist of clearly-local names.
-    if matches!(host, "localhost" | "localhost.localdomain" | "ip6-localhost" | "ip6-loopback") {
+    if matches!(
+        host,
+        "localhost" | "localhost.localdomain" | "ip6-localhost" | "ip6-loopback"
+    ) {
         return true;
     }
     // IPv6 literal (URL parser strips the brackets before returning host_str).
@@ -346,7 +393,7 @@ fn host_is_internal(host: &str) -> bool {
             || (v6.segments()[0] & 0xffc0) == 0xfe80
             // IPv4-mapped — resolve to underlying v4 and re-check
             || v6.to_ipv4_mapped()
-                .map(|v4| ipv4_is_internal(v4))
+                .map(ipv4_is_internal)
                 .unwrap_or(false);
     }
     // IPv4 literal.
@@ -470,7 +517,8 @@ pub fn validate_output_path(path_str: &str) -> Result<String> {
     // hours in a red-team engagement debrief.
     reject_system_path(&canonical)?;
 
-    canonical.into_os_string()
+    canonical
+        .into_os_string()
         .into_string()
         .map_err(|_| anyhow!("Output path contains invalid UTF-8 characters"))
 }
@@ -501,7 +549,8 @@ fn reject_system_path(canonical: &Path) -> Result<()> {
                 return Err(anyhow!(
                     "Output path '{}' resolves to a system directory ({}). \
                      Reports contain matched secret plaintext — refuse.",
-                    canonical.display(), prefix
+                    canonical.display(),
+                    prefix
                 ));
             }
         }
@@ -522,7 +571,8 @@ fn reject_system_path(canonical: &Path) -> Result<()> {
                 return Err(anyhow!(
                     "Output path '{}' resolves to a system directory ({}). \
                      Reports contain matched secret plaintext — refuse.",
-                    canonical.display(), prefix
+                    canonical.display(),
+                    prefix
                 ));
             }
         }
@@ -554,7 +604,10 @@ pub fn validate_custom_header(header_str: &str) -> Result<(String, String)> {
     // Split on first colon
     let parts: Vec<&str> = trimmed.splitn(2, ':').collect();
     if parts.len() != 2 {
-        return Err(anyhow!("Invalid header format: expected 'Name:Value', got '{}'", trimmed));
+        return Err(anyhow!(
+            "Invalid header format: expected 'Name:Value', got '{}'",
+            trimmed
+        ));
     }
 
     let name = parts[0].trim();
@@ -565,8 +618,14 @@ pub fn validate_custom_header(header_str: &str) -> Result<(String, String)> {
     }
 
     // Validate header name (RFC 7230: token)
-    if !name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
-        return Err(anyhow!("Header name contains invalid characters: '{}'", name));
+    if !name
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(anyhow!(
+            "Header name contains invalid characters: '{}'",
+            name
+        ));
     }
 
     // Check for dangerous headers that might override security
@@ -574,8 +633,8 @@ pub fn validate_custom_header(header_str: &str) -> Result<(String, String)> {
     match lower_name.as_str() {
         "host" | "content-length" | "transfer-encoding" => {
             return Err(anyhow!("Cannot override protected header: {}", name));
-        },
-        _ => {},
+        }
+        _ => {}
     }
 
     Ok((name.to_string(), value.to_string()))
@@ -617,7 +676,10 @@ const MAX_CSV_FIELD_LENGTH: usize = 32768;
 pub fn validate_regex_pattern(pattern: &str) -> Result<()> {
     // Check length
     if pattern.len() > MAX_PATTERN_LENGTH {
-        return Err(anyhow!("Pattern exceeds maximum length of {} characters", MAX_PATTERN_LENGTH));
+        return Err(anyhow!(
+            "Pattern exceeds maximum length of {} characters",
+            MAX_PATTERN_LENGTH
+        ));
     }
 
     // Empty pattern
@@ -638,9 +700,11 @@ pub fn validate_regex_pattern(pattern: &str) -> Result<()> {
             let mut has_quantifier = false;
 
             while j < chars.len() && depth > 0 {
-                if chars[j] == '(' { depth += 1; }
-                else if chars[j] == ')' { depth -= 1; }
-                else if chars[j] == '*' || chars[j] == '+' || chars[j] == '?' {
+                if chars[j] == '(' {
+                    depth += 1;
+                } else if chars[j] == ')' {
+                    depth -= 1;
+                } else if chars[j] == '*' || chars[j] == '+' || chars[j] == '?' {
                     // Check if this is inside the group (before closing paren)
                     if depth == 1 {
                         has_quantifier = true;
@@ -650,10 +714,14 @@ pub fn validate_regex_pattern(pattern: &str) -> Result<()> {
             }
 
             // After the closing paren, check for another quantifier
-            if j < chars.len() && has_quantifier
-                && (chars[j] == '*' || chars[j] == '+' || chars[j] == '?' || chars[j] == '{') {
-                    return Err(anyhow!("Pattern contains nested quantifiers which can cause ReDoS"));
-                }
+            if j < chars.len()
+                && has_quantifier
+                && (chars[j] == '*' || chars[j] == '+' || chars[j] == '?' || chars[j] == '{')
+            {
+                return Err(anyhow!(
+                    "Pattern contains nested quantifiers which can cause ReDoS"
+                ));
+            }
         } else if chars[i] == '[' {
             // Find closing bracket
             let mut j = i + 1;
@@ -670,7 +738,9 @@ pub fn validate_regex_pattern(pattern: &str) -> Result<()> {
             if j < chars.len() && has_quantifier && (j + 1) < chars.len() {
                 let next = chars[j + 1];
                 if next == '*' || next == '+' || next == '?' {
-                    return Err(anyhow!("Pattern contains nested quantifiers which can cause ReDoS"));
+                    return Err(anyhow!(
+                        "Pattern contains nested quantifiers which can cause ReDoS"
+                    ));
                 }
             }
 
@@ -691,8 +761,7 @@ pub fn validate_regex_pattern(pattern: &str) -> Result<()> {
     }
 
     // Try to compile the pattern to check for basic regex syntax errors
-    regex::Regex::new(pattern)
-        .map_err(|e| anyhow!("Invalid regex pattern: {}", e))?;
+    regex::Regex::new(pattern).map_err(|e| anyhow!("Invalid regex pattern: {}", e))?;
 
     Ok(())
 }
@@ -711,7 +780,8 @@ pub fn validate_patterns_json(json_str: &str) -> Result<usize> {
         .map_err(|e| anyhow!("Invalid JSON in patterns file: {}", e))?;
 
     // Check for patterns array
-    let patterns = json["patterns"].as_array()
+    let patterns = json["patterns"]
+        .as_array()
         .ok_or_else(|| anyhow!("Patterns file must contain a top-level 'patterns' array"))?;
 
     // Check pattern count
@@ -726,7 +796,8 @@ pub fn validate_patterns_json(json_str: &str) -> Result<usize> {
     let mut count = 0;
     for (i, p) in patterns.iter().enumerate() {
         // Validate id
-        let id = p["id"].as_str()
+        let id = p["id"]
+            .as_str()
             .ok_or_else(|| anyhow!("Pattern #{}: missing 'id' field", i))?;
 
         if id.trim().is_empty() {
@@ -738,17 +809,23 @@ pub fn validate_patterns_json(json_str: &str) -> Result<usize> {
         }
 
         // Validate severity
-        let sev = p["severity"].as_str()
+        let sev = p["severity"]
+            .as_str()
             .ok_or_else(|| anyhow!("Pattern #{}: missing 'severity' field", i))?;
 
         let valid_severities = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"];
         if !valid_severities.contains(&sev) {
-            return Err(anyhow!("Pattern #{}: invalid severity '{}', must be one of: {:?}",
-                i, sev, valid_severities));
+            return Err(anyhow!(
+                "Pattern #{}: invalid severity '{}', must be one of: {:?}",
+                i,
+                sev,
+                valid_severities
+            ));
         }
 
         // Validate description
-        let desc = p["description"].as_str()
+        let desc = p["description"]
+            .as_str()
             .ok_or_else(|| anyhow!("Pattern #{}: missing 'description' field", i))?;
 
         if desc.trim().is_empty() {
@@ -756,11 +833,15 @@ pub fn validate_patterns_json(json_str: &str) -> Result<usize> {
         }
 
         if desc.len() > 500 {
-            return Err(anyhow!("Pattern #{}: 'description' too long (max 500 chars)", i));
+            return Err(anyhow!(
+                "Pattern #{}: 'description' too long (max 500 chars)",
+                i
+            ));
         }
 
         // Validate regex pattern
-        let regex_str = p["regex"].as_str()
+        let regex_str = p["regex"]
+            .as_str()
             .ok_or_else(|| anyhow!("Pattern #{}: missing 'regex' field", i))?;
 
         validate_regex_pattern(regex_str)
@@ -791,18 +872,27 @@ pub fn validate_user_agent(ua: &str, line_num: usize) -> Result<()> {
 
     // Check length
     if trimmed.len() > MAX_UA_LENGTH {
-        return Err(anyhow!("Line {}: User-Agent exceeds maximum length of {} characters",
-            line_num, MAX_UA_LENGTH));
+        return Err(anyhow!(
+            "Line {}: User-Agent exceeds maximum length of {} characters",
+            line_num,
+            MAX_UA_LENGTH
+        ));
     }
 
     // Check for newlines (multi-line UA is invalid)
     if trimmed.contains('\n') || trimmed.contains('\r') {
-        return Err(anyhow!("Line {}: User-Agent cannot contain newlines", line_num));
+        return Err(anyhow!(
+            "Line {}: User-Agent cannot contain newlines",
+            line_num
+        ));
     }
 
     // Check for control characters
     if trimmed.chars().any(|c| c.is_control()) {
-        return Err(anyhow!("Line {}: User-Agent contains control characters", line_num));
+        return Err(anyhow!(
+            "Line {}: User-Agent contains control characters",
+            line_num
+        ));
     }
 
     Ok(())
@@ -843,7 +933,9 @@ pub fn validate_ua_file(content: &str) -> Result<Vec<String>> {
 
     // At least one valid UA
     if result.is_empty() {
-        return Err(anyhow!("UA file must contain at least one valid User-Agent string"));
+        return Err(anyhow!(
+            "UA file must contain at least one valid User-Agent string"
+        ));
     }
 
     Ok(result)
@@ -876,8 +968,11 @@ pub fn sanitize_csv_field(field: &str) -> String {
 
     // CSV injection protection: prefix dangerous characters with single quote
     // This prevents Excel/Sheets from interpreting the field as a formula
-    if sanitized.starts_with('=') || sanitized.starts_with('+') ||
-       sanitized.starts_with('-') || sanitized.starts_with('@') {
+    if sanitized.starts_with('=')
+        || sanitized.starts_with('+')
+        || sanitized.starts_with('-')
+        || sanitized.starts_with('@')
+    {
         format!("'{}", sanitized)
     } else {
         sanitized.to_string()
@@ -898,11 +993,42 @@ pub fn validate_content_length(content_length: Option<u64>, max_size: usize) -> 
         if length > max_size as u64 {
             return Err(anyhow!(
                 "Content-Length ({}) exceeds maximum allowed size ({})",
-                length, max_size
+                length,
+                max_size
             ));
         }
     }
     Ok(())
+}
+
+/// Validates that a patterns file path is safe for reading.
+///
+/// # Security Considerations
+/// - Prevents path traversal attacks (e.g., ../../../etc/passwd)
+/// - Ensures path is within current working directory
+/// - Validates the path exists and is a file
+///
+/// # Arguments
+/// * `path` - The raw path string from user input
+///
+/// # Returns
+/// * `Ok(PathBuf)` - Canonicalized absolute path within working directory
+/// * `Err(String)` - Error message if validation fails
+pub fn validate_patterns_path(path: &str) -> Result<PathBuf> {
+    let canonical =
+        std::fs::canonicalize(path).map_err(|e| anyhow::anyhow!("Invalid path: {}", e))?;
+    let cwd =
+        std::env::current_dir().map_err(|e| anyhow::anyhow!("Cannot get current dir: {}", e))?;
+
+    if !canonical.starts_with(&cwd) {
+        anyhow::bail!("Path traversal detected: patterns file must be within working directory");
+    }
+
+    if !canonical.is_file() {
+        anyhow::bail!("Patterns path must be a file");
+    }
+
+    Ok(canonical)
 }
 
 #[cfg(test)]
@@ -920,8 +1046,14 @@ mod tests {
 
     #[test]
     fn test_validate_and_normalize_url_trailing_slash() {
-        assert_eq!(validate_and_normalize_url("https://example.com/").unwrap(), "https://example.com");
-        assert_eq!(validate_and_normalize_url("https://example.com/path/").unwrap(), "https://example.com/path");
+        assert_eq!(
+            validate_and_normalize_url("https://example.com/").unwrap(),
+            "https://example.com"
+        );
+        assert_eq!(
+            validate_and_normalize_url("https://example.com/path/").unwrap(),
+            "https://example.com/path"
+        );
     }
 
     #[test]
@@ -1028,14 +1160,22 @@ mod tests {
         // Too many patterns
         let mut patterns = String::from(r#"{"patterns": ["#);
         for i in 0..=MAX_PATTERNS {
-            if i > 0 { patterns.push_str(","); }
-            patterns.push_str(&format!(r#"{{"id":"t{}","severity":"HIGH","description":"t","regex":"a"}}"#, i));
+            if i > 0 {
+                patterns.push(',');
+            }
+            patterns.push_str(&format!(
+                r#"{{"id":"t{}","severity":"HIGH","description":"t","regex":"a"}}"#,
+                i
+            ));
         }
         patterns.push_str("]}");
         assert!(validate_patterns_json(&patterns).is_err());
 
         // Invalid severity
-        assert!(validate_patterns_json(r#"{"patterns": [{"id":"t","severity":"INVALID","description":"t","regex":"a"}]}"#).is_err());
+        assert!(validate_patterns_json(
+            r#"{"patterns": [{"id":"t","severity":"INVALID","description":"t","regex":"a"}]}"#
+        )
+        .is_err());
     }
 
     #[test]
@@ -1089,7 +1229,10 @@ git/2.46.0"#;
         // CSV injection protection
         assert_eq!(sanitize_csv_field("=1+1"), "'=1+1");
         assert_eq!(sanitize_csv_field("-SUM(A1:A10)"), "'-SUM(A1:A10)");
-        assert_eq!(sanitize_csv_field("+cmd|' /C calc'!A0"), "'+cmd|' /C calc'!A0");
+        assert_eq!(
+            sanitize_csv_field("+cmd|' /C calc'!A0"),
+            "'+cmd|' /C calc'!A0"
+        );
         assert_eq!(sanitize_csv_field("@SUM(1+1)"), "'@SUM(1+1)");
 
         // Safe fields unchanged
@@ -1132,22 +1275,28 @@ git/2.46.0"#;
     #[test]
     fn webhook_rejects_file_scheme() {
         let err = validate_webhook_url("file:///etc/passwd", true, true).unwrap_err();
-        assert!(err.to_string().to_lowercase().contains("scheme") || err.to_string().contains("http"),
-                "err: {err}");
+        assert!(
+            err.to_string().to_lowercase().contains("scheme") || err.to_string().contains("http"),
+            "err: {err}"
+        );
     }
 
     #[test]
     fn webhook_rejects_localhost_by_default() {
         let err = validate_webhook_url("https://localhost/x", false, false).unwrap_err();
-        assert!(err.to_string().contains("loopback") || err.to_string().contains("internal"),
-                "err: {err}");
+        assert!(
+            err.to_string().contains("loopback") || err.to_string().contains("internal"),
+            "err: {err}"
+        );
     }
 
     #[test]
     fn webhook_rejects_127_by_default() {
         let err = validate_webhook_url("https://127.0.0.1:8443/x", false, false).unwrap_err();
-        assert!(err.to_string().contains("loopback") || err.to_string().contains("internal"),
-                "err: {err}");
+        assert!(
+            err.to_string().contains("loopback") || err.to_string().contains("internal"),
+            "err: {err}"
+        );
     }
 
     #[test]
@@ -1155,18 +1304,22 @@ git/2.46.0"#;
         // The classic SSRF payload — AWS/GCP/Azure metadata service on 169.254.169.254.
         let err = validate_webhook_url("http://169.254.169.254/latest/meta-data/", true, false)
             .unwrap_err();
-        assert!(err.to_string().contains("link-local")
-             || err.to_string().contains("internal")
-             || err.to_string().contains("SSRF"),
-             "err: {err}");
+        assert!(
+            err.to_string().contains("link-local")
+                || err.to_string().contains("internal")
+                || err.to_string().contains("SSRF"),
+            "err: {err}"
+        );
     }
 
     #[test]
     fn webhook_rejects_rfc1918_ranges() {
         for host in ["10.0.0.1", "172.16.0.1", "192.168.1.1"] {
             let url = format!("https://{host}/x");
-            assert!(validate_webhook_url(&url, false, false).is_err(),
-                "RFC1918 host must be rejected: {url}");
+            assert!(
+                validate_webhook_url(&url, false, false).is_err(),
+                "RFC1918 host must be rejected: {url}"
+            );
         }
     }
 
@@ -1185,33 +1338,56 @@ git/2.46.0"#;
 
     #[test]
     fn redact_url_scrubs_private_token_query_param() {
-        let redacted = redact_url("https://gitlab.example.com/api/v4/projects?private_token=glpat-SECRET&per_page=1");
-        assert!(!redacted.contains("SECRET"), "raw token survived: {redacted}");
+        let redacted = redact_url(
+            "https://gitlab.example.com/api/v4/projects?private_token=glpat-SECRET&per_page=1",
+        );
+        assert!(
+            !redacted.contains("SECRET"),
+            "raw token survived: {redacted}"
+        );
         assert!(redacted.contains("REDACTED"));
-        assert!(redacted.contains("per_page=1"), "non-secret params must survive: {redacted}");
+        assert!(
+            redacted.contains("per_page=1"),
+            "non-secret params must survive: {redacted}"
+        );
     }
 
     #[test]
     fn redact_url_scrubs_access_token_and_secret_variants() {
-        for param in ["access_token", "token", "api_key", "job_token", "webhook_secret", "auth", "code"] {
+        for param in [
+            "access_token",
+            "token",
+            "api_key",
+            "job_token",
+            "webhook_secret",
+            "auth",
+            "code",
+        ] {
             let url = format!("https://x.example/y?{param}=REVEAL");
             let redacted = redact_url(&url);
-            assert!(!redacted.contains("REVEAL"),
-                "'{param}' must be redacted, got: {redacted}");
+            assert!(
+                !redacted.contains("REVEAL"),
+                "'{param}' must be redacted, got: {redacted}"
+            );
         }
     }
 
     #[test]
     fn redact_url_preserves_scheme_host_path() {
         let redacted = redact_url("https://api.github.com/repos/x/y?token=t&per_page=100");
-        assert!(redacted.starts_with("https://api.github.com/repos/x/y"),
-            "host/path not preserved: {redacted}");
+        assert!(
+            redacted.starts_with("https://api.github.com/repos/x/y"),
+            "host/path not preserved: {redacted}"
+        );
     }
 
     #[test]
     fn redact_url_strips_userinfo() {
         let redacted = redact_url("https://user:pa$$w0rd@example.com/x");
-        assert!(!redacted.contains("pa$$w0rd"), "password in userinfo leaked: {redacted}");
+        assert!(
+            !redacted.contains("pa$$w0rd"),
+            "password in userinfo leaked: {redacted}"
+        );
     }
 
     #[test]
@@ -1231,16 +1407,20 @@ git/2.46.0"#;
         // Descendant.
         assert!(reject_system_path(std::path::Path::new("/etc/gitrecon")).is_err());
         // Non-banned neighbour that shares a prefix should still be allowed.
-        assert!(reject_system_path(std::path::Path::new("/etcetera")).is_ok(),
-            "prefix must match `/etc/` boundary, not the raw substring `/etc`");
+        assert!(
+            reject_system_path(std::path::Path::new("/etcetera")).is_ok(),
+            "prefix must match `/etc/` boundary, not the raw substring `/etc`"
+        );
     }
 
     #[cfg(unix)]
     #[test]
     fn reject_system_path_rejects_proc_sys_dev() {
         for banned in ["/proc", "/sys", "/dev", "/root", "/boot", "/var", "/usr"] {
-            assert!(reject_system_path(std::path::Path::new(banned)).is_err(),
-                "{banned} must be rejected as an output path");
+            assert!(
+                reject_system_path(std::path::Path::new(banned)).is_err(),
+                "{banned} must be rejected as an output path"
+            );
         }
     }
 
@@ -1258,38 +1438,10 @@ git/2.46.0"#;
     #[test]
     fn reject_system_path_rejects_windows_system_dirs_case_insensitive() {
         for banned in [r"C:\Windows", r"c:\windows\system32", r"C:\Program Files\x"] {
-            assert!(reject_system_path(std::path::Path::new(banned)).is_err(),
-                "{banned} must be rejected");
+            assert!(
+                reject_system_path(std::path::Path::new(banned)).is_err(),
+                "{banned} must be rejected"
+            );
         }
     }
-}
-
-/// Validates that a patterns file path is safe for reading.
-///
-/// # Security Considerations
-/// - Prevents path traversal attacks (e.g., ../../../etc/passwd)
-/// - Ensures path is within current working directory
-/// - Validates the path exists and is a file
-///
-/// # Arguments
-/// * `path` - The raw path string from user input
-///
-/// # Returns
-/// * `Ok(PathBuf)` - Canonicalized absolute path within working directory
-/// * `Err(String)` - Error message if validation fails
-pub fn validate_patterns_path(path: &str) -> Result<PathBuf> {
-    let canonical = std::fs::canonicalize(path)
-        .map_err(|e| anyhow::anyhow!("Invalid path: {}", e))?;
-    let cwd = std::env::current_dir()
-        .map_err(|e| anyhow::anyhow!("Cannot get current dir: {}", e))?;
-
-    if !canonical.starts_with(&cwd) {
-        anyhow::bail!("Path traversal detected: patterns file must be within working directory");
-    }
-
-    if !canonical.is_file() {
-        anyhow::bail!("Patterns path must be a file");
-    }
-
-    Ok(canonical)
 }

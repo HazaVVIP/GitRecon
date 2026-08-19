@@ -7,9 +7,9 @@
 
 use crate::forge::{EnumScope, Forge, Platform, RateLimitInfo, Repository, TreeEntry};
 use crate::http_client::{HttpClient, HttpConfig};
+use anyhow::Context;
 use async_trait::async_trait;
 use std::time::{Duration, Instant};
-use anyhow::Context;
 
 const GH_API: &str = "https://api.github.com";
 
@@ -42,7 +42,9 @@ impl GitHubForgeClient {
                     .map(|ts| {
                         let reset = std::time::UNIX_EPOCH + Duration::from_secs(ts);
                         let now = std::time::SystemTime::now();
-                        reset.duration_since(now).unwrap_or(Duration::from_secs(3600))
+                        reset
+                            .duration_since(now)
+                            .unwrap_or(Duration::from_secs(3600))
                     })
                     .unwrap_or(Duration::from_secs(3600));
 
@@ -67,15 +69,20 @@ impl GitHubForgeClient {
             let resp = self.client.get(url).await;
             let is_rate_limited = resp.status == 429
                 || (resp.status == 403
-                    && resp.headers.get("x-ratelimit-remaining")
+                    && resp
+                        .headers
+                        .get("x-ratelimit-remaining")
                         .and_then(|v| v.parse::<u64>().ok())
-                        .map(|n| n == 0).unwrap_or(false));
+                        .map(|n| n == 0)
+                        .unwrap_or(false));
 
             if is_rate_limited {
                 let wait_s = parse_retry_after(&resp.headers).unwrap_or(60).min(300);
                 log::warn!(
                     "GitHub rate-limited (HTTP {}); sleeping {}s before retry {}/3",
-                    resp.status, wait_s, attempt + 1,
+                    resp.status,
+                    wait_s,
+                    attempt + 1,
                 );
                 tokio::time::sleep(std::time::Duration::from_secs(wait_s)).await;
                 continue;
@@ -90,7 +97,10 @@ impl GitHubForgeClient {
             self.update_rate_limit(&headers);
             return Ok(resp);
         }
-        anyhow::bail!("Rate limit exhausted after 3 retries for {}", crate::validation::redact_url(url))
+        anyhow::bail!(
+            "Rate limit exhausted after 3 retries for {}",
+            crate::validation::redact_url(url)
+        )
     }
 }
 
@@ -100,7 +110,9 @@ impl GitHubForgeClient {
 /// interpret X-RateLimit-Reset as an epoch here — that's forge-specific formatting
 /// and each impl handles it in `update_rate_limit`.
 fn parse_retry_after(headers: &std::collections::HashMap<String, String>) -> Option<u64> {
-    let raw = headers.get("retry-after").or_else(|| headers.get("Retry-After"))?;
+    let raw = headers
+        .get("retry-after")
+        .or_else(|| headers.get("Retry-After"))?;
     raw.trim().parse::<u64>().ok()
 }
 
@@ -138,13 +150,17 @@ impl Forge for GitHubForgeClient {
         loop {
             let resp = self.get_with_rate_limit(&current_url).await?;
             if !resp.ok() {
-                anyhow::bail!("GET {} returned HTTP {}", crate::validation::redact_url(&current_url), resp.status);
+                anyhow::bail!(
+                    "GET {} returned HTTP {}",
+                    crate::validation::redact_url(&current_url),
+                    resp.status
+                );
             }
 
             let json: serde_json::Value = serde_json::from_slice(&resp.body)?;
-            let arr = json.as_array().ok_or_else(|| {
-                anyhow::anyhow!("Expected JSON array from repos endpoint")
-            })?;
+            let arr = json
+                .as_array()
+                .ok_or_else(|| anyhow::anyhow!("Expected JSON array from repos endpoint"))?;
 
             for r in arr {
                 if let Some(gh_repo) = parse_repo(r) {
@@ -190,11 +206,18 @@ impl Forge for GitHubForgeClient {
 
     async fn get_tree(&self, repo: &Repository, branch: &str) -> anyhow::Result<Vec<TreeEntry>> {
         let sha = self.get_head_sha(repo, branch).await?;
-        let url = format!("{}/repos/{}/{}/git/trees/{}?recursive=1", GH_API, repo.owner, repo.name, sha);
+        let url = format!(
+            "{}/repos/{}/{}/git/trees/{}?recursive=1",
+            GH_API, repo.owner, repo.name, sha
+        );
         let resp = self.get_with_rate_limit(&url).await?;
 
         if !resp.ok() {
-            anyhow::bail!("GET tree {} returned HTTP {}", crate::validation::redact_url(&url), resp.status);
+            anyhow::bail!(
+                "GET tree {} returned HTTP {}",
+                crate::validation::redact_url(&url),
+                resp.status
+            );
         }
 
         let json: serde_json::Value = serde_json::from_slice(&resp.body)?;
@@ -218,20 +241,20 @@ impl Forge for GitHubForgeClient {
     }
 
     fn rate_limit_remaining(&self) -> Option<(u32, Duration)> {
-        self.rate_limit_remaining
-            .lock()
-            .ok()
-            .and_then(|guard| guard.as_ref().map(|(remaining, reset)| {
+        self.rate_limit_remaining.lock().ok().and_then(|guard| {
+            guard.as_ref().map(|(remaining, reset)| {
                 (*remaining, reset.saturating_duration_since(Instant::now()))
-            }))
+            })
+        })
     }
 
     fn rate_limit_info(&self) -> Option<RateLimitInfo> {
-        self.rate_limit_remaining().map(|(remaining, reset_in)| RateLimitInfo {
-            remaining,
-            reset_in,
-            limit: Platform::GitHub.default_rate_limit(),
-        })
+        self.rate_limit_remaining()
+            .map(|(remaining, reset_in)| RateLimitInfo {
+                remaining,
+                reset_in,
+                limit: Platform::GitHub.default_rate_limit(),
+            })
     }
 
     fn platform(&self) -> Platform {
@@ -254,23 +277,23 @@ impl Forge for GitHubForgeClient {
 /// A GitHub repository accessible to the authenticated user.
 #[derive(Debug, Clone)]
 pub struct GhRepo {
-    pub full_name:      String,
-    pub owner:          String,
-    pub name:           String,
+    pub full_name: String,
+    pub owner: String,
+    pub name: String,
     #[allow(dead_code)]
-    pub private:        bool,
+    pub private: bool,
     pub default_branch: String,
     #[allow(dead_code)]
-    pub clone_url:      String,
+    pub clone_url: String,
 }
 
 /// A single entry (blob or tree) from a Git tree API response.
 #[derive(Debug, Clone)]
 pub struct GhTreeEntry {
-    pub path:     String,
-    pub obj_type: String,   // "blob" or "tree"
-    pub sha:      String,
-    pub size:     Option<u64>,
+    pub path: String,
+    pub obj_type: String, // "blob" or "tree"
+    pub sha: String,
+    pub size: Option<u64>,
 }
 
 // ════════════════════════════════════════════════
@@ -284,9 +307,16 @@ pub struct GhTreeEntry {
 /// - `Accept: application/vnd.github+json`
 /// - `X-GitHub-Api-Version: 2022-11-28`
 pub fn build_github_client(mut base_cfg: HttpConfig, token: &str) -> anyhow::Result<HttpClient> {
-    base_cfg.extra_headers.push(("Authorization".to_string(), format!("token {}", token)));
-    base_cfg.extra_headers.push(("Accept".to_string(), "application/vnd.github+json".to_string()));
-    base_cfg.extra_headers.push(("X-GitHub-Api-Version".to_string(), "2022-11-28".to_string()));
+    base_cfg
+        .extra_headers
+        .push(("Authorization".to_string(), format!("token {}", token)));
+    base_cfg.extra_headers.push((
+        "Accept".to_string(),
+        "application/vnd.github+json".to_string(),
+    ));
+    base_cfg
+        .extra_headers
+        .push(("X-GitHub-Api-Version".to_string(), "2022-11-28".to_string()));
     HttpClient::new(base_cfg)
 }
 
@@ -315,28 +345,42 @@ fn parse_next_link(header: &str) -> Option<String> {
 }
 
 fn parse_repo(v: &serde_json::Value) -> Option<GhRepo> {
-    let full_name      = v["full_name"].as_str()?.to_string();
-    let owner          = v["owner"]["login"].as_str().unwrap_or("").to_string();
-    let name           = v["name"].as_str().unwrap_or("").to_string();
-    let private        = v["private"].as_bool().unwrap_or(false);
+    let full_name = v["full_name"].as_str()?.to_string();
+    let owner = v["owner"]["login"].as_str().unwrap_or("").to_string();
+    let name = v["name"].as_str().unwrap_or("").to_string();
+    let private = v["private"].as_bool().unwrap_or(false);
     let default_branch = v["default_branch"].as_str().unwrap_or("main").to_string();
-    let clone_url      = v["clone_url"].as_str().unwrap_or("").to_string();
-    Some(GhRepo { full_name, owner, name, private, default_branch, clone_url })
+    let clone_url = v["clone_url"].as_str().unwrap_or("").to_string();
+    Some(GhRepo {
+        full_name,
+        owner,
+        name,
+        private,
+        default_branch,
+        clone_url,
+    })
 }
 
 fn parse_tree_entries(json: &serde_json::Value) -> Vec<GhTreeEntry> {
     let tree = match json["tree"].as_array() {
         Some(a) => a,
-        None    => return Vec::new(),
+        None => return Vec::new(),
     };
     tree.iter()
         .filter_map(|item| {
-            let path     = item["path"].as_str().unwrap_or("").to_string();
+            let path = item["path"].as_str().unwrap_or("").to_string();
             let obj_type = item["type"].as_str().unwrap_or("").to_string();
-            let sha      = item["sha"].as_str().unwrap_or("").to_string();
-            let size     = item["size"].as_u64();
-            if path.is_empty() || sha.is_empty() { return None; }
-            Some(GhTreeEntry { path, obj_type, sha, size })
+            let sha = item["sha"].as_str().unwrap_or("").to_string();
+            let size = item["size"].as_u64();
+            if path.is_empty() || sha.is_empty() {
+                return None;
+            }
+            Some(GhTreeEntry {
+                path,
+                obj_type,
+                sha,
+                size,
+            })
         })
         .collect()
 }
@@ -350,7 +394,7 @@ fn parse_tree_entries(json: &serde_json::Value) -> Vec<GhTreeEntry> {
 /// Calls `GET /user` and returns `(login, name)`.
 /// Returns an error on HTTP 401 (invalid/expired token) or any non-200 status.
 pub async fn whoami(client: &HttpClient) -> anyhow::Result<(String, String)> {
-    let url  = format!("{}/user", GH_API);
+    let url = format!("{}/user", GH_API);
     let resp = client.get(&url).await;
     if resp.status == 401 {
         anyhow::bail!("Invalid or expired token (HTTP 401)");
@@ -360,7 +404,7 @@ pub async fn whoami(client: &HttpClient) -> anyhow::Result<(String, String)> {
     }
     let json: serde_json::Value = serde_json::from_slice(&resp.body)?;
     let login = json["login"].as_str().unwrap_or("").to_string();
-    let name  = json["name"].as_str().unwrap_or("").to_string();
+    let name = json["name"].as_str().unwrap_or("").to_string();
     Ok((login, name))
 }
 
@@ -370,14 +414,19 @@ pub async fn whoami(client: &HttpClient) -> anyhow::Result<(String, String)> {
 /// collaborator access to, or has organisation membership for.
 pub async fn list_repos(client: &HttpClient) -> anyhow::Result<Vec<GhRepo>> {
     let mut repos = Vec::new();
-    let mut url   = format!("{}/user/repos?per_page=100&type=all&sort=updated", GH_API);
+    let mut url = format!("{}/user/repos?per_page=100&type=all&sort=updated", GH_API);
     loop {
         let resp = client.get(&url).await;
         if !resp.ok() {
-            anyhow::bail!("GET {} returned HTTP {}", crate::validation::redact_url(&url), resp.status);
+            anyhow::bail!(
+                "GET {} returned HTTP {}",
+                crate::validation::redact_url(&url),
+                resp.status
+            );
         }
         let json: serde_json::Value = serde_json::from_slice(&resp.body)?;
-        let arr  = json.as_array()
+        let arr = json
+            .as_array()
             .ok_or_else(|| anyhow::anyhow!("Expected JSON array from /user/repos"))?;
         for r in arr {
             if let Some(repo) = parse_repo(r) {
@@ -386,7 +435,7 @@ pub async fn list_repos(client: &HttpClient) -> anyhow::Result<Vec<GhRepo>> {
         }
         match resp.headers.get("link").and_then(|h| parse_next_link(h)) {
             Some(next) => url = next,
-            None       => break,
+            None => break,
         }
     }
     Ok(repos)
@@ -395,15 +444,17 @@ pub async fn list_repos(client: &HttpClient) -> anyhow::Result<Vec<GhRepo>> {
 /// List all organisations the authenticated user belongs to.
 pub async fn list_user_orgs(client: &HttpClient) -> anyhow::Result<Vec<String>> {
     let mut orgs = Vec::new();
-    let mut url  = format!("{}/user/orgs?per_page=100", GH_API);
+    let mut url = format!("{}/user/orgs?per_page=100", GH_API);
     loop {
         let resp = client.get(&url).await;
-        if !resp.ok() { break; }
+        if !resp.ok() {
+            break;
+        }
         let json: serde_json::Value = serde_json::from_slice(&resp.body)
             .with_context(|| format!("Failed to parse JSON response from {}", url))?;
-        let arr  = match json.as_array() {
+        let arr = match json.as_array() {
             Some(a) => a,
-            None    => break,
+            None => break,
         };
         for o in arr {
             if let Some(login) = o["login"].as_str() {
@@ -412,7 +463,7 @@ pub async fn list_user_orgs(client: &HttpClient) -> anyhow::Result<Vec<String>> 
         }
         match resp.headers.get("link").and_then(|h| parse_next_link(h)) {
             Some(next) => url = next,
-            None       => break,
+            None => break,
         }
     }
     Ok(orgs)
@@ -421,15 +472,17 @@ pub async fn list_user_orgs(client: &HttpClient) -> anyhow::Result<Vec<String>> 
 /// List all repositories in an organisation (paginated).
 pub async fn list_org_repos(client: &HttpClient, org: &str) -> anyhow::Result<Vec<GhRepo>> {
     let mut repos = Vec::new();
-    let mut url   = format!("{}/orgs/{}/repos?per_page=100&type=all", GH_API, org);
+    let mut url = format!("{}/orgs/{}/repos?per_page=100&type=all", GH_API, org);
     loop {
         let resp = client.get(&url).await;
-        if !resp.ok() { break; }
+        if !resp.ok() {
+            break;
+        }
         let json: serde_json::Value = serde_json::from_slice(&resp.body)
             .with_context(|| format!("Failed to parse JSON response from {}", url))?;
-        let arr  = match json.as_array() {
+        let arr = match json.as_array() {
             Some(a) => a,
-            None    => break,
+            None => break,
         };
         for r in arr {
             if let Some(repo) = parse_repo(r) {
@@ -438,7 +491,7 @@ pub async fn list_org_repos(client: &HttpClient, org: &str) -> anyhow::Result<Ve
         }
         match resp.headers.get("link").and_then(|h| parse_next_link(h)) {
             Some(next) => url = next,
-            None       => break,
+            None => break,
         }
     }
     Ok(repos)
@@ -450,18 +503,23 @@ pub async fn list_org_repos(client: &HttpClient, org: &str) -> anyhow::Result<Ve
 /// Falls back to `GET /repos/{owner}/{repo}/commits/{branch}` if refs return
 /// a 404 (e.g. for empty repos with a non-default first commit).
 pub async fn get_head_sha(
-    client:  &HttpClient,
-    owner:   &str,
-    repo:    &str,
-    branch:  &str,
+    client: &HttpClient,
+    owner: &str,
+    repo: &str,
+    branch: &str,
 ) -> anyhow::Result<String> {
-    let url  = format!("{}/repos/{}/{}/git/refs/heads/{}", GH_API, owner, repo, branch);
+    let url = format!(
+        "{}/repos/{}/{}/git/refs/heads/{}",
+        GH_API, owner, repo, branch
+    );
     let resp = client.get(&url).await;
     if resp.ok() {
         let json: serde_json::Value = serde_json::from_slice(&resp.body)?;
         // Response can be a single object or an array of matching refs
         let sha = if let Some(arr) = json.as_array() {
-            arr.first().and_then(|r| r["object"]["sha"].as_str()).map(|s| s.to_string())
+            arr.first()
+                .and_then(|r| r["object"]["sha"].as_str())
+                .map(|s| s.to_string())
         } else {
             json["object"]["sha"].as_str().map(|s| s.to_string())
         };
@@ -471,13 +529,18 @@ pub async fn get_head_sha(
     }
 
     // Fallback: get latest commit via commits endpoint
-    let fallback_url  = format!("{}/repos/{}/{}/commits/{}?per_page=1", GH_API, owner, repo, branch);
+    let fallback_url = format!(
+        "{}/repos/{}/{}/commits/{}?per_page=1",
+        GH_API, owner, repo, branch
+    );
     let fallback_resp = client.get(&fallback_url).await;
     if fallback_resp.ok() {
         let json: serde_json::Value = serde_json::from_slice(&fallback_resp.body)?;
         // Response can be a single commit or array
         let sha = if let Some(arr) = json.as_array() {
-            arr.first().and_then(|c| c["sha"].as_str()).map(|s| s.to_string())
+            arr.first()
+                .and_then(|c| c["sha"].as_str())
+                .map(|s| s.to_string())
         } else {
             json["sha"].as_str().map(|s| s.to_string())
         };
@@ -488,7 +551,11 @@ pub async fn get_head_sha(
 
     anyhow::bail!(
         "Cannot resolve HEAD SHA for {}/{} branch '{}' (HTTP {} / {})",
-        owner, repo, branch, resp.status, fallback_resp.status
+        owner,
+        repo,
+        branch,
+        resp.status,
+        fallback_resp.status
     )
 }
 
@@ -503,14 +570,21 @@ pub async fn get_head_sha(
 /// Returns entries prefixed with their full path relative to the repo root.
 pub async fn get_tree(
     client: &HttpClient,
-    owner:  &str,
-    repo:   &str,
-    sha:    &str,
+    owner: &str,
+    repo: &str,
+    sha: &str,
 ) -> anyhow::Result<Vec<GhTreeEntry>> {
-    let url  = format!("{}/repos/{}/{}/git/trees/{}?recursive=1", GH_API, owner, repo, sha);
+    let url = format!(
+        "{}/repos/{}/{}/git/trees/{}?recursive=1",
+        GH_API, owner, repo, sha
+    );
     let resp = client.get(&url).await;
     if !resp.ok() {
-        anyhow::bail!("GET tree {} returned HTTP {}", crate::validation::redact_url(&url), resp.status);
+        anyhow::bail!(
+            "GET tree {} returned HTTP {}",
+            crate::validation::redact_url(&url),
+            resp.status
+        );
     }
     let json: serde_json::Value = serde_json::from_slice(&resp.body)?;
 
@@ -522,7 +596,9 @@ pub async fn get_tree(
     log::warn!(
         "GitHub tree for {}/{}@{} truncated at ~100k entries or 7 MB — falling back \
          to per-subtree traversal (may take several API calls)",
-        owner, repo, &sha[..sha.len().min(8)],
+        owner,
+        repo,
+        &sha[..sha.len().min(8)],
     );
     eprintln!(
         "  [!] Tree truncated at API layer; recursing subtree-by-subtree for {}/{}",
@@ -545,9 +621,9 @@ pub async fn get_tree(
 /// caller's `HttpClient`.
 async fn walk_tree_recursive(
     client: &HttpClient,
-    owner:  &str,
-    repo:   &str,
-    seed:   Vec<GhTreeEntry>,
+    owner: &str,
+    repo: &str,
+    seed: Vec<GhTreeEntry>,
 ) -> anyhow::Result<Vec<GhTreeEntry>> {
     use std::collections::HashSet;
 
@@ -568,12 +644,17 @@ async fn walk_tree_recursive(
     }
 
     while let Some((subtree_sha, path_prefix)) = queue.pop() {
-        let url = format!("{}/repos/{}/{}/git/trees/{}", GH_API, owner, repo, subtree_sha);
+        let url = format!(
+            "{}/repos/{}/{}/git/trees/{}",
+            GH_API, owner, repo, subtree_sha
+        );
         let resp = client.get(&url).await;
         if !resp.ok() {
             log::debug!(
                 "walk_tree_recursive: skipping subtree {} at path '{}' (HTTP {})",
-                &subtree_sha[..8.min(subtree_sha.len())], path_prefix, resp.status
+                &subtree_sha[..8.min(subtree_sha.len())],
+                path_prefix,
+                resp.status
             );
             continue;
         }
@@ -605,22 +686,29 @@ async fn walk_tree_recursive(
 /// GitHub returns content as base64; this function decodes it automatically.
 pub async fn get_blob_content(
     client: &HttpClient,
-    owner:  &str,
-    repo:   &str,
-    sha:    &str,
+    owner: &str,
+    repo: &str,
+    sha: &str,
 ) -> anyhow::Result<Vec<u8>> {
-    let url  = format!("{}/repos/{}/{}/git/blobs/{}", GH_API, owner, repo, sha);
+    let url = format!("{}/repos/{}/{}/git/blobs/{}", GH_API, owner, repo, sha);
     let resp = client.get(&url).await;
     if !resp.ok() {
-        anyhow::bail!("GET blob {} returned HTTP {}", crate::validation::redact_url(&url), resp.status);
+        anyhow::bail!(
+            "GET blob {} returned HTTP {}",
+            crate::validation::redact_url(&url),
+            resp.status
+        );
     }
     let json: serde_json::Value = serde_json::from_slice(&resp.body)?;
-    let encoding    = json["encoding"].as_str().unwrap_or("base64");
+    let encoding = json["encoding"].as_str().unwrap_or("base64");
     let content_str = json["content"].as_str().unwrap_or("");
 
     if encoding == "base64" {
         // GitHub embeds newlines in the base64 payload — strip them before decoding
-        let cleaned: String = content_str.chars().filter(|&c| c != '\n' && c != '\r').collect();
+        let cleaned: String = content_str
+            .chars()
+            .filter(|&c| c != '\n' && c != '\r')
+            .collect();
         use base64::Engine;
         base64::engine::general_purpose::STANDARD
             .decode(&cleaned)

@@ -6,8 +6,6 @@
 //! (GitHub, GitLab, Bitbucket, Gitea, Azure DevOps).
 
 use async_trait::async_trait;
-#[allow(unused_imports)]
-use base64::Engine;
 use std::time::Duration;
 
 // ════════════════════════════════════════════════
@@ -36,17 +34,20 @@ impl Platform {
         let url = url.to_lowercase();
 
         // Extract hostname from URL
-        let host = url
-            .split("://")
-            .nth(1)
-            .and_then(|s| s.split('/').next());
+        let host = url.split("://").nth(1).and_then(|s| s.split('/').next());
 
         match host {
             Some(h) if h.contains("github.com") => Some(Platform::GitHub),
             Some(h) if h.contains("gitlab.com") || h.contains("gitlab") => Some(Platform::GitLab),
-            Some(h) if h.contains("bitbucket.org") || h.contains("bitbucket") => Some(Platform::Bitbucket),
+            Some(h) if h.contains("bitbucket.org") || h.contains("bitbucket") => {
+                Some(Platform::Bitbucket)
+            }
             Some(h) if h.contains("gitea.io") || h.contains("gitea") => Some(Platform::Gitea),
-            Some(h) if h.contains("dev.azure.com") || h.contains("azure") || h.contains("visualstudio.com") => {
+            Some(h)
+                if h.contains("dev.azure.com")
+                    || h.contains("azure")
+                    || h.contains("visualstudio.com") =>
+            {
                 Some(Platform::AzureDevOps)
             }
             _ => None,
@@ -165,7 +166,6 @@ pub struct RateLimitInfo {
     pub limit: u32,
 }
 
-
 // ════════════════════════════════════════════════
 // FORGE TRAIT
 // ════════════════════════════════════════════════
@@ -265,6 +265,7 @@ pub trait Forge: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine;
 
     // Test-only utilities moved here to suppress dead_code warnings
 
@@ -293,9 +294,11 @@ mod tests {
         /// Create from a string.
         fn from_str(s: String) -> Self {
             // Auto-detect token type based on prefix/length
-            if s.starts_with("ghp_") || s.starts_with("gho_") || s.starts_with("ghu_") {
-                AuthToken::Personal(s)
-            } else if s.starts_with("glpat-") {
+            if s.starts_with("ghp_")
+                || s.starts_with("gho_")
+                || s.starts_with("ghu_")
+                || s.starts_with("glpat-")
+            {
                 AuthToken::Personal(s)
             } else if s.contains('.') && s.split('.').count() == 3 {
                 // Likely JWT
@@ -311,7 +314,12 @@ mod tests {
         let url = url.trim_end_matches(".git");
 
         // Parse URL path
-        let path = url.split("://").nth(1)?.split('/').skip(1).collect::<Vec<_>>();
+        let path = url
+            .split("://")
+            .nth(1)?
+            .split('/')
+            .skip(1)
+            .collect::<Vec<_>>();
 
         if path.len() >= 2 {
             let owner = path[0].to_string();
@@ -329,7 +337,10 @@ mod tests {
         match platform {
             Platform::GitHub => {
                 headers.push(("Authorization".to_string(), format!("token {}", token)));
-                headers.push(("Accept".to_string(), "application/vnd.github+json".to_string()));
+                headers.push((
+                    "Accept".to_string(),
+                    "application/vnd.github+json".to_string(),
+                ));
                 headers.push(("X-GitHub-Api-Version".to_string(), "2022-11-28".to_string()));
             }
             Platform::GitLab => {
@@ -343,7 +354,8 @@ mod tests {
             }
             Platform::AzureDevOps => {
                 // Azure DevOps uses basic auth with PAT as username (empty password)
-                let encoded = base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", token, ""));
+                let encoded =
+                    base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", token, ""));
                 headers.push(("Authorization".to_string(), format!("Basic {}", encoded)));
             }
         }
@@ -353,26 +365,50 @@ mod tests {
 
     #[test]
     fn test_platform_from_url_github() {
-        assert_eq!(Platform::from_url("https://github.com/user/repo"), Some(Platform::GitHub));
-        assert_eq!(Platform::from_url("http://github.com/org/project"), Some(Platform::GitHub));
-        assert_eq!(Platform::from_url("https://api.github.com/v3/user"), Some(Platform::GitHub));
+        assert_eq!(
+            Platform::from_url("https://github.com/user/repo"),
+            Some(Platform::GitHub)
+        );
+        assert_eq!(
+            Platform::from_url("http://github.com/org/project"),
+            Some(Platform::GitHub)
+        );
+        assert_eq!(
+            Platform::from_url("https://api.github.com/v3/user"),
+            Some(Platform::GitHub)
+        );
     }
 
     #[test]
     fn test_platform_from_url_gitlab() {
-        assert_eq!(Platform::from_url("https://gitlab.com/user/repo"), Some(Platform::GitLab));
-        assert_eq!(Platform::from_url("https://gitlab.example.com/group/project"), Some(Platform::GitLab));
+        assert_eq!(
+            Platform::from_url("https://gitlab.com/user/repo"),
+            Some(Platform::GitLab)
+        );
+        assert_eq!(
+            Platform::from_url("https://gitlab.example.com/group/project"),
+            Some(Platform::GitLab)
+        );
     }
 
     #[test]
     fn test_platform_from_url_bitbucket() {
-        assert_eq!(Platform::from_url("https://bitbucket.org/user/repo"), Some(Platform::Bitbucket));
+        assert_eq!(
+            Platform::from_url("https://bitbucket.org/user/repo"),
+            Some(Platform::Bitbucket)
+        );
     }
 
     #[test]
     fn test_platform_from_url_gitea() {
-        assert_eq!(Platform::from_url("https://gitea.com/user/repo"), Some(Platform::Gitea));
-        assert_eq!(Platform::from_url("https://gitea.example.com/user/repo"), Some(Platform::Gitea));
+        assert_eq!(
+            Platform::from_url("https://gitea.com/user/repo"),
+            Some(Platform::Gitea)
+        );
+        assert_eq!(
+            Platform::from_url("https://gitea.example.com/user/repo"),
+            Some(Platform::Gitea)
+        );
     }
 
     #[test]
@@ -406,7 +442,10 @@ mod tests {
     fn test_platform_api_base_url() {
         assert_eq!(Platform::GitHub.api_base_url(), "https://api.github.com");
         assert_eq!(Platform::GitLab.api_base_url(), "https://gitlab.com/api/v4");
-        assert_eq!(Platform::Bitbucket.api_base_url(), "https://api.bitbucket.org/2.0");
+        assert_eq!(
+            Platform::Bitbucket.api_base_url(),
+            "https://api.bitbucket.org/2.0"
+        );
     }
 
     #[test]
@@ -466,7 +505,10 @@ mod tests {
     fn test_auth_token_from_str_jwt() {
         // JWT format: header.payload.signature
         let jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U";
-        assert!(matches!(AuthToken::from_str(jwt.to_string()), AuthToken::Jwt(_)));
+        assert!(matches!(
+            AuthToken::from_str(jwt.to_string()),
+            AuthToken::Jwt(_)
+        ));
     }
 
     #[test]
@@ -480,20 +522,28 @@ mod tests {
     #[test]
     fn test_build_api_headers_github() {
         let headers = build_api_headers(Platform::GitHub, "ghp_test");
-        assert!(headers.iter().any(|(k, v)| k == "Authorization" && v == "token ghp_test"));
-        assert!(headers.iter().any(|(k, v)| k == "Accept" && v == "application/vnd.github+json"));
+        assert!(headers
+            .iter()
+            .any(|(k, v)| k == "Authorization" && v == "token ghp_test"));
+        assert!(headers
+            .iter()
+            .any(|(k, v)| k == "Accept" && v == "application/vnd.github+json"));
         assert!(headers.iter().any(|(k, _v)| k == "X-GitHub-Api-Version"));
     }
 
     #[test]
     fn test_build_api_headers_gitlab() {
         let headers = build_api_headers(Platform::GitLab, "glpat-test");
-        assert!(headers.iter().any(|(k, v)| k == "PRIVATE-TOKEN" && v == "glpat-test"));
+        assert!(headers
+            .iter()
+            .any(|(k, v)| k == "PRIVATE-TOKEN" && v == "glpat-test"));
     }
 
     #[test]
     fn test_build_api_headers_bitbucket() {
         let headers = build_api_headers(Platform::Bitbucket, "test_token");
-        assert!(headers.iter().any(|(k, v)| k == "Authorization" && v == "Bearer test_token"));
+        assert!(headers
+            .iter()
+            .any(|(k, v)| k == "Authorization" && v == "Bearer test_token"));
     }
 }

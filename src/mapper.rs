@@ -4,15 +4,14 @@
 //! Does NOT download blobs.  Does NOT write to disk.
 //! Output: MapResult with SHA1 sets + size estimates.
 
-use std::collections::{HashMap, HashSet};
-use regex::Regex;
-use lazy_static::lazy_static;
-use crate::http_client::HttpClient;
 use crate::git_parser::{
-    IndexParser, PackedRefsParser, PackIndexParser,
-    GitConfigParser, parse_head, parse_info_packs, extract_sha1s, IndexEntry,
-    is_valid_sha1, obj_path, ObjectParser,
+    extract_sha1s, is_valid_sha1, obj_path, parse_head, parse_info_packs, GitConfigParser,
+    IndexEntry, IndexParser, ObjectParser, PackIndexParser, PackedRefsParser,
 };
+use crate::http_client::HttpClient;
+use lazy_static::lazy_static;
+use regex::Regex;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 
 const META_FILES: &[&str] = &[
@@ -91,12 +90,12 @@ const SIZE_PER_BLOB: usize = 4 * 1024; // ~4 KB average
 #[derive(Debug, Default)]
 pub struct MapResult {
     pub commit_sha1s: HashSet<String>,
-    pub tree_sha1s:   HashSet<String>,
-    pub blob_sha1s:   HashSet<String>,
-    pub pack_sha1s:   Vec<String>,
-    pub meta:         HashMap<String, Vec<u8>>,
-    pub branches:     Vec<String>,
-    pub remote_urls:  Vec<HashMap<String, String>>,
+    pub tree_sha1s: HashSet<String>,
+    pub blob_sha1s: HashSet<String>,
+    pub pack_sha1s: Vec<String>,
+    pub meta: HashMap<String, Vec<u8>>,
+    pub branches: Vec<String>,
+    pub remote_urls: Vec<HashMap<String, String>>,
     pub index_entries: Vec<IndexEntry>,
     /// SHA1→filename mapping from index file only
     pub index_sha1_to_file: HashMap<String, String>,
@@ -167,7 +166,8 @@ impl MapResult {
 
         // Index entries first — they carry the "current" filesystem layout.
         for entry in &self.index_entries {
-            result.entry(entry.sha1.clone())
+            result
+                .entry(entry.sha1.clone())
                 .or_default()
                 .push(entry.filename.clone());
         }
@@ -184,7 +184,6 @@ impl MapResult {
 
         result
     }
-
 }
 
 lazy_static! {
@@ -201,7 +200,10 @@ pub struct Mapper {
 
 impl Mapper {
     pub fn new(client: HttpClient) -> Self {
-        Self { client, max_history: None }
+        Self {
+            client,
+            max_history: None,
+        }
     }
 
     /// Configure commit-graph traversal depth. `0` means unlimited (careful — pathological
@@ -211,7 +213,12 @@ impl Mapper {
         self
     }
 
-    pub async fn run(&self, git_url: &str, branch: Option<&str>, verify_objects: bool) -> MapResult {
+    pub async fn run(
+        &self,
+        git_url: &str,
+        branch: Option<&str>,
+        verify_objects: bool,
+    ) -> MapResult {
         let git_url = git_url.trim_end_matches('/');
         let mut result = MapResult::default();
         let mut meta: HashMap<String, Vec<u8>> = HashMap::new();
@@ -302,7 +309,8 @@ impl Mapper {
             result.branches = cfg_parser.branches(&cfg);
 
             // Fetch refs for each branch — all concurrently
-            let branch_paths: Vec<(String, String)> = result.branches
+            let branch_paths: Vec<(String, String)> = result
+                .branches
                 .iter()
                 .take(20)
                 .flat_map(|br| {
@@ -359,7 +367,9 @@ impl Mapper {
                         sha1s.insert(e.sha1.clone());
                         result.blob_sha1s.insert(e.sha1.clone());
                         // Populate index_sha1_to_file mapping
-                        result.index_sha1_to_file.insert(e.sha1.clone(), e.filename.clone());
+                        result
+                            .index_sha1_to_file
+                            .insert(e.sha1.clone(), e.filename.clone());
                     }
                     result.index_entries = entries;
                 }
@@ -429,8 +439,12 @@ impl Mapper {
         // These files are already fetched via META_FILES but are not under refs/ or logs/,
         // so they need their own extraction pass.
         const SPECIAL_HEAD_FILES: &[&str] = &[
-            "ORIG_HEAD", "FETCH_HEAD", "MERGE_HEAD", "CHERRY_PICK_HEAD",
-            "REBASE_HEAD", "shallow",
+            "ORIG_HEAD",
+            "FETCH_HEAD",
+            "MERGE_HEAD",
+            "CHERRY_PICK_HEAD",
+            "REBASE_HEAD",
+            "shallow",
         ];
         for file in SPECIAL_HEAD_FILES {
             if let Some(body) = meta.get(*file) {
@@ -619,7 +633,8 @@ impl Mapper {
                                     None => break None,
                                 };
                                 // Fetch the tag's target.
-                                let target_url = format!("{}/{}", git_url_walk, obj_path(&tag_info.target));
+                                let target_url =
+                                    format!("{}/{}", git_url_walk, obj_path(&tag_info.target));
                                 let target_resp = client.get(&target_url).await;
                                 if !target_resp.ok() || target_resp.body.is_empty() {
                                     break None;
@@ -718,7 +733,11 @@ impl Mapper {
             result.blob_sha1s.len()
         };
         result.estimated_bytes = if !result.index_entries.is_empty() {
-            result.index_entries.iter().map(|e| e.file_size as usize).sum()
+            result
+                .index_entries
+                .iter()
+                .map(|e| e.file_size as usize)
+                .sum()
         } else {
             result.estimated_files * SIZE_PER_BLOB
         };
@@ -738,11 +757,17 @@ impl Mapper {
             // Distribute samples across the index entries (which are ordered)
             // rather than iterating a HashSet, so a cluster of blocked entries
             // near the front can't produce a false PARTIAL_EXPOSURE.
-            let entries: Vec<_> = result.index_entries.iter()
+            let entries: Vec<_> = result
+                .index_entries
+                .iter()
                 .filter(|e| is_valid_sha1(&e.sha1) && result.blob_sha1s.contains(&e.sha1))
                 .collect();
             let sample_size = entries.len().min(10);
-            let step = if sample_size > 1 { entries.len() / sample_size } else { 1 };
+            let step = if sample_size > 1 {
+                entries.len() / sample_size
+            } else {
+                1
+            };
             let mut accessible_count = 0usize;
             for i in 0..sample_size {
                 let idx = (i * step).min(entries.len().saturating_sub(1));
@@ -768,9 +793,7 @@ impl Mapper {
                     // objects are reachable via pack files (common on gc'd
                     // repos where loose objects have been pruned).
                     let probe_pack = &result.pack_sha1s[0];
-                    let idx_url = format!(
-                        "{}/objects/pack/pack-{}.idx", git_url, probe_pack
-                    );
+                    let idx_url = format!("{}/objects/pack/pack-{}.idx", git_url, probe_pack);
                     let resp = self.client.get(&idx_url).await;
                     resp.ok() && !resp.body.is_empty()
                 } else {
@@ -790,8 +813,10 @@ mod tests {
     #[test]
     fn test_map_result_all_sha1s_union() {
         let mut r = MapResult::default();
-        r.blob_sha1s.insert("blob1111blob1111blob1111blob1111blob1111b".to_string());
-        r.commit_sha1s.insert("comm1111comm1111comm1111comm1111comm1111c".to_string());
+        r.blob_sha1s
+            .insert("blob1111blob1111blob1111blob1111blob1111b".to_string());
+        r.commit_sha1s
+            .insert("comm1111comm1111comm1111comm1111comm1111c".to_string());
         let all = r.all_sha1s();
         assert_eq!(all.len(), 2);
         assert!(all.contains("blob1111blob1111blob1111blob1111blob1111b"));
@@ -800,14 +825,22 @@ mod tests {
 
     #[test]
     fn test_map_result_size_human() {
-        let mut r = MapResult::default();
-        r.estimated_bytes = 500;
+        let r = MapResult {
+            estimated_bytes: 500,
+            ..Default::default()
+        };
         assert!(r.size_human().ends_with("B"));
 
-        r.estimated_bytes = 2048;
+        let r = MapResult {
+            estimated_bytes: 2048,
+            ..Default::default()
+        };
         assert!(r.size_human().contains("KB"));
 
-        r.estimated_bytes = 2 * 1024 * 1024;
+        let r = MapResult {
+            estimated_bytes: 2 * 1024 * 1024,
+            ..Default::default()
+        };
         assert!(r.size_human().contains("MB"));
     }
 
@@ -825,65 +858,112 @@ mod tests {
 
     #[test]
     fn test_meta_files_contains_shallow() {
-        assert!(META_FILES.contains(&"shallow"), "shallow must be in META_FILES for shallow-clone detection");
+        assert!(
+            META_FILES.contains(&"shallow"),
+            "shallow must be in META_FILES for shallow-clone detection"
+        );
     }
 
     #[test]
     fn test_meta_files_contains_squash_msg() {
-        assert!(META_FILES.contains(&"SQUASH_MSG"), "SQUASH_MSG must be in META_FILES");
+        assert!(
+            META_FILES.contains(&"SQUASH_MSG"),
+            "SQUASH_MSG must be in META_FILES"
+        );
     }
 
     #[test]
     fn test_meta_files_contains_rebase_head() {
-        assert!(META_FILES.contains(&"REBASE_HEAD"), "REBASE_HEAD must be in META_FILES");
+        assert!(
+            META_FILES.contains(&"REBASE_HEAD"),
+            "REBASE_HEAD must be in META_FILES"
+        );
     }
 
     #[test]
     fn test_meta_files_contains_config_worktree() {
-        assert!(META_FILES.contains(&"config.worktree"), "config.worktree must be in META_FILES");
+        assert!(
+            META_FILES.contains(&"config.worktree"),
+            "config.worktree must be in META_FILES"
+        );
     }
 
     #[test]
     fn test_meta_files_contains_gitmodules() {
-        assert!(META_FILES.contains(&".gitmodules"), ".gitmodules must be in META_FILES for submodule detection");
+        assert!(
+            META_FILES.contains(&".gitmodules"),
+            ".gitmodules must be in META_FILES for submodule detection"
+        );
     }
 
     #[test]
     fn test_meta_files_contains_gitattributes() {
-        assert!(META_FILES.contains(&".gitattributes"), ".gitattributes must be in META_FILES");
+        assert!(
+            META_FILES.contains(&".gitattributes"),
+            ".gitattributes must be in META_FILES"
+        );
     }
 
     #[test]
     fn test_meta_files_contains_extended_branch_refs() {
-        assert!(META_FILES.contains(&"refs/heads/test"),  "refs/heads/test must be in META_FILES");
-        assert!(META_FILES.contains(&"refs/heads/beta"),  "refs/heads/beta must be in META_FILES");
-        assert!(META_FILES.contains(&"refs/heads/trunk"), "refs/heads/trunk must be in META_FILES");
-        assert!(META_FILES.contains(&"refs/heads/next"),  "refs/heads/next must be in META_FILES");
+        assert!(
+            META_FILES.contains(&"refs/heads/test"),
+            "refs/heads/test must be in META_FILES"
+        );
+        assert!(
+            META_FILES.contains(&"refs/heads/beta"),
+            "refs/heads/beta must be in META_FILES"
+        );
+        assert!(
+            META_FILES.contains(&"refs/heads/trunk"),
+            "refs/heads/trunk must be in META_FILES"
+        );
+        assert!(
+            META_FILES.contains(&"refs/heads/next"),
+            "refs/heads/next must be in META_FILES"
+        );
     }
 
     #[test]
     fn test_meta_files_contains_remote_tracking_refs() {
-        assert!(META_FILES.contains(&"refs/remotes/origin/staging"),    "staging remote ref must be in META_FILES");
-        assert!(META_FILES.contains(&"refs/remotes/origin/production"), "production remote ref must be in META_FILES");
+        assert!(
+            META_FILES.contains(&"refs/remotes/origin/staging"),
+            "staging remote ref must be in META_FILES"
+        );
+        assert!(
+            META_FILES.contains(&"refs/remotes/origin/production"),
+            "production remote ref must be in META_FILES"
+        );
     }
 
     #[test]
     fn test_map_result_size_human_gb() {
-        let mut r = MapResult::default();
-        r.estimated_bytes = 2 * 1024 * 1024 * 1024;
-        assert!(r.size_human().contains("GB"), "sizes ≥ 1 GiB should use GB suffix");
+        let r = MapResult {
+            estimated_bytes: 2 * 1024 * 1024 * 1024,
+            ..Default::default()
+        };
+        assert!(
+            r.size_human().contains("GB"),
+            "sizes ≥ 1 GiB should use GB suffix"
+        );
     }
 
     // ── V3.1 metadata probe tests ────────────────
 
     #[test]
     fn test_meta_files_contains_description() {
-        assert!(META_FILES.contains(&"description"), "description should be in META_FILES");
+        assert!(
+            META_FILES.contains(&"description"),
+            "description should be in META_FILES"
+        );
     }
 
     #[test]
     fn test_meta_files_contains_info_exclude() {
-        assert!(META_FILES.contains(&"info/exclude"), "info/exclude should be in META_FILES");
+        assert!(
+            META_FILES.contains(&"info/exclude"),
+            "info/exclude should be in META_FILES"
+        );
     }
 
     #[test]
@@ -896,13 +976,22 @@ mod tests {
 
     #[test]
     fn test_meta_files_contains_tag_refs() {
-        assert!(META_FILES.contains(&"refs/tags/latest"), "refs/tags/latest should be in META_FILES");
-        assert!(META_FILES.contains(&"refs/tags/v1.0.0"), "refs/tags/v1.0.0 should be in META_FILES");
+        assert!(
+            META_FILES.contains(&"refs/tags/latest"),
+            "refs/tags/latest should be in META_FILES"
+        );
+        assert!(
+            META_FILES.contains(&"refs/tags/v1.0.0"),
+            "refs/tags/v1.0.0 should be in META_FILES"
+        );
     }
 
     #[test]
     fn test_meta_files_contains_upstream_remote() {
-        assert!(META_FILES.contains(&"refs/remotes/upstream/HEAD"), "upstream/HEAD should be in META_FILES");
+        assert!(
+            META_FILES.contains(&"refs/remotes/upstream/HEAD"),
+            "upstream/HEAD should be in META_FILES"
+        );
     }
 
     // ── Sprint 1 — Mapper history depth ──────────────────────────────────────
@@ -910,7 +999,10 @@ mod tests {
     fn mapper_default_max_history_is_none_until_configured() {
         let client = crate::http_client::HttpClient::new(Default::default()).unwrap();
         let m = Mapper::new(client);
-        assert!(m.max_history.is_none(), "default constructor should not set max_history");
+        assert!(
+            m.max_history.is_none(),
+            "default constructor should not set max_history"
+        );
     }
 
     #[test]
@@ -943,7 +1035,8 @@ mod tests {
             mode: 0,
             file_size: 0,
         });
-        m.graph_sha1_to_file.insert(sha.clone(), "subdir/LICENSE".into());
+        m.graph_sha1_to_file
+            .insert(sha.clone(), "subdir/LICENSE".into());
 
         let single = m.complete_sha1_to_file();
         assert_eq!(single.get(&sha).unwrap(), "LICENSE");

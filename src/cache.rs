@@ -8,12 +8,12 @@
 //! - Cross-target cache sharing (same SHA1 from different targets cached once)
 //!   BUG-ERR-009: Convert to tokio::sync::Mutex for timeout support
 
+use anyhow::{Context, Result};
+use r2d2::Pool;
+use r2d2_sqlite::SqliteConnectionManager;
+use rusqlite::{params, Connection};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
-use anyhow::{Context, Result};
-use rusqlite::{params, Connection};
-use r2d2::{Pool};
-use r2d2_sqlite::SqliteConnectionManager;
 
 /// Maximum cache size in bytes (1GB)
 const MAX_CACHE_SIZE_BYTES: i64 = 1024 * 1024 * 1024;
@@ -65,11 +65,13 @@ fn init_db(conn: &Connection) -> Result<()> {
 
     // If the size row is missing (fresh DB or upgraded from pre-S3.9 schema),
     // recompute once via SUM and seed it. This is the ONLY time we scan.
-    let seed: i64 = conn.query_row(
-        "SELECT COALESCE(SUM(LENGTH(content)), 0) FROM cache",
-        [],
-        |row| row.get(0),
-    ).unwrap_or(0);
+    let seed: i64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(LENGTH(content)), 0) FROM cache",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
     conn.execute(
         "INSERT OR IGNORE INTO cache_meta (key, value) VALUES ('total_bytes', ?1)",
         params![seed],
@@ -99,8 +101,7 @@ impl ObjectCache {
 
         // Create cache directory if it doesn't exist
         if let Some(parent) = cache_path.parent() {
-            std::fs::create_dir_all(parent)
-                .context("Failed to create cache directory")?;
+            std::fs::create_dir_all(parent).context("Failed to create cache directory")?;
         }
 
         // Create r2d2 pool with SQLite connection manager
@@ -111,16 +112,19 @@ impl ObjectCache {
             .context("Failed to create connection pool")?;
 
         // Initialize database and set pragmas on a connection from the pool
-        let conn = pool.get()
+        let conn = pool
+            .get()
             .context("Failed to get connection for initialization")?;
 
         // Set performance optimization pragmas
-        conn.execute_batch("
+        conn.execute_batch(
+            "
             PRAGMA journal_mode = WAL;
             PRAGMA synchronous = NORMAL;
             PRAGMA cache_size = -64000;  -- 64MB cache
             PRAGMA temp_store = MEMORY;
-        ")
+        ",
+        )
         .context("Failed to set pragmas")?;
 
         init_db(&conn)?;
@@ -129,7 +133,11 @@ impl ObjectCache {
             pool,
             // BUG-LOGIC-004 FIX: ttl == 0 means permanent (no expiration), not expiring
             // Use i64::MAX to represent permanent entries
-            ttl_seconds: if ttl_seconds == 0 { i64::MAX } else { ttl_seconds },
+            ttl_seconds: if ttl_seconds == 0 {
+                i64::MAX
+            } else {
+                ttl_seconds
+            },
             no_cache,
         })
     }
@@ -154,11 +162,13 @@ impl ObjectCache {
         // producing a garbage cutoff in release, rejecting every row. We now
         // skip the created_at predicate entirely for the permanent case.
         if self.ttl_seconds == i64::MAX {
-            return conn.query_row(
-                "SELECT content FROM cache WHERE sha1 = ?1",
-                params![sha1],
-                |row| row.get::<_, Vec<u8>>(0),
-            ).ok();
+            return conn
+                .query_row(
+                    "SELECT content FROM cache WHERE sha1 = ?1",
+                    params![sha1],
+                    |row| row.get::<_, Vec<u8>>(0),
+                )
+                .ok();
         }
 
         let now = now_seconds();
@@ -202,11 +212,13 @@ impl ObjectCache {
 
             // If we're overwriting an existing entry, subtract its old size from the
             // running total before writing.
-            let old_len: i64 = tx.query_row(
-                "SELECT LENGTH(content) FROM cache WHERE sha1 = ?1",
-                params![sha1],
-                |row| row.get(0),
-            ).unwrap_or(0);
+            let old_len: i64 = tx
+                .query_row(
+                    "SELECT LENGTH(content) FROM cache WHERE sha1 = ?1",
+                    params![sha1],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0);
 
             tx.execute(
                 "INSERT OR REPLACE INTO cache (sha1, content, created_at, source_url)
@@ -222,24 +234,28 @@ impl ObjectCache {
 
             // Read current total and evict if over budget — still inside the txn so
             // concurrent writers see consistent size.
-            let mut total: i64 = tx.query_row(
-                "SELECT value FROM cache_meta WHERE key = 'total_bytes'",
-                [],
-                |row| row.get(0),
-            ).unwrap_or(0);
+            let mut total: i64 = tx
+                .query_row(
+                    "SELECT value FROM cache_meta WHERE key = 'total_bytes'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0);
             if total > MAX_CACHE_SIZE_BYTES {
                 let target = MAX_CACHE_SIZE_BYTES * 9 / 10;
                 // Evict in batches of 100 until we reach 90 % of the cap.
                 while total > target {
-                    let deleted_size: i64 = tx.query_row(
-                        "SELECT COALESCE(SUM(LENGTH(content)), 0) FROM (
+                    let deleted_size: i64 = tx
+                        .query_row(
+                            "SELECT COALESCE(SUM(LENGTH(content)), 0) FROM (
                             SELECT content FROM cache
                             ORDER BY created_at ASC
                             LIMIT 100
                          )",
-                        [],
-                        |row| row.get(0),
-                    ).unwrap_or(0);
+                            [],
+                            |row| row.get(0),
+                        )
+                        .unwrap_or(0);
                     if deleted_size == 0 {
                         break; // Nothing to evict — cache empty (shouldn't happen).
                     }
@@ -281,11 +297,9 @@ impl ObjectCache {
         let now = now_seconds();
         let cutoff = now.saturating_sub(self.ttl_seconds);
 
-        let deleted = conn.execute(
-            "DELETE FROM cache WHERE created_at < ?1",
-            params![cutoff],
-        )
-        .context("Failed to delete expired entries")?;
+        let deleted = conn
+            .execute("DELETE FROM cache WHERE created_at < ?1", params![cutoff])
+            .context("Failed to delete expired entries")?;
 
         Ok(deleted)
     }
@@ -306,17 +320,20 @@ impl ObjectCache {
 
         // Sprint 3 (S3.9): pull total_bytes from the metadata row rather than
         // recomputing via SUM. Falls back to SUM on schema-migration seed miss.
-        let total_bytes = conn.query_row(
-            "SELECT value FROM cache_meta WHERE key = 'total_bytes'",
-            [],
-            |row| row.get::<_, i64>(0),
-        ).unwrap_or_else(|_| {
-            conn.query_row(
-                "SELECT COALESCE(SUM(LENGTH(content)), 0) FROM cache",
+        let total_bytes = conn
+            .query_row(
+                "SELECT value FROM cache_meta WHERE key = 'total_bytes'",
                 [],
-                |row| row.get(0),
-            ).unwrap_or(0)
-        });
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap_or_else(|_| {
+                conn.query_row(
+                    "SELECT COALESCE(SUM(LENGTH(content)), 0) FROM cache",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0)
+            });
 
         // Sprint 3 (S3.5): permanent TTL means nothing ever expires — skip the
         // underflowing cutoff computation.
@@ -329,15 +346,14 @@ impl ObjectCache {
                 "SELECT COUNT(*) FROM cache WHERE created_at < ?1",
                 params![cutoff],
                 |row| row.get(0),
-            ).unwrap_or(0)
+            )
+            .unwrap_or(0)
         };
 
         CacheStats {
-            total_entries: conn.query_row(
-                "SELECT COUNT(*) FROM cache",
-                [],
-                |row| row.get(0),
-            ).unwrap_or(0),
+            total_entries: conn
+                .query_row("SELECT COUNT(*) FROM cache", [], |row| row.get(0))
+                .unwrap_or(0),
             total_bytes,
             expired_entries,
         }
@@ -357,7 +373,8 @@ impl ObjectCache {
         conn.execute(
             "UPDATE cache_meta SET value = 0 WHERE key = 'total_bytes'",
             [],
-        ).ok();
+        )
+        .ok();
 
         Ok(())
     }
@@ -476,7 +493,10 @@ mod tests {
         assert_eq!(permanent, i64::MAX);
         // And that saturating_sub is safe as the general fallback.
         let cutoff = now.saturating_sub(permanent);
-        assert_eq!(cutoff, i64::MIN, "saturating_sub must not panic even at extremes");
+        assert_eq!(
+            cutoff, -9_223_372_035_154_775_807,
+            "saturating_sub must preserve the representable result"
+        );
     }
 
     #[test]

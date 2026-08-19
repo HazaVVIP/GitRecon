@@ -1,5 +1,5 @@
 //! main.rs
-//! GitRecon v3.0.0 — Streaming Git Exposure Scanner (Rust)
+//! GitRecon v3.2.5 — Streaming Git Exposure Scanner (Rust)
 //!
 //! Usage:
 //!   gitrecon <url> [options]
@@ -17,52 +17,55 @@
 //!   gitrecon --token ghp_xxxx --format sarif --output ./results
 //!   gitrecon --dir ./project
 
-mod http_client;
-mod layout;
-mod git_parser;
+mod azure_api; // GIT-004: Azure DevOps support
+mod binary_adapter;
+mod binary_scanner;
+mod bitbucket_api;
+mod cache; // PERF-005: SQLite cache layer
+mod checkpoint;
 mod detect;
-mod mapper;
-mod streamer;
-mod reporter;
+mod forge;
+mod forge_factory;
+mod git_parser;
+mod gitea_api; // GIT-003: Gitea/Forgejo support
 mod github_api;
 mod gitlab_api;
-mod bitbucket_api;
-mod gitea_api; // GIT-003: Gitea/Forgejo support
-mod azure_api; // GIT-004: Azure DevOps support
-mod forge;
-mod text_utils;
-mod checkpoint;
-mod binary_scanner;
-mod validation;
-mod temp_cleanup; // SEC-004: Temp file cleanup
-mod rate_limiter; // PERF-004: Token bucket rate limiter
-mod cache; // PERF-005: SQLite cache layer
+mod http_client;
+mod layout;
+mod mapper;
+mod outcome;
 mod pack_reader; // Sprint 5 (S5.1): pack file parser + delta resolver
-#[allow(dead_code)]
-// Sprint 5 (S5.6): removed dead modules — `reconstructor` was never wired
-// (its Reconstructor::run was defined but never instantiated), and `config`
-// was a 3-line placeholder. Constants live where they're used, per module.
+mod rate_limiter; // PERF-004: Token bucket rate limiter
+mod reporter;
+mod streamer;
+mod target_utils;
+mod temp_cleanup; // SEC-004: Temp file cleanup
+mod text_utils;
 mod ui;
+mod validation;
 
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
 use std::io::{self, Write};
-
-use forge::Forge;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use clap::Parser;
+use forge::Forge;
+use forge_factory::create_forge_client;
 use futures::StreamExt;
+use outcome::{classify_error, ScanSummary, TargetErrorCode, TargetOutcome, TargetStatus};
 
 use temp_cleanup::TempDirGuard; // SEC-004
 
+use binary_adapter::{binary_findings_to_findings, is_binary_extension};
 use colored::Colorize;
-use ui::theme::{Theme, BannerStyle as ThemeBannerStyle};
 use http_client::{HttpClient, HttpConfig};
 use reporter::Reporter;
-use streamer::StreamResult;
 use serde::Deserialize;
+use streamer::StreamResult;
+use target_utils::{dir_target_name, normalize_url, parse_extra_headers, target_name};
+use ui::theme::{BannerStyle as ThemeBannerStyle, Theme};
 
 // ════════════════════════════════════════════════
 // A-1: Multi-Target Scanning - Target Definition
@@ -70,21 +73,475 @@ use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
-#[allow(dead_code)]
 enum Target {
-    Url { url: String, fuzz: Option<bool> },
-    Token { token: String, repos: Option<Vec<String>> },
-    Dir { dir: String },
+    Url {
+        url: String,
+        fuzz: Option<bool>,
+    },
+    Token {
+        token: String,
+        repos: Option<Vec<String>>,
+    },
+    Dir {
+        dir: String,
+    },
 }
 
-#[allow(dead_code)]
-impl Target {
-    fn kind(&self) -> &'static str {
-        match self {
-            Target::Url { .. } => "URL",
-            Target::Token { .. } => "TOKEN",
-            Target::Dir { .. } => "DIR",
+struct UrlRunContext<'a> {
+    args: &'a Cli,
+    rep: &'a Reporter,
+    client: &'a HttpClient,
+    target_num: usize,
+    total_targets: usize,
+    extra_patterns: Vec<streamer::DynPattern>,
+    false_positive_keywords: &'a [String],
+    quiet: bool,
+    verbose: bool,
+}
+
+async fn run_url_target(context: UrlRunContext<'_>, url: String, fuzz: bool) -> TargetOutcome {
+    let UrlRunContext {
+        args,
+        rep,
+        client,
+        target_num,
+        total_targets,
+        extra_patterns,
+        false_positive_keywords,
+        quiet,
+        verbose,
+    } = context;
+    if !args.pipe && !quiet {
+        rep.banner();
+        println!("  Target [{}/{}]: {}\n", target_num, total_targets, url);
+    }
+
+    // ── Detect ──────────────────────────────────────────────────
+    if verbose {
+        println!("  ◈  Target identification...");
+    }
+
+    let dr = detect::run(client, &url, fuzz).await;
+
+    let dr = match dr {
+        Some(r) => r,
+        None => {
+            if verbose {
+                println!("  ✘  No .git exposure detected");
+            }
+            return TargetOutcome {
+                target: url.clone(),
+                target_type: "URL".to_string(),
+                status: TargetStatus::Failed,
+                report_path: None,
+                findings_count: 0,
+                risk_score: 0,
+                error_code: Some(TargetErrorCode::NoGitExposure),
+                error: Some("No .git exposure detected".to_string()),
+            };
         }
+    };
+
+    if dr.confidence < args.min_confidence {
+        if verbose {
+            println!(
+                "  ✘  Confidence {}% < minimum {}%",
+                dr.confidence, args.min_confidence
+            );
+        }
+        return TargetOutcome {
+            target: url.clone(),
+            target_type: "URL".to_string(),
+            status: TargetStatus::Failed,
+            report_path: None,
+            findings_count: 0,
+            risk_score: 0,
+            error_code: Some(TargetErrorCode::ConfidenceBelowMinimum),
+            error: Some(format!("Confidence below minimum: {}", dr.confidence)),
+        };
+    }
+    if verbose {
+        println!("  ✔  Git detected! ({}%, {})", dr.confidence, dr.label);
+    }
+
+    // ── Reconnaissance ───────────────────────────────────────────
+    if verbose {
+        println!("  ◈  Repository reconnaissance...");
+    }
+
+    let mapper = mapper::Mapper::new(client.clone()).with_max_history(args.max_history);
+    let map_r = mapper
+        .run(&dr.git_url, dr.branch.as_deref(), !args.no_verify_objects)
+        .await;
+
+    // DX-4: --dry-run
+    if args.dry_run {
+        println!("\n  ◈  [DRY RUN] Detection + Reconnaissance complete. Analysis skipped.");
+        println!("  SHA1 objects   : {}", map_r.all_sha1s().len());
+        println!("  Blobs (index)  : {}", map_r.blob_sha1s.len());
+        println!("  Commits/trees  : {}", map_r.commit_sha1s.len());
+        println!(
+            "  Est. disk size : {} ({} files)",
+            map_r.size_human(),
+            map_r.estimated_files
+        );
+        println!(
+            "  Branches       : {}",
+            map_r.branches[..map_r.branches.len().min(8)].join(", ")
+        );
+        if !map_r.remote_urls.is_empty() {
+            if let Some(u) = map_r.remote_urls.first().and_then(|m| m.get("url")) {
+                println!("  Remote origin  : {}", u);
+            }
+        }
+        println!();
+        return TargetOutcome {
+            target: url.clone(),
+            target_type: "URL".to_string(),
+            status: TargetStatus::Success,
+            report_path: None,
+            findings_count: 0,
+            risk_score: 0,
+            error_code: None,
+            error: None,
+        };
+    }
+    let total = map_r.all_sha1s().len();
+    if verbose {
+        println!("  ✔  Repository mapped: {} objects", total);
+    }
+
+    // VERIFICATION: Check if git objects are actually accessible
+    // This catches partial exposure cases where only metadata is exposed
+    if !map_r.objects_accessible {
+        if verbose {
+            println!("  ⚠  PARTIAL EXPOSURE DETECTED: Git metadata files (HEAD, index, config) are accessible, but git objects cannot be fetched (blocked, 404, or non-git response)");
+            println!("  → Skipping analysis (no accessible objects to scan)");
+            println!("  → Detection downgraded from {} to PARTIAL", dr.label);
+        } else {
+            eprintln!("  ⚠  Partial exposure: metadata only, objects not accessible");
+        }
+
+        // Generate a report indicating partial exposure
+        let partial_report = format!("{}/{}_report_partial.json", args.output, target_name(&url));
+        if let Err(e) = std::fs::write(
+                        &partial_report,
+                        serde_json::json!({
+                            "target": url,
+                            "timestamp": chrono::Utc::now().to_rfc3339(),
+                            "tool": "GitRecon",
+                            "version": env!("CARGO_PKG_VERSION"),
+                            "detection": {
+                                "confidence": dr.confidence,
+                                "label": format!("{}_PARTIAL", dr.label),
+                                "git_url": dr.git_url,
+                                "exposure_type": "metadata_only"
+                            },
+                            "map": {
+                                "metadata_accessible": true,
+                                "objects_accessible": false,
+                                "blob_sha1s_found": map_r.blob_sha1s.len(),
+                                "branches": map_r.branches,
+                                "remote_urls": map_r.remote_urls
+                            },
+                            "result": {
+                                "blobs_scanned": 0,
+                                "findings": [],
+                                "severity_counts": {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0},
+                                "note": "Git metadata files (HEAD, config, index) are accessible, but git objects (blobs/trees/commits) cannot be fetched. This indicates partial .git exposure where the server blocks or restricts access to objects/, or returns non-git responses."
+                            }
+                        }).to_string()
+                    ) {
+                        if verbose {
+                            eprintln!("  ✗ Failed to write partial exposure report: {}", e);
+                        }
+                                        } else if verbose {
+                        println!("  → Partial exposure report saved: {}", partial_report);
+                    }
+        return TargetOutcome {
+            target: url.clone(),
+            target_type: "URL".to_string(),
+            status: TargetStatus::Partial,
+            report_path: Some(partial_report),
+            findings_count: 0,
+            risk_score: 0,
+            error_code: Some(TargetErrorCode::PartialExposure),
+            error: Some("Git metadata is accessible but git objects are unavailable".to_string()),
+        };
+    }
+    // ── Analysis ─────────────────────────────────────────────────
+    if verbose {
+        println!("  ◈  Deep object analysis...");
+        rep.print_stream_start(total);
+    }
+
+    let save_dir = if args.save {
+        Some(std::path::PathBuf::from(&args.output).join(target_name(&url)))
+    } else {
+        None
+    };
+
+    // PERF-005: Create cache
+    let cache = if !args.no_cache {
+        match cache::ObjectCache::new(args.cache_ttl as i64, args.no_cache) {
+            Ok(c) => Some(Arc::new(c)),
+            Err(e) => {
+                eprintln!("  ⚠   Failed to initialize cache: {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // PERF-005: Log cache status (BUG-ERR-009: now async)
+    if verbose {
+        if let Some(ref cache) = cache {
+            if cache.is_disabled() {
+                println!("  ◈  Cache: disabled (--no-cache)");
+            } else {
+                let stats = cache.stats().await;
+                println!(
+                    "  ◈  Cache: enabled ({} entries, {})",
+                    stats.total_entries,
+                    stats.size_human()
+                );
+            }
+        } else {
+            println!("  ◈  Cache: disabled (initialization failed)");
+        }
+    }
+
+    let streamer = streamer::Streamer::new(
+        client.clone(),
+        args.workers,
+        args.mem_limit,
+        verbose,
+        args.max_findings,
+        args.stop_on_critical,
+        extra_patterns.clone(),
+        args.max_blob_size,
+        args.entropy_threshold,
+        args.live || args.pipe,
+        !args.no_adaptive,
+        args.resume,
+        args.checkpoint_interval,
+        Some(url.clone()),
+        cache,
+        false_positive_keywords.to_vec(),
+        args.exhaustive,
+    );
+
+    let rep_arc = Arc::new(rep.clone());
+    let rep_for_progress = rep_arc.clone();
+    let stream_r = streamer
+        .run(
+            &dr.git_url,
+            &map_r,
+            if quiet {
+                None
+            } else {
+                Some(Arc::new(move |done: usize, total: usize| {
+                    rep_for_progress.progress_bar(done, total, 0);
+                }))
+            },
+            save_dir,
+        )
+        .await;
+
+    if verbose {
+        println!();
+    }
+
+    // ── Intelligence Report ──────────────────────────────────────
+    if verbose {
+        println!("  ◈  Generating intelligence report...");
+    }
+
+    if !args.pipe {
+        rep.print_stream_done(&stream_r);
+    }
+
+    if verbose && !args.pipe {
+        rep.print_findings_summary(&stream_r.findings);
+    }
+
+    // Save report in requested format
+    let tname = target_name(&url);
+    let ext = match args.format.as_str() {
+        "sarif" => "sarif",
+        "csv" => "csv",
+        "ndjson" => "ndjson",
+        "md" => "md",
+        "html" => "html",
+        _ => "json",
+    };
+    let report_path = format!("{}/{}_report.{}", args.output, tname, ext);
+
+    match args.format.as_str() {
+        "sarif" => {
+            if let Err(e) = rep.save_sarif(&report_path, &url, Some(&stream_r)) {
+                eprintln!("  ⚠   Could not save SARIF report: {}", e);
+            }
+        }
+        "csv" => {
+            if let Err(e) = rep.save_csv(&report_path, Some(&stream_r)) {
+                eprintln!("  ⚠   Could not save CSV report: {}", e);
+            }
+        }
+        "ndjson" => {
+            if let Err(e) = rep.save_ndjson(&report_path, Some(&stream_r)) {
+                eprintln!("  ⚠   Could not save NDJSON report: {}", e);
+            }
+        }
+        "md" => {
+            if let Err(e) = rep.save_markdown(&report_path, &url, Some(&stream_r)) {
+                eprintln!("  ⚠   Could not save Markdown report: {}", e);
+            }
+        }
+        "html" => {
+            if let Err(e) = rep.save_html(&report_path, &url, Some(&stream_r)) {
+                eprintln!("  ⚠   Could not save HTML report: {}", e);
+            }
+        }
+        _ => {
+            if let Err(e) =
+                rep.save_json(&report_path, &url, Some(&dr), Some(&map_r), Some(&stream_r))
+            {
+                eprintln!("  ⚠   Could not save report: {}", e);
+            }
+        }
+    }
+
+    if verbose && !args.pipe {
+        rep.print_report(&dr, &map_r, &stream_r, &report_path);
+    }
+
+    // Collect result for aggregate report
+    let outcome = TargetOutcome {
+        target: url.clone(),
+        target_type: "URL".to_string(),
+        status: TargetStatus::Success,
+        report_path: Some(report_path.clone()),
+        findings_count: stream_r.findings.len(),
+        risk_score: stream_r.risk_score(),
+        error_code: None,
+        error: None,
+    };
+    // O-4: Webhook delivery
+    if let Some(ref webhook_url) = args.webhook {
+        if let Ok(json_body) = std::fs::read_to_string(&report_path) {
+            match try_deliver_webhook(rep, args, webhook_url, &json_body).await {
+                Ok(true) => {
+                    if verbose {
+                        println!("  ✔   Webhook delivered to {}", webhook_url);
+                    }
+                }
+                Ok(false) => {
+                    if verbose {
+                        eprintln!("  ⚠   Webhook delivery failed (non-2xx response)");
+                    }
+                }
+                Err(e) => eprintln!("  ✗   Webhook refused: {}", e),
+            }
+        }
+    }
+
+    // A-6: --pipe mode summary
+    if args.pipe {
+        let summary = serde_json::json!({
+            "type": "summary",
+            "target": url,
+            "findings": stream_r.findings.len(),
+            "risk_score": stream_r.risk_score(),
+        });
+        println!("{}", serde_json::to_string(&summary).unwrap_or_default());
+    }
+
+    if verbose && !args.pipe {
+        println!("  ✔  Done\n");
+    }
+    outcome
+}
+
+async fn run_non_url_target(
+    args: &Cli,
+    rep: &Reporter,
+    client: &HttpClient,
+    base_cfg: &HttpConfig,
+    target: Target,
+    extra_patterns: Vec<streamer::DynPattern>,
+) -> TargetOutcome {
+    match target {
+        Target::Token { token, repos } => {
+            let target_name = format!("token:{}", &token[..token.len().min(8)]);
+            match run_token_scan(
+                args,
+                rep,
+                base_cfg.clone(),
+                &token,
+                repos.as_deref(),
+                extra_patterns,
+            )
+            .await
+            {
+                Ok(summary) => TargetOutcome {
+                    target: target_name,
+                    target_type: "TOKEN".to_string(),
+                    status: TargetStatus::Success,
+                    report_path: (!summary.report_path.is_empty()).then_some(summary.report_path),
+                    findings_count: summary.findings_count,
+                    risk_score: summary.risk_score,
+                    error_code: None,
+                    error: None,
+                },
+                Err(error) => TargetOutcome {
+                    target: target_name,
+                    target_type: "TOKEN".to_string(),
+                    status: TargetStatus::Failed,
+                    report_path: None,
+                    findings_count: 0,
+                    risk_score: 0,
+                    error_code: Some(classify_error(&error.to_string())),
+                    error: Some(error.to_string()),
+                },
+            }
+        }
+        Target::Dir { dir } => {
+            let target_name = dir.clone();
+            match run_dir_scan(args, rep, client, &dir, extra_patterns).await {
+                Ok(summary) => TargetOutcome {
+                    target: target_name,
+                    target_type: "DIR".to_string(),
+                    status: TargetStatus::Success,
+                    report_path: (!summary.report_path.is_empty()).then_some(summary.report_path),
+                    findings_count: summary.findings_count,
+                    risk_score: summary.risk_score,
+                    error_code: None,
+                    error: None,
+                },
+                Err(error) => TargetOutcome {
+                    target: target_name,
+                    target_type: "DIR".to_string(),
+                    status: TargetStatus::Failed,
+                    report_path: None,
+                    findings_count: 0,
+                    risk_score: 0,
+                    error_code: Some(classify_error(&error.to_string())),
+                    error: Some(error.to_string()),
+                },
+            }
+        }
+        Target::Url { .. } => TargetOutcome {
+            target: "url".to_string(),
+            target_type: "URL".to_string(),
+            status: TargetStatus::Failed,
+            report_path: None,
+            findings_count: 0,
+            risk_score: 0,
+            error_code: Some(TargetErrorCode::ScanFailed),
+            error: Some("URL targets require sequential orchestration".to_string()),
+        },
     }
 }
 
@@ -95,10 +552,49 @@ impl Target {
 #[derive(Parser, Debug)]
 #[command(
     name = "gitrecon",
-    version = "3.2.0",
-    about = "GitRecon — Streaming Git Exposure Scanner (Rust)",
-    long_about = None,
-    after_help = "Examples:\n  gitrecon https://target.com\n  gitrecon https://target.com --save\n  gitrecon https://target.com --proxy socks5://127.0.0.1:9050 --delay 1\n  gitrecon https://target.com --fuzz --timeout 15\n  gitrecon --targets urls.txt --parallel-targets 5\n  gitrecon https://target.com --format sarif --webhook https://alerts.example.com\n  gitrecon --token ghp_xxxxxxxxxxxxxxxxxxxx\n  gitrecon --token ghp_xxxx --format sarif --output ./results\n  gitrecon --token ghp_xxxx --workers 20 --max-blob-size 2\n  gitrecon --dir ./project --format json\n\nToken mode interactive flow:\n  1) Repositories are listed with numbers\n  2) Choose one number, comma-separated numbers, or 'all'\n  3) Confirm whether reconstruction should be saved [Y/N]"
+    version = env!("CARGO_PKG_VERSION"),
+        about = "Streaming Git exposure and secret-candidate scanner",
+    long_about = "GitRecon detects exposed Git metadata, maps repository objects, scans recovered or local content, and writes structured reports. It supports URL, local-directory, multi-target, and authenticated forge workflows. Normal scans suppress common template placeholders; use --exhaustive when every candidate matters. Object verification and local binary scanning are enabled by default.",
+    after_help = r##"Examples:
+  # Scan a remote target with the default detection and verification pipeline
+  gitrecon https://target.example
+
+  # Probe additional Git exposure paths and reconstruct recovered source
+  gitrecon https://target.example --fuzz --save --output ./results
+
+  # Scan a local project, including binary/archive strings by default
+  gitrecon --dir ./project --output ./results
+
+  # Retain placeholder-like candidates for exhaustive investigation
+  gitrecon --dir ./project --exhaustive --format json
+
+  # Scan many targets concurrently with bounded target orchestration
+  gitrecon --targets ./targets.ndjson --parallel-targets 8 --workers 50
+
+  # Use a proxy, rate limit, timeout, and custom request header
+  gitrecon https://target.example --proxy socks5://127.0.0.1:9050 --rate 2 \
+    --timeout 20 --header X-Bounty-Program:authorized
+
+  # Enumerate repositories through a GitHub token and emit SARIF
+  gitrecon --token "$GITHUB_TOKEN" --format sarif --output ./results --quiet
+
+  # Scan selected repositories non-interactively in pipeline mode
+  gitrecon --token "$GITHUB_TOKEN" --pipe --save --format ndjson
+
+  # Resume a checkpointed scan and bypass the object cache
+  gitrecon https://target.example --resume --checkpoint-dir ./checkpoints --no-cache
+
+  # Send a completed report to a validated HTTPS webhook
+  gitrecon https://target.example --format json --webhook https://alerts.example/webhook
+
+Token mode:
+  1. GitRecon lists repositories accessible to the selected forge token.
+  2. Select one repository, comma-separated repositories, or 'all'.
+  3. Confirm whether reconstructed source should be saved to disk.
+
+Safety and scope:
+  Only scan systems and repositories you own or are explicitly authorized to assess.
+  Reports may contain plaintext secret material; protect the output directory."##
 )]
 struct Cli {
     /// Target URL (optional when --targets or --token is used)
@@ -152,7 +648,12 @@ struct Cli {
     save: bool,
 
     /// Direktori output (default: ./gitrecon_output)
-    #[arg(short = 'o', long = "output", default_value = "./gitrecon_output", value_name = "DIR")]
+    #[arg(
+        short = 'o',
+        long = "output",
+        default_value = "./gitrecon_output",
+        value_name = "DIR"
+    )]
     output: String,
 
     /// Proxy URL, contoh: socks5://127.0.0.1:9050
@@ -231,15 +732,16 @@ struct Cli {
     #[arg(short = 'C', long = "compact")]
     compact: bool,
 
-    // DX-1: --patterns-help
+    /// Print the JSON schema and examples for custom detection patterns, then exit.
     #[arg(long = "patterns-help")]
     patterns_help: bool,
 
-    // DX-2: --max-blob-size
+    /// Maximum individual blob or local file size to scan in megabytes (default: 4).
     // Sprint 4 (S4.1): reject 0 in main() (would make every blob "too big").
     #[arg(long = "max-blob-size", default_value = "4", value_name = "MB")]
     max_blob_size: usize,
 
+    /// Maximum commit-history traversal depth; 0 means unlimited (default: 500).
     // Sprint 1: bound the commit-graph traversal depth (previously hardcoded to 100 in mapper.rs).
     // Deeper history means more historical blobs discovered — at the cost of extra HTTP fetches.
     // Sprint 4 (S4.1): 0 means unlimited (documented behaviour in Mapper::with_max_history).
@@ -247,63 +749,73 @@ struct Cli {
     #[arg(long = "max-history", default_value = "500", value_name = "COMMITS")]
     max_history: usize,
 
-    // DX-3: --entropy-threshold
-    #[arg(long = "entropy-threshold", default_value = "4.5", value_name = "FLOAT")]
+    /// Shannon-entropy threshold for high-entropy candidate detection (default: 4.5).
+    #[arg(
+        long = "entropy-threshold",
+        default_value = "4.5",
+        value_name = "FLOAT"
+    )]
     entropy_threshold: f64,
 
-    // DX-4: --dry-run
+    /// Validate configuration and targets without performing network or file scanning.
     #[arg(long = "dry-run")]
     dry_run: bool,
 
-    // R-3, P-2: adaptive timeout and HTTP/2
+    /// Disable adaptive per-request timeout adjustment.
     #[arg(long = "no-adaptive-timeout")]
     no_adaptive_timeout: bool,
 
+    /// Upper bound for adaptive request timeouts in seconds (default: 60).
     #[arg(long = "max-timeout", default_value = "60", value_name = "SEC", value_parser = clap::value_parser!(u64).range(1..=3600))]
     max_timeout: u64,
 
+    /// Enable HTTP/2 where supported by the target and proxy configuration.
     #[arg(long = "http2")]
     http2: bool,
-
     // BUG-HTTP-003: SSL verification control
     /// Disable SSL verification (SECURITY RISK: MITM vulnerable!)
     /// Only use this if you understand the risks and have a specific reason.
-    #[arg(long = "insecure", alias = "skip-ssl-verification",
-          help = "Disable SSL verification (SECURITY RISK: MITM vulnerable!)")]
+    #[arg(
+        long = "insecure",
+        alias = "skip-ssl-verification",
+        help = "Disable SSL verification (SECURITY RISK: MITM vulnerable!)"
+    )]
     insecure: bool,
 
-    // P-1: adaptive concurrency
+    /// Disable adaptive concurrency tuning for object and file workers.
     #[arg(long = "no-adaptive")]
     no_adaptive: bool,
 
-    // E-1: rate limiting
+    /// Apply a global request rate limit in requests per second.
     #[arg(long = "rate", value_name = "N")]
     rate: Option<f64>,
 
-    // E-2: proxy rotation
+    /// Read a newline-delimited proxy list and rotate proxies between requests.
     #[arg(long = "proxy-list", value_name = "FILE")]
     proxy_list: Option<String>,
 
-    // E-4: UA pool and git mode
+    /// Read additional User-Agent strings from a file, one per line.
     #[arg(long = "ua-file", value_name = "FILE")]
     ua_file: Option<String>,
 
+    /// Use a Git-compatible User-Agent profile for requests.
     #[arg(long = "ua-git")]
     ua_git: bool,
 
-    // O-1: live output
+    /// Stream findings and progress to the terminal as they are produced.
     #[arg(long = "live")]
     live: bool,
 
-    // O-2, O-3: output formats
+    /// Report format: json, sarif, csv, ndjson, md, or html.
     #[arg(long = "format", default_value = "json", value_name = "FORMAT",
           value_parser = ["json", "sarif", "csv", "ndjson", "md", "html"])]
     format: String,
 
-    // O-4: webhook
+    /// Deliver the completed report to a validated webhook URL.
     #[arg(long = "webhook", value_name = "URL")]
     webhook: Option<String>,
 
+    /// Secret used to sign webhook requests when configured.
     #[arg(long = "webhook-secret", value_name = "KEY")]
     webhook_secret: Option<String>,
 
@@ -317,32 +829,40 @@ struct Cli {
     #[arg(long = "webhook-allow-internal")]
     webhook_allow_internal: bool,
 
-    // A-1: multi-target scanning
+    /// Read URL, token, and directory targets from a newline-delimited target file.
     #[arg(long = "targets", value_name = "FILE")]
     targets: Option<String>,
 
+    /// Maximum number of targets scanned concurrently (default: 1).
     #[arg(long = "parallel-targets", default_value = "1", value_name = "N")]
     parallel_targets: usize,
 
-    // A-6: pipe mode
+    /// Emit machine-readable newline-delimited output suitable for pipelines.
     #[arg(long = "pipe")]
     pipe: bool,
 
-    // R-1: checkpoint & resume
+    /// Resume a prior scan from a verified checkpoint.
     #[arg(long = "resume")]
     resume: bool,
 
+    /// Directory containing checkpoint state files.
     #[arg(long = "checkpoint-dir", value_name = "DIR")]
     checkpoint_dir: Option<String>,
 
+    /// Persist scan progress after this many processed objects (default: 1000).
     #[arg(long = "checkpoint-interval", default_value = "1000", value_name = "N")]
     checkpoint_interval: usize,
 
     // S-3: binary file scanning
-    #[arg(long = "scan-binaries")]
-    scan_binaries: bool,
+    /// Skip binary/archive scanning in local directory targets.
+    #[arg(long = "no-scan-binaries")]
+    no_scan_binaries: bool,
 
-    // PERF-002: smart retry per status code
+    /// Preserve placeholder-like candidates in direct pattern scanning.
+    #[arg(long = "exhaustive")]
+    exhaustive: bool,
+
+    /// Retry policy: standard, conservative, or aggressive.
     #[arg(long = "retry-strategy", default_value = "standard", value_name = "STRATEGY",
           value_parser = clap::value_parser!(String))]
     retry_strategy: String,
@@ -356,10 +876,10 @@ struct Cli {
     #[arg(long = "cache-ttl", default_value = "604800", value_name = "SECONDS")]
     cache_ttl: u64,
 
-    /// Verify object accessibility before scanning (detects partial exposure)
-    /// Default: disabled for compatibility and to avoid false negatives
-    #[arg(long = "verify-objects")]
-    verify_objects: bool,
+    /// Skip object accessibility verification before scanning.
+    /// Verification is enabled by default because offensive scans should classify partial exposure.
+    #[arg(long = "no-verify-objects")]
+    no_verify_objects: bool,
 
     // Theme system
     /// Theme configuration file path (default: ~/.config/gitrecon/theme.toml)
@@ -379,53 +899,6 @@ struct Cli {
 // ════════════════════════════════════════════════
 // HELPERS
 // ════════════════════════════════════════════════
-
-fn normalize_url(url: &str) -> String {
-    match validation::validate_and_normalize_url(url) {
-        Ok(normalized) => normalized,
-        Err(e) => {
-            eprintln!("  ✘  Invalid URL: {}", e);
-            std::process::exit(1);
-        }
-    }
-}
-
-fn target_name(url: &str) -> String {
-    let name = url
-        .trim_start_matches("https://")
-        .trim_start_matches("http://")
-        .replace('/', "_");
-    name.chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '.' { c } else { '_' })
-        .collect::<String>()
-        .trim_matches('_')
-        .chars()
-        .take(200)
-        .collect()
-}
-
-fn dir_target_name(path: &Path) -> String {
-    let raw = path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or("directory_scan");
-    target_name(raw)
-}
-
-fn parse_extra_headers(raw: &[String]) -> Vec<(String, String)> {
-    let mut result = Vec::new();
-    for h in raw {
-        match validation::validate_custom_header(h) {
-            Ok((k, v)) => result.push((k, v)),
-            Err(e) => {
-                eprintln!("  ✘  Invalid header '{}': {}", h, e);
-                std::process::exit(1);
-            }
-        }
-    }
-    result
-}
 
 const BINARY_DETECTION_PROBE_SIZE: usize = 8192;
 const NULL_BYTE_THRESHOLD: usize = 10;
@@ -587,51 +1060,25 @@ fn should_stop_scan(
                 .any(|f| f.severity == "CRITICAL"))
 }
 
-/// Returns true for file extensions that indicate binary content unlikely to
-/// contain plaintext secrets.  The list is intentionally conservative — when
-/// in doubt a file is *not* skipped.
-fn is_binary_extension(path: &str) -> bool {
-    let ext = path.rsplit('.').next().unwrap_or("").to_lowercase();
-    matches!(
-        ext.as_str(),
-        // Images
-        "png" | "jpg" | "jpeg" | "gif" | "bmp" | "ico" | "webp" | "tiff" | "avif" |
-        // Archives / packages
-        "zip" | "tar" | "gz" | "bz2" | "xz" | "7z" | "rar" | "whl" | "jar" | "war" | "ear" |
-        // Documents
-        "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "odt" | "ods" | "odp" |
-        // Binaries / shared libraries
-        "exe" | "dll" | "so" | "dylib" | "bin" | "wasm" | "o" | "a" | "lib" | "obj" |
-        // Media
-        "mp3" | "mp4" | "wav" | "ogg" | "flac" | "avi" | "mov" | "mkv" | "webm" | "m4a" |
-        // Fonts
-        "ttf" | "otf" | "woff" | "woff2" | "eot" |
-        // Compiled artefacts
-        "pyc" | "pyo" | "class" |
-        // SQLite databases are handled separately in the streamer; skip here
-        "db" | "sqlite" | "sqlite3"
-    )
-}
-
 // ════════════════════════════════════════════════
 // TOKEN SCAN PIPELINE
 // ════════════════════════════════════════════════
 
 #[allow(clippy::too_many_lines)]
 async fn run_token_scan(
-    args:           &Cli,
-    rep:            &Reporter,
-    base_cfg:       HttpConfig,
-    token:          &str,
+    args: &Cli,
+    rep: &Reporter,
+    base_cfg: HttpConfig,
+    token: &str,
+    repo_allowlist: Option<&[String]>,
     extra_patterns: Vec<streamer::DynPattern>,
-) {
-    let quiet   = args.quiet || args.pipe;
+) -> anyhow::Result<ScanSummary> {
+    let quiet = args.quiet || args.pipe;
     let verbose = !quiet;
 
     // SEC-001: Validate GitHub token format
     if let Err(e) = validation::validate_github_token(token) {
-        eprintln!("  ✘  Invalid GitHub token: {}", e);
-        std::process::exit(1);
+        return Err(anyhow::anyhow!("Invalid GitHub token: {}", e));
     }
 
     if !quiet {
@@ -642,33 +1089,30 @@ async fn run_token_scan(
 
     // ── 1. Build GitHub API client ───────────────
     let gh_client = match github_api::build_github_client(base_cfg, token) {
-        Ok(c)  => c,
-        Err(e) => {
-            eprintln!("  ✘  Failed to build GitHub API client: {}", e);
-            std::process::exit(1);
-        }
+        Ok(c) => c,
+        Err(e) => return Err(anyhow::anyhow!("Failed to build GitHub API client: {}", e)),
     };
 
     // ── 2. Authenticate ──────────────────────────
-    if verbose { println!("  ◈  Authenticating with GitHub API..."); }
+    if verbose {
+        println!("  ◈  Authenticating with GitHub API...");
+    }
     let (login, _name) = match github_api::whoami(&gh_client).await {
-        Ok(r)  => r,
-        Err(e) => {
-            eprintln!("  ✘  Authentication failed: {}", e);
-            std::process::exit(1);
-        }
+        Ok(r) => r,
+        Err(e) => return Err(anyhow::anyhow!("Authentication failed: {}", e)),
     };
-    if verbose { println!("  ✔  Authenticated as: {}\n", login.cyan().bold()); }
+    if verbose {
+        println!("  ✔  Authenticated as: {}\n", login.cyan().bold());
+    }
 
     // ── 3. Enumerate repositories ────────────────
-    if verbose { println!("  ◈  Enumerating repositories..."); }
+    if verbose {
+        println!("  ◈  Enumerating repositories...");
+    }
 
     let mut all_repos = match github_api::list_repos(&gh_client).await {
-        Ok(r)  => r,
-        Err(e) => {
-            eprintln!("  ✘  Failed to list repositories: {}", e);
-            std::process::exit(1);
-        }
+        Ok(r) => r,
+        Err(e) => return Err(anyhow::anyhow!("Failed to list repositories: {}", e)),
     };
 
     // Include repos from organisations the user belongs to
@@ -686,22 +1130,48 @@ async fn run_token_scan(
             }
         }
         Err(e) => {
-            if verbose { eprintln!("  ⚠   Could not list orgs: {}", e); }
+            if verbose {
+                eprintln!("  ⚠   Could not list orgs: {}", e);
+            }
         }
     }
 
     // Deduplicate by full_name (user repos and org repos can overlap)
     let mut seen_names = std::collections::HashSet::new();
     all_repos.retain(|r| seen_names.insert(r.full_name.clone()));
+    if let Some(allowlist) = repo_allowlist {
+        let requested: std::collections::HashSet<String> = allowlist
+            .iter()
+            .map(|name| name.trim().trim_matches('/').to_ascii_lowercase())
+            .filter(|name| !name.is_empty())
+            .collect();
+        if requested.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Token target repository allowlist is empty."
+            ));
+        }
+        all_repos.retain(|repo| requested.contains(&repo.full_name.to_ascii_lowercase()));
+        if all_repos.is_empty() {
+            return Err(anyhow::anyhow!(
+                "None of the requested repositories are accessible."
+            ));
+        }
+    }
     let total_repos = all_repos.len();
     if total_repos == 0 {
         if verbose {
             println!("  ⚠   Tidak ada repository yang bisa di-scan.\n");
         }
-        return;
+        return Ok(ScanSummary {
+            report_path: String::new(),
+            findings_count: 0,
+            risk_score: 0,
+        });
     }
 
-    if verbose { println!("  ✔  Found {} repositories\n", total_repos); }
+    if verbose {
+        println!("  ✔  Found {} repositories\n", total_repos);
+    }
 
     let interactive = !args.quiet && !args.pipe;
     let selected_indexes = if interactive {
@@ -715,12 +1185,14 @@ async fn run_token_scan(
         .collect();
     let selected_repo_count = selected_repos.len();
     if selected_repo_count == 0 {
-        eprintln!("  ✘  Tidak ada repository valid yang dipilih.");
-        return;
+        return Err(anyhow::anyhow!("Tidak ada repository valid yang dipilih."));
     }
 
     if verbose {
-        println!("  ✔  Selected {} repositories for scanning", selected_repo_count);
+        println!(
+            "  ✔  Selected {} repositories for scanning",
+            selected_repo_count
+        );
     }
 
     let persist_source = if interactive {
@@ -731,22 +1203,28 @@ async fn run_token_scan(
     if verbose {
         println!(
             "  ◈  Source persistence: {}\n",
-            if persist_source { "enabled (--save behavior)" } else { "disabled (temporary workspace)" }
+            if persist_source {
+                "enabled (--save behavior)"
+            } else {
+                "disabled (temporary workspace)"
+            }
         );
     }
 
     // ── 4. Acquire source workspace and scan selected repositories ─────
-    let t0              = Instant::now();
-    let all_findings    = Arc::new(tokio::sync::Mutex::new(Vec::<streamer::Finding>::new()));
-    let tech_stack_set  = Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::<String>::new()));
-    let blobs_scanned   = Arc::new(AtomicUsize::new(0));
-    let blobs_failed    = Arc::new(AtomicUsize::new(0));
-    let bytes_scanned   = Arc::new(AtomicUsize::new(0));
-    let stop_flag       = Arc::new(AtomicBool::new(false));
+    let t0 = Instant::now();
+    let all_findings = Arc::new(tokio::sync::Mutex::new(Vec::<streamer::Finding>::new()));
+    let tech_stack_set = Arc::new(tokio::sync::Mutex::new(
+        std::collections::HashSet::<String>::new(),
+    ));
+    let blobs_scanned = Arc::new(AtomicUsize::new(0));
+    let blobs_failed = Arc::new(AtomicUsize::new(0));
+    let bytes_scanned = Arc::new(AtomicUsize::new(0));
+    let stop_flag = Arc::new(AtomicBool::new(false));
 
     let max_blob_bytes = args.max_blob_size * 1024 * 1024;
-    let extra_pat_arc  = Arc::new(extra_patterns);
-    let save_root      = if persist_source {
+    let extra_pat_arc = Arc::new(extra_patterns);
+    let save_root = if persist_source {
         Some(std::path::PathBuf::from(&args.output).join(format!("token_{}", login)))
     } else {
         None
@@ -765,23 +1243,37 @@ async fn run_token_scan(
         let _ = std::fs::create_dir_all(&p);
         Some(TempDirGuard::new(p))
     };
-    let temp_root = temp_guard.as_ref().and_then(|g| g.path().map(|p| p.to_path_buf()));
+    let temp_root = temp_guard
+        .as_ref()
+        .and_then(|g| g.path().map(|p| p.to_path_buf()));
 
     // Ensure temp_guard stays alive for the entire scan
     let _temp_guard = temp_guard;
 
     for (repo_idx, repo) in selected_repos.iter().enumerate() {
-        if stop_flag.load(Ordering::Relaxed) { break; }
+        if stop_flag.load(Ordering::Relaxed) {
+            break;
+        }
 
         if verbose {
-            println!("  ▶  [{}/{}] {}", repo_idx + 1, selected_repo_count, repo.full_name);
+            println!(
+                "  ▶  [{}/{}] {}",
+                repo_idx + 1,
+                selected_repo_count,
+                repo.full_name
+            );
         }
 
         // Get HEAD SHA for the default branch
         let head_sha = match github_api::get_head_sha(
-            &gh_client, &repo.owner, &repo.name, &repo.default_branch,
-        ).await {
-            Ok(s)  => s,
+            &gh_client,
+            &repo.owner,
+            &repo.name,
+            &repo.default_branch,
+        )
+        .await
+        {
+            Ok(s) => s,
             Err(e) => {
                 if verbose {
                     eprintln!("    ⚠   Cannot resolve HEAD for {}: {}", repo.full_name, e);
@@ -791,8 +1283,9 @@ async fn run_token_scan(
         };
 
         // Fetch the full recursive tree
-        let tree = match github_api::get_tree(&gh_client, &repo.owner, &repo.name, &head_sha).await {
-            Ok(t)  => t,
+        let tree = match github_api::get_tree(&gh_client, &repo.owner, &repo.name, &head_sha).await
+        {
+            Ok(t) => t,
             Err(e) => {
                 if verbose {
                     eprintln!("    ⚠   Cannot get tree for {}: {}", repo.full_name, e);
@@ -811,7 +1304,8 @@ async fn run_token_scan(
         let _ = std::fs::create_dir_all(&repo_workspace);
 
         // Reconstruct source workspace from tree blobs
-        let blobs: Vec<_> = tree.into_iter()
+        let blobs: Vec<_> = tree
+            .into_iter()
             .filter(|e| e.obj_type == "blob")
             .filter(|e| e.size.is_none_or(|s| s <= max_blob_bytes as u64))
             .collect();
@@ -822,13 +1316,17 @@ async fn run_token_scan(
 
         let reconstruct_stream = futures::stream::iter(blobs)
             .map(|entry| {
-                let client          = gh_client.clone();
-                let owner           = repo.owner.clone();
-                let name            = repo.name.clone();
-                let workspace       = repo_workspace.clone();
+                let client = gh_client.clone();
+                let owner = repo.owner.clone();
+                let name = repo.name.clone();
+                let workspace = repo_workspace.clone();
                 async move {
-                    let data = match github_api::get_blob_content(&client, &owner, &name, &entry.sha).await {
-                        Ok(d)  => d,
+                    let data = match github_api::get_blob_content(
+                        &client, &owner, &name, &entry.sha,
+                    )
+                    .await
+                    {
+                        Ok(d) => d,
                         Err(_) => return false,
                     };
                     if data.len() > max_blob_bytes {
@@ -861,10 +1359,18 @@ async fn run_token_scan(
 
         let mut candidates: Vec<PathBuf> = collect_local_files(&repo_workspace)
             .into_iter()
-            .filter(|(p, size)| !is_binary_extension(&p.to_string_lossy()) && *size <= max_blob_bytes as u64)
+            .filter(|(p, size)| {
+                !is_binary_extension(&p.to_string_lossy()) && *size <= max_blob_bytes as u64
+            })
             .map(|(p, _)| p)
             .collect();
-        candidates.sort_by_key(|p| if streamer::is_ai_sensitive_path(&p.to_string_lossy()) { 0 } else { 1 });
+        candidates.sort_by_key(|p| {
+            if streamer::is_ai_sensitive_path(&p.to_string_lossy()) {
+                0
+            } else {
+                1
+            }
+        });
 
         if verbose {
             println!("      Scanning {} workspace files", candidates.len());
@@ -900,7 +1406,16 @@ async fn run_token_scan(
                         .map(|p| p.to_string_lossy().replace('\\', "/"))
                         .unwrap_or_else(|_| path.to_string_lossy().replace('\\', "/"));
                     let source = format!("{}/{}", full_name, rel);
-                    let findings = streamer::scan_text(&text, &source, &extra_patterns, entropy_thresh);
+                    let findings = if args.exhaustive {
+                        streamer::scan_text_exhaustive(
+                            &text,
+                            &source,
+                            &extra_patterns,
+                            entropy_thresh,
+                        )
+                    } else {
+                        streamer::scan_text(&text, &source, &extra_patterns, entropy_thresh)
+                    };
 
                     let mut techs = Vec::new();
                     detect_tech_from_path(&rel, &mut techs);
@@ -911,7 +1426,8 @@ async fn run_token_scan(
             .buffer_unordered(args.workers);
 
         futures::pin_mut!(file_stream);
-        while let Some((findings, techs, bytes, failed, skipped_by_stop)) = file_stream.next().await {
+        while let Some((findings, techs, bytes, failed, skipped_by_stop)) = file_stream.next().await
+        {
             if skipped_by_stop {
                 continue;
             }
@@ -926,13 +1442,20 @@ async fn run_token_scan(
 
             if !techs.is_empty() {
                 let mut ts = tech_stack_set.lock().await;
-                for t in techs { ts.insert(t); }
+                for t in techs {
+                    ts.insert(t);
+                }
             }
-            if findings.is_empty() { continue; }
+            if findings.is_empty() {
+                continue;
+            }
 
             if args.live || args.pipe {
                 for f in &findings {
-                    println!("{}", serde_json::to_string(&f.to_dict()).unwrap_or_default());
+                    println!(
+                        "{}",
+                        serde_json::to_string(&f.to_dict()).unwrap_or_default()
+                    );
                 }
             }
 
@@ -957,21 +1480,21 @@ async fn run_token_scan(
     // No manual cleanup needed here
 
     // ── 5. Assemble result ───────────────────────
-    let elapsed_s   = t0.elapsed().as_secs_f64();
-    let findings    = all_findings.lock().await.clone();
+    let elapsed_s = t0.elapsed().as_secs_f64();
+    let findings = all_findings.lock().await.clone();
     let mut ts_vec: Vec<String> = tech_stack_set.lock().await.iter().cloned().collect();
     ts_vec.sort();
 
     let stream_r = StreamResult {
         findings,
-        contributors:      vec![],
-        tech_stack:        ts_vec,
-        commit_count:      0,
-        blobs_scanned:     blobs_scanned.load(Ordering::Relaxed),
-        blobs_failed:      blobs_failed.load(Ordering::Relaxed),
-        bytes_scanned:     bytes_scanned.load(Ordering::Relaxed),
+        contributors: vec![],
+        tech_stack: ts_vec,
+        commit_count: 0,
+        blobs_scanned: blobs_scanned.load(Ordering::Relaxed),
+        blobs_failed: blobs_failed.load(Ordering::Relaxed),
+        bytes_scanned: bytes_scanned.load(Ordering::Relaxed),
         elapsed_s,
-        files_saved:       0,
+        files_saved: 0,
         files_save_failed: 0,
         // PERF-005: Cache metrics (not applicable for token mode scanning local files)
         cache_hits: 0,
@@ -991,22 +1514,22 @@ async fn run_token_scan(
     // ── 7. Save report ───────────────────────────
     let report_name = format!("token_{}", login);
     let ext = match args.format.as_str() {
-        "sarif"  => "sarif",
-        "csv"    => "csv",
+        "sarif" => "sarif",
+        "csv" => "csv",
         "ndjson" => "ndjson",
-        "md"     => "md",
-        "html"   => "html",
-        _        => "json",
+        "md" => "md",
+        "html" => "html",
+        _ => "json",
     };
     let report_path = format!("{}/{}_report.{}", args.output, report_name, ext);
 
     let save_result = match args.format.as_str() {
-        "sarif"  => rep.save_sarif(&report_path, &report_name, Some(&stream_r)),
-        "csv"    => rep.save_csv(&report_path, Some(&stream_r)),
+        "sarif" => rep.save_sarif(&report_path, &report_name, Some(&stream_r)),
+        "csv" => rep.save_csv(&report_path, Some(&stream_r)),
         "ndjson" => rep.save_ndjson(&report_path, Some(&stream_r)),
-        "md"     => rep.save_markdown(&report_path, &report_name, Some(&stream_r)),
-        "html"   => rep.save_html(&report_path, &report_name, Some(&stream_r)),
-        _        => rep.save_token_report(&report_path, &login, selected_repo_count, &stream_r),
+        "md" => rep.save_markdown(&report_path, &report_name, Some(&stream_r)),
+        "html" => rep.save_html(&report_path, &report_name, Some(&stream_r)),
+        _ => rep.save_token_report(&report_path, &login, selected_repo_count, &stream_r),
     };
 
     if let Err(e) = save_result {
@@ -1020,9 +1543,17 @@ async fn run_token_scan(
     // ── 8. Webhook delivery ──────────────────────
     if let Some(ref webhook_url) = args.webhook {
         if let Ok(json_body) = std::fs::read_to_string(&report_path) {
-            match try_deliver_webhook(&rep, args, webhook_url, &json_body).await {
-                Ok(true) => if verbose { println!("  ✔   Webhook delivered to {}", webhook_url); },
-                Ok(false) => if verbose { eprintln!("  ⚠   Webhook delivery failed (non-2xx response)"); },
+            match try_deliver_webhook(rep, args, webhook_url, &json_body).await {
+                Ok(true) => {
+                    if verbose {
+                        println!("  ✔   Webhook delivered to {}", webhook_url);
+                    }
+                }
+                Ok(false) => {
+                    if verbose {
+                        eprintln!("  ⚠   Webhook delivery failed (non-2xx response)");
+                    }
+                }
                 Err(e) => eprintln!("  ✗   Webhook refused: {}", e),
             }
         }
@@ -1044,24 +1575,27 @@ async fn run_token_scan(
     if verbose && !args.pipe {
         println!("  ✔  Done\n");
     }
+    Ok(ScanSummary {
+        report_path,
+        findings_count: stream_r.findings.len(),
+        risk_score: stream_r.risk_score(),
+    })
 }
-
 #[allow(clippy::too_many_lines)]
 async fn run_gitlab_token_scan(
-    args:           &Cli,
-    rep:            &Reporter,
-    base_cfg:       HttpConfig,
-    token:          &str,
-    gitlab_url:     Option<&str>,
+    args: &Cli,
+    rep: &Reporter,
+    base_cfg: HttpConfig,
+    token: &str,
+    gitlab_url: Option<&str>,
     extra_patterns: Vec<streamer::DynPattern>,
-) {
-    let quiet   = args.quiet || args.pipe;
+) -> anyhow::Result<()> {
+    let quiet = args.quiet || args.pipe;
     let verbose = !quiet;
 
     // SEC-001: Validate GitLab token format (starts with glpat- or is a valid token)
     if let Err(e) = validation::validate_gitlab_token(token) {
-        eprintln!("  ✘  Invalid GitLab token: {}", e);
-        std::process::exit(1);
+        return Err(anyhow::anyhow!("Invalid GitLab token: {}", e));
     }
 
     if !quiet {
@@ -1075,69 +1609,66 @@ async fn run_gitlab_token_scan(
 
     // ── 1. Build GitLab API client ───────────────
     let (gl_client, api_base) = match gitlab_api::build_gitlab_client(base_cfg, token, gitlab_url) {
-        Ok(c)  => c,
-        Err(e) => {
-            eprintln!("  ✘  Failed to build GitLab API client: {}", e);
-            std::process::exit(1);
-        }
+        Ok(c) => c,
+        Err(e) => return Err(anyhow::anyhow!("Failed to build GitLab API client: {}", e)),
     };
 
     // ── 2. Authenticate ──────────────────────────
-    if verbose { println!("  ◈  Authenticating with GitLab API..."); }
+    if verbose {
+        println!("  ◈  Authenticating with GitLab API...");
+    }
     let mut gl_forge = gitlab_api::GitLabForgeClient::new(gl_client.clone(), api_base.clone());
 
-    match gl_forge.authenticate(token).await {
-        Ok(_) => {},
-        Err(e) => {
-            eprintln!("  ✘  Authentication failed: {}", e);
-            std::process::exit(1);
-        }
+    gl_forge
+        .authenticate(token)
+        .await
+        .map_err(|e| anyhow::anyhow!("Authentication failed: {}", e))?;
+
+    let (login, _name) = gl_forge
+        .whoami()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to get user info: {}", e))?;
+
+    if verbose {
+        println!("  ✔  Authenticated as: {}\n", login.cyan().bold());
     }
 
-    let (login, _name) = match gl_forge.whoami().await {
-        Ok(r)  => r,
-        Err(e) => {
-            eprintln!("  ✘  Failed to get user info: {}", e);
-            std::process::exit(1);
-        }
-    };
-
-    if verbose { println!("  ✔  Authenticated as: {}\n", login.cyan().bold()); }
-
     // ── 3. Enumerate repositories ────────────────
-    if verbose { println!("  ◈  Enumerating repositories..."); }
+    if verbose {
+        println!("  ◈  Enumerating repositories...");
+    }
 
-    let all_repos = match gl_forge.enumerate_repos(forge::EnumScope::All).await {
-        Ok(r)  => r,
-        Err(e) => {
-            eprintln!("  ✘  Failed to list repositories: {}", e);
-            std::process::exit(1);
-        }
-    };
+    let all_repos = gl_forge
+        .enumerate_repos(forge::EnumScope::All)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to list repositories: {}", e))?;
 
     let total_repos = all_repos.len();
     if total_repos == 0 {
         if verbose {
             println!("  ⚠   Tidak ada repository yang bisa di-scan.\n");
         }
-        return;
+        return Ok(());
     }
 
-    if verbose { println!("  ✔  Found {} repositories\n", total_repos); }
+    if verbose {
+        println!("  ✔  Found {} repositories\n", total_repos);
+    }
 
     let interactive = !args.quiet && !args.pipe;
 
     // Convert to a displayable format for selection
-    let gl_projects: Vec<gitlab_api::GlProject> = all_repos.iter().map(|r| {
-        gitlab_api::GlProject {
+    let gl_projects: Vec<gitlab_api::GlProject> = all_repos
+        .iter()
+        .map(|r| gitlab_api::GlProject {
             full_name: r.full_name.clone(),
             owner: r.owner.clone(),
             name: r.name.clone(),
             private: r.private,
             default_branch: r.default_branch.clone(),
             clone_url: r.clone_url.clone(),
-        }
-    }).collect();
+        })
+        .collect();
 
     let selected_indexes = if interactive {
         prompt_gitlab_repo_selection(&gl_projects)
@@ -1153,11 +1684,14 @@ async fn run_gitlab_token_scan(
     let selected_repo_count = selected_repos.len();
     if selected_repo_count == 0 {
         eprintln!("  ✘  Tidak ada repository valid yang dipilih.");
-        return;
+        return Ok(());
     }
 
     if verbose {
-        println!("  ✔  Selected {} repositories for scanning", selected_repo_count);
+        println!(
+            "  ✔  Selected {} repositories for scanning",
+            selected_repo_count
+        );
     }
 
     let persist_source = if interactive {
@@ -1169,22 +1703,28 @@ async fn run_gitlab_token_scan(
     if verbose {
         println!(
             "  ◈  Source persistence: {}\n",
-            if persist_source { "enabled (--save behavior)" } else { "disabled (temporary workspace)" }
+            if persist_source {
+                "enabled (--save behavior)"
+            } else {
+                "disabled (temporary workspace)"
+            }
         );
     }
 
     // ── 4. Acquire source workspace and scan selected repositories ─────
-    let t0              = Instant::now();
-    let all_findings    = Arc::new(tokio::sync::Mutex::new(Vec::<streamer::Finding>::new()));
-    let tech_stack_set  = Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::<String>::new()));
-    let blobs_scanned   = Arc::new(AtomicUsize::new(0));
-    let blobs_failed    = Arc::new(AtomicUsize::new(0));
-    let bytes_scanned   = Arc::new(AtomicUsize::new(0));
-    let stop_flag       = Arc::new(AtomicBool::new(false));
+    let t0 = Instant::now();
+    let all_findings = Arc::new(tokio::sync::Mutex::new(Vec::<streamer::Finding>::new()));
+    let tech_stack_set = Arc::new(tokio::sync::Mutex::new(
+        std::collections::HashSet::<String>::new(),
+    ));
+    let blobs_scanned = Arc::new(AtomicUsize::new(0));
+    let blobs_failed = Arc::new(AtomicUsize::new(0));
+    let bytes_scanned = Arc::new(AtomicUsize::new(0));
+    let stop_flag = Arc::new(AtomicBool::new(false));
 
     let max_blob_bytes = args.max_blob_size * 1024 * 1024;
-    let extra_pat_arc  = Arc::new(extra_patterns);
-    let save_root      = if persist_source {
+    let extra_pat_arc = Arc::new(extra_patterns);
+    let save_root = if persist_source {
         Some(std::path::PathBuf::from(&args.output).join(format!("gitlab_{}", login)))
     } else {
         None
@@ -1202,21 +1742,30 @@ async fn run_gitlab_token_scan(
         let _ = std::fs::create_dir_all(&p);
         Some(TempDirGuard::new(p))
     };
-    let temp_root = temp_guard.as_ref().and_then(|g| g.path().map(|p| p.to_path_buf()));
+    let temp_root = temp_guard
+        .as_ref()
+        .and_then(|g| g.path().map(|p| p.to_path_buf()));
 
     // Ensure temp_guard stays alive for the entire scan
     let _temp_guard = temp_guard;
 
     for (repo_idx, repo) in selected_repos.iter().enumerate() {
-        if stop_flag.load(Ordering::Relaxed) { break; }
+        if stop_flag.load(Ordering::Relaxed) {
+            break;
+        }
 
         if verbose {
-            println!("  ▶  [{}/{}] {}", repo_idx + 1, selected_repo_count, repo.full_name);
+            println!(
+                "  ▶  [{}/{}] {}",
+                repo_idx + 1,
+                selected_repo_count,
+                repo.full_name
+            );
         }
 
         // Get HEAD SHA for the default branch
         let _head_sha = match gl_forge.get_head_sha(repo, &repo.default_branch).await {
-            Ok(s)  => s,
+            Ok(s) => s,
             Err(e) => {
                 if verbose {
                     eprintln!("    ⚠   Cannot resolve HEAD for {}: {}", repo.full_name, e);
@@ -1227,7 +1776,7 @@ async fn run_gitlab_token_scan(
 
         // Fetch the full recursive tree
         let tree = match gl_forge.get_tree(repo, &repo.default_branch).await {
-            Ok(t)  => t,
+            Ok(t) => t,
             Err(e) => {
                 if verbose {
                     eprintln!("    ⚠   Cannot get tree for {}: {}", repo.full_name, e);
@@ -1246,7 +1795,8 @@ async fn run_gitlab_token_scan(
         let _ = std::fs::create_dir_all(&repo_workspace);
 
         // Reconstruct source workspace from tree blobs
-        let blobs: Vec<_> = tree.into_iter()
+        let blobs: Vec<_> = tree
+            .into_iter()
             .filter(|e| e.obj_type == "blob")
             .filter(|e| e.size.is_none_or(|s| s <= max_blob_bytes as u64))
             .collect();
@@ -1257,14 +1807,18 @@ async fn run_gitlab_token_scan(
 
         let reconstruct_stream = futures::stream::iter(blobs)
             .map(|entry| {
-                let client          = gl_client.clone();
-                let api_base        = api_base.clone();
-                let owner           = repo.owner.clone();
-                let name            = repo.name.clone();
-                let workspace       = repo_workspace.clone();
+                let client = gl_client.clone();
+                let api_base = api_base.clone();
+                let owner = repo.owner.clone();
+                let name = repo.name.clone();
+                let workspace = repo_workspace.clone();
                 async move {
-                    let data = match gitlab_api::get_blob_content(&client, &api_base, &owner, &name, &entry.sha).await {
-                        Ok(d)  => d,
+                    let data = match gitlab_api::get_blob_content(
+                        &client, &api_base, &owner, &name, &entry.sha,
+                    )
+                    .await
+                    {
+                        Ok(d) => d,
                         Err(_) => return false,
                     };
                     if data.len() > max_blob_bytes {
@@ -1297,10 +1851,18 @@ async fn run_gitlab_token_scan(
 
         let mut candidates: Vec<PathBuf> = collect_local_files(&repo_workspace)
             .into_iter()
-            .filter(|(p, size)| !is_binary_extension(&p.to_string_lossy()) && *size <= max_blob_bytes as u64)
+            .filter(|(p, size)| {
+                !is_binary_extension(&p.to_string_lossy()) && *size <= max_blob_bytes as u64
+            })
             .map(|(p, _)| p)
             .collect();
-        candidates.sort_by_key(|p| if streamer::is_ai_sensitive_path(&p.to_string_lossy()) { 0 } else { 1 });
+        candidates.sort_by_key(|p| {
+            if streamer::is_ai_sensitive_path(&p.to_string_lossy()) {
+                0
+            } else {
+                1
+            }
+        });
 
         if verbose {
             println!("      Scanning {} workspace files", candidates.len());
@@ -1336,7 +1898,16 @@ async fn run_gitlab_token_scan(
                         .map(|p| p.to_string_lossy().replace('\\', "/"))
                         .unwrap_or_else(|_| path.to_string_lossy().replace('\\', "/"));
                     let source = format!("{}/{}", full_name, rel);
-                    let findings = streamer::scan_text(&text, &source, &extra_patterns, entropy_thresh);
+                    let findings = if args.exhaustive {
+                        streamer::scan_text_exhaustive(
+                            &text,
+                            &source,
+                            &extra_patterns,
+                            entropy_thresh,
+                        )
+                    } else {
+                        streamer::scan_text(&text, &source, &extra_patterns, entropy_thresh)
+                    };
 
                     let mut techs = Vec::new();
                     detect_tech_from_path(&rel, &mut techs);
@@ -1347,7 +1918,8 @@ async fn run_gitlab_token_scan(
             .buffer_unordered(args.workers);
 
         futures::pin_mut!(file_stream);
-        while let Some((findings, techs, bytes, failed, skipped_by_stop)) = file_stream.next().await {
+        while let Some((findings, techs, bytes, failed, skipped_by_stop)) = file_stream.next().await
+        {
             if skipped_by_stop {
                 continue;
             }
@@ -1362,13 +1934,20 @@ async fn run_gitlab_token_scan(
 
             if !techs.is_empty() {
                 let mut ts = tech_stack_set.lock().await;
-                for t in techs { ts.insert(t); }
+                for t in techs {
+                    ts.insert(t);
+                }
             }
-            if findings.is_empty() { continue; }
+            if findings.is_empty() {
+                continue;
+            }
 
             if args.live || args.pipe {
                 for f in &findings {
-                    println!("{}", serde_json::to_string(&f.to_dict()).unwrap_or_default());
+                    println!(
+                        "{}",
+                        serde_json::to_string(&f.to_dict()).unwrap_or_default()
+                    );
                 }
             }
 
@@ -1392,21 +1971,21 @@ async fn run_gitlab_token_scan(
     // SEC-004: temp_guard automatically cleans up when dropped at end of scope
 
     // ── 5. Assemble result ───────────────────────
-    let elapsed_s   = t0.elapsed().as_secs_f64();
-    let findings    = all_findings.lock().await.clone();
+    let elapsed_s = t0.elapsed().as_secs_f64();
+    let findings = all_findings.lock().await.clone();
     let mut ts_vec: Vec<String> = tech_stack_set.lock().await.iter().cloned().collect();
     ts_vec.sort();
 
     let stream_r = StreamResult {
         findings,
-        contributors:      vec![],
-        tech_stack:        ts_vec,
-        commit_count:      0,
-        blobs_scanned:     blobs_scanned.load(Ordering::Relaxed),
-        blobs_failed:      blobs_failed.load(Ordering::Relaxed),
-        bytes_scanned:     bytes_scanned.load(Ordering::Relaxed),
+        contributors: vec![],
+        tech_stack: ts_vec,
+        commit_count: 0,
+        blobs_scanned: blobs_scanned.load(Ordering::Relaxed),
+        blobs_failed: blobs_failed.load(Ordering::Relaxed),
+        bytes_scanned: bytes_scanned.load(Ordering::Relaxed),
         elapsed_s,
-        files_saved:       0,
+        files_saved: 0,
         files_save_failed: 0,
         cache_hits: 0,
         cache_misses: 0,
@@ -1424,22 +2003,22 @@ async fn run_gitlab_token_scan(
     // ── 7. Save report ───────────────────────────
     let report_name = format!("gitlab_{}", login);
     let ext = match args.format.as_str() {
-        "sarif"  => "sarif",
-        "csv"    => "csv",
+        "sarif" => "sarif",
+        "csv" => "csv",
         "ndjson" => "ndjson",
-        "md"     => "md",
-        "html"   => "html",
-        _        => "json",
+        "md" => "md",
+        "html" => "html",
+        _ => "json",
     };
     let report_path = format!("{}/{}_report.{}", args.output, report_name, ext);
 
     let save_result = match args.format.as_str() {
-        "sarif"  => rep.save_sarif(&report_path, &report_name, Some(&stream_r)),
-        "csv"    => rep.save_csv(&report_path, Some(&stream_r)),
+        "sarif" => rep.save_sarif(&report_path, &report_name, Some(&stream_r)),
+        "csv" => rep.save_csv(&report_path, Some(&stream_r)),
         "ndjson" => rep.save_ndjson(&report_path, Some(&stream_r)),
-        "md"     => rep.save_markdown(&report_path, &report_name, Some(&stream_r)),
-        "html"   => rep.save_html(&report_path, &report_name, Some(&stream_r)),
-        _        => rep.save_token_report(&report_path, &login, selected_repo_count, &stream_r),
+        "md" => rep.save_markdown(&report_path, &report_name, Some(&stream_r)),
+        "html" => rep.save_html(&report_path, &report_name, Some(&stream_r)),
+        _ => rep.save_token_report(&report_path, &login, selected_repo_count, &stream_r),
     };
 
     if let Err(e) = save_result {
@@ -1453,9 +2032,17 @@ async fn run_gitlab_token_scan(
     // ── 8. Webhook delivery ──────────────────────
     if let Some(ref webhook_url) = args.webhook {
         if let Ok(json_body) = std::fs::read_to_string(&report_path) {
-            match try_deliver_webhook(&rep, args, webhook_url, &json_body).await {
-                Ok(true) => if verbose { println!("  ✔   Webhook delivered to {}", webhook_url); },
-                Ok(false) => if verbose { eprintln!("  ⚠   Webhook delivery failed (non-2xx response)"); },
+            match try_deliver_webhook(rep, args, webhook_url, &json_body).await {
+                Ok(true) => {
+                    if verbose {
+                        println!("  ✔   Webhook delivered to {}", webhook_url);
+                    }
+                }
+                Ok(false) => {
+                    if verbose {
+                        eprintln!("  ⚠   Webhook delivery failed (non-2xx response)");
+                    }
+                }
                 Err(e) => eprintln!("  ✗   Webhook refused: {}", e),
             }
         }
@@ -1477,6 +2064,7 @@ async fn run_gitlab_token_scan(
     if verbose && !args.pipe {
         println!("  ✔  Done\n");
     }
+    Ok(())
 }
 
 /// Prompt for GitLab repository selection.
@@ -1525,14 +2113,14 @@ fn prompt_bitbucket_repo_selection(repos: &[bitbucket_api::BbRepo]) -> Vec<usize
 
 #[allow(clippy::too_many_lines)]
 async fn run_bitbucket_token_scan(
-    args:           &Cli,
-    rep:            &Reporter,
-    base_cfg:       HttpConfig,
-    token:          &str,
-    bitbucket_url:  Option<&str>,
+    args: &Cli,
+    rep: &Reporter,
+    base_cfg: HttpConfig,
+    token: &str,
+    bitbucket_url: Option<&str>,
     extra_patterns: Vec<streamer::DynPattern>,
-) {
-    let quiet   = args.quiet || args.pipe;
+) -> anyhow::Result<()> {
+    let quiet = args.quiet || args.pipe;
     let verbose = !quiet;
 
     // SEC-001: Validate Bitbucket token format (App Password)
@@ -1551,44 +2139,52 @@ async fn run_bitbucket_token_scan(
     }
 
     // ── 1. Build Bitbucket API client ───────────────
-    let (bb_client, api_base) = match bitbucket_api::build_bitbucket_client(base_cfg, token, bitbucket_url) {
-        Ok(c)  => c,
-        Err(e) => {
-            eprintln!("  ✘  Failed to build Bitbucket API client: {}", e);
-            std::process::exit(1);
-        }
-    };
+    let (bb_client, api_base) =
+        match bitbucket_api::build_bitbucket_client(base_cfg, token, bitbucket_url) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("  ✘  Failed to build Bitbucket API client: {}", e);
+                return Err(anyhow::anyhow!("forge scan setup failed"));
+            }
+        };
 
     // ── 2. Authenticate ──────────────────────────
-    if verbose { println!("  ◈  Authenticating with Bitbucket API..."); }
-    let mut bb_forge = bitbucket_api::BitbucketForgeClient::new(bb_client.clone(), api_base.clone());
+    if verbose {
+        println!("  ◈  Authenticating with Bitbucket API...");
+    }
+    let mut bb_forge =
+        bitbucket_api::BitbucketForgeClient::new(bb_client.clone(), api_base.clone());
 
     match bb_forge.authenticate(token).await {
-        Ok(_) => {},
+        Ok(_) => {}
         Err(e) => {
             eprintln!("  ✘  Authentication failed: {}", e);
-            std::process::exit(1);
+            return Err(anyhow::anyhow!("forge scan setup failed"));
         }
     }
 
     let (login, _name) = match bb_forge.whoami().await {
-        Ok(r)  => r,
+        Ok(r) => r,
         Err(e) => {
             eprintln!("  ✘  Failed to get user info: {}", e);
-            std::process::exit(1);
+            return Err(anyhow::anyhow!("forge scan setup failed"));
         }
     };
 
-    if verbose { println!("  ✔  Authenticated as: {}\n", login.cyan().bold()); }
+    if verbose {
+        println!("  ✔  Authenticated as: {}\n", login.cyan().bold());
+    }
 
     // ── 3. Enumerate repositories ────────────────
-    if verbose { println!("  ◈  Enumerating repositories..."); }
+    if verbose {
+        println!("  ◈  Enumerating repositories...");
+    }
 
     let all_repos = match bb_forge.enumerate_repos(forge::EnumScope::All).await {
-        Ok(r)  => r,
+        Ok(r) => r,
         Err(e) => {
             eprintln!("  ✘  Failed to list repositories: {}", e);
-            std::process::exit(1);
+            return Err(anyhow::anyhow!("forge scan setup failed"));
         }
     };
 
@@ -1597,24 +2193,27 @@ async fn run_bitbucket_token_scan(
         if verbose {
             println!("  ⚠   Tidak ada repository yang bisa di-scan.\n");
         }
-        return;
+        return Ok(());
     }
 
-    if verbose { println!("  ✔  Found {} repositories\n", total_repos); }
+    if verbose {
+        println!("  ✔  Found {} repositories\n", total_repos);
+    }
 
     let interactive = !args.quiet && !args.pipe;
 
     // Convert to a displayable format for selection
-    let bb_repos: Vec<bitbucket_api::BbRepo> = all_repos.iter().map(|r| {
-        bitbucket_api::BbRepo {
+    let bb_repos: Vec<bitbucket_api::BbRepo> = all_repos
+        .iter()
+        .map(|r| bitbucket_api::BbRepo {
             full_name: r.full_name.clone(),
             owner: r.owner.clone(),
             name: r.name.clone(),
             private: r.private,
             default_branch: r.default_branch.clone(),
             clone_url: r.clone_url.clone(),
-        }
-    }).collect();
+        })
+        .collect();
 
     let selected_indexes = if interactive {
         prompt_bitbucket_repo_selection(&bb_repos)
@@ -1630,11 +2229,14 @@ async fn run_bitbucket_token_scan(
     let selected_repo_count = selected_repos.len();
     if selected_repo_count == 0 {
         eprintln!("  ✘  Tidak ada repository valid yang dipilih.");
-        return;
+        return Ok(());
     }
 
     if verbose {
-        println!("  ✔  Selected {} repositories for scanning", selected_repo_count);
+        println!(
+            "  ✔  Selected {} repositories for scanning",
+            selected_repo_count
+        );
     }
 
     let persist_source = if interactive {
@@ -1646,22 +2248,28 @@ async fn run_bitbucket_token_scan(
     if verbose {
         println!(
             "  ◈  Source persistence: {}\n",
-            if persist_source { "enabled (--save behavior)" } else { "disabled (temporary workspace)" }
+            if persist_source {
+                "enabled (--save behavior)"
+            } else {
+                "disabled (temporary workspace)"
+            }
         );
     }
 
     // ── 4. Acquire source workspace and scan selected repositories ─────
-    let t0              = Instant::now();
-    let all_findings    = Arc::new(tokio::sync::Mutex::new(Vec::<streamer::Finding>::new()));
-    let tech_stack_set  = Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::<String>::new()));
-    let blobs_scanned   = Arc::new(AtomicUsize::new(0));
-    let blobs_failed    = Arc::new(AtomicUsize::new(0));
-    let bytes_scanned   = Arc::new(AtomicUsize::new(0));
-    let stop_flag       = Arc::new(AtomicBool::new(false));
+    let t0 = Instant::now();
+    let all_findings = Arc::new(tokio::sync::Mutex::new(Vec::<streamer::Finding>::new()));
+    let tech_stack_set = Arc::new(tokio::sync::Mutex::new(
+        std::collections::HashSet::<String>::new(),
+    ));
+    let blobs_scanned = Arc::new(AtomicUsize::new(0));
+    let blobs_failed = Arc::new(AtomicUsize::new(0));
+    let bytes_scanned = Arc::new(AtomicUsize::new(0));
+    let stop_flag = Arc::new(AtomicBool::new(false));
 
     let max_blob_bytes = args.max_blob_size * 1024 * 1024;
-    let extra_pat_arc  = Arc::new(extra_patterns);
-    let save_root      = if persist_source {
+    let extra_pat_arc = Arc::new(extra_patterns);
+    let save_root = if persist_source {
         Some(std::path::PathBuf::from(&args.output).join(format!("bitbucket_{}", login)))
     } else {
         None
@@ -1679,21 +2287,30 @@ async fn run_bitbucket_token_scan(
         let _ = std::fs::create_dir_all(&p);
         Some(TempDirGuard::new(p))
     };
-    let temp_root = temp_guard.as_ref().and_then(|g| g.path().map(|p| p.to_path_buf()));
+    let temp_root = temp_guard
+        .as_ref()
+        .and_then(|g| g.path().map(|p| p.to_path_buf()));
 
     // Ensure temp_guard stays alive for the entire scan
     let _temp_guard = temp_guard;
 
     for (repo_idx, repo) in selected_repos.iter().enumerate() {
-        if stop_flag.load(Ordering::Relaxed) { break; }
+        if stop_flag.load(Ordering::Relaxed) {
+            break;
+        }
 
         if verbose {
-            println!("  ▶  [{}/{}] {}", repo_idx + 1, selected_repo_count, repo.full_name);
+            println!(
+                "  ▶  [{}/{}] {}",
+                repo_idx + 1,
+                selected_repo_count,
+                repo.full_name
+            );
         }
 
         // Get HEAD SHA for the default branch
         let head_sha = match bb_forge.get_head_sha(repo, &repo.default_branch).await {
-            Ok(s)  => s,
+            Ok(s) => s,
             Err(e) => {
                 if verbose {
                     eprintln!("    ⚠   Cannot resolve HEAD for {}: {}", repo.full_name, e);
@@ -1704,7 +2321,7 @@ async fn run_bitbucket_token_scan(
 
         // Fetch the full recursive tree
         let tree = match bb_forge.get_tree(repo, &repo.default_branch).await {
-            Ok(t)  => t,
+            Ok(t) => t,
             Err(e) => {
                 if verbose {
                     eprintln!("    ⚠   Cannot get tree for {}: {}", repo.full_name, e);
@@ -1723,7 +2340,8 @@ async fn run_bitbucket_token_scan(
         let _ = std::fs::create_dir_all(&repo_workspace);
 
         // Reconstruct source workspace from tree blobs
-        let blobs: Vec<_> = tree.into_iter()
+        let blobs: Vec<_> = tree
+            .into_iter()
             .filter(|e| e.obj_type == "blob")
             .filter(|e| e.size.is_none_or(|s| s <= max_blob_bytes as u64))
             .collect();
@@ -1734,16 +2352,25 @@ async fn run_bitbucket_token_scan(
 
         let reconstruct_stream = futures::stream::iter(blobs)
             .map(|entry| {
-                let client          = bb_client.clone();
-                let api_base        = api_base.clone();
-                let owner           = repo.owner.clone();
-                let name            = repo.name.clone();
-                let workspace       = repo_workspace.clone();
-                let commit_sha      = head_sha.clone();
+                let client = bb_client.clone();
+                let api_base = api_base.clone();
+                let owner = repo.owner.clone();
+                let name = repo.name.clone();
+                let workspace = repo_workspace.clone();
+                let commit_sha = head_sha.clone();
                 async move {
                     // Bitbucket requires file path to fetch content
-                    let data = match bitbucket_api::get_file_by_path(&client, &api_base, &owner, &name, &commit_sha, &entry.path).await {
-                        Ok(d)  => d,
+                    let data = match bitbucket_api::get_file_by_path(
+                        &client,
+                        &api_base,
+                        &owner,
+                        &name,
+                        &commit_sha,
+                        &entry.path,
+                    )
+                    .await
+                    {
+                        Ok(d) => d,
                         Err(_) => return false,
                     };
                     if data.len() > max_blob_bytes {
@@ -1776,10 +2403,18 @@ async fn run_bitbucket_token_scan(
 
         let mut candidates: Vec<PathBuf> = collect_local_files(&repo_workspace)
             .into_iter()
-            .filter(|(p, size)| !is_binary_extension(&p.to_string_lossy()) && *size <= max_blob_bytes as u64)
+            .filter(|(p, size)| {
+                !is_binary_extension(&p.to_string_lossy()) && *size <= max_blob_bytes as u64
+            })
             .map(|(p, _)| p)
             .collect();
-        candidates.sort_by_key(|p| if streamer::is_ai_sensitive_path(&p.to_string_lossy()) { 0 } else { 1 });
+        candidates.sort_by_key(|p| {
+            if streamer::is_ai_sensitive_path(&p.to_string_lossy()) {
+                0
+            } else {
+                1
+            }
+        });
 
         if verbose {
             println!("      Scanning {} workspace files", candidates.len());
@@ -1815,7 +2450,16 @@ async fn run_bitbucket_token_scan(
                         .map(|p| p.to_string_lossy().replace('\\', "/"))
                         .unwrap_or_else(|_| path.to_string_lossy().replace('\\', "/"));
                     let source = format!("{}/{}", full_name, rel);
-                    let findings = streamer::scan_text(&text, &source, &extra_patterns, entropy_thresh);
+                    let findings = if args.exhaustive {
+                        streamer::scan_text_exhaustive(
+                            &text,
+                            &source,
+                            &extra_patterns,
+                            entropy_thresh,
+                        )
+                    } else {
+                        streamer::scan_text(&text, &source, &extra_patterns, entropy_thresh)
+                    };
 
                     let mut techs = Vec::new();
                     detect_tech_from_path(&rel, &mut techs);
@@ -1826,7 +2470,8 @@ async fn run_bitbucket_token_scan(
             .buffer_unordered(args.workers);
 
         futures::pin_mut!(file_stream);
-        while let Some((findings, techs, bytes, failed, skipped_by_stop)) = file_stream.next().await {
+        while let Some((findings, techs, bytes, failed, skipped_by_stop)) = file_stream.next().await
+        {
             if skipped_by_stop {
                 continue;
             }
@@ -1841,13 +2486,20 @@ async fn run_bitbucket_token_scan(
 
             if !techs.is_empty() {
                 let mut ts = tech_stack_set.lock().await;
-                for t in techs { ts.insert(t); }
+                for t in techs {
+                    ts.insert(t);
+                }
             }
-            if findings.is_empty() { continue; }
+            if findings.is_empty() {
+                continue;
+            }
 
             if args.live || args.pipe {
                 for f in &findings {
-                    println!("{}", serde_json::to_string(&f.to_dict()).unwrap_or_default());
+                    println!(
+                        "{}",
+                        serde_json::to_string(&f.to_dict()).unwrap_or_default()
+                    );
                 }
             }
 
@@ -1871,21 +2523,21 @@ async fn run_bitbucket_token_scan(
     // SEC-004: temp_guard automatically cleans up when dropped at end of scope
 
     // ── 5. Assemble result ───────────────────────
-    let elapsed_s   = t0.elapsed().as_secs_f64();
-    let findings    = all_findings.lock().await.clone();
+    let elapsed_s = t0.elapsed().as_secs_f64();
+    let findings = all_findings.lock().await.clone();
     let mut ts_vec: Vec<String> = tech_stack_set.lock().await.iter().cloned().collect();
     ts_vec.sort();
 
     let stream_r = StreamResult {
         findings,
-        contributors:      vec![],
-        tech_stack:        ts_vec,
-        commit_count:      0,
-        blobs_scanned:     blobs_scanned.load(Ordering::Relaxed),
-        blobs_failed:      blobs_failed.load(Ordering::Relaxed),
-        bytes_scanned:     bytes_scanned.load(Ordering::Relaxed),
+        contributors: vec![],
+        tech_stack: ts_vec,
+        commit_count: 0,
+        blobs_scanned: blobs_scanned.load(Ordering::Relaxed),
+        blobs_failed: blobs_failed.load(Ordering::Relaxed),
+        bytes_scanned: bytes_scanned.load(Ordering::Relaxed),
         elapsed_s,
-        files_saved:       0,
+        files_saved: 0,
         files_save_failed: 0,
         cache_hits: 0,
         cache_misses: 0,
@@ -1903,22 +2555,22 @@ async fn run_bitbucket_token_scan(
     // ── 7. Save report ───────────────────────────
     let report_name = format!("bitbucket_{}", login);
     let ext = match args.format.as_str() {
-        "sarif"  => "sarif",
-        "csv"    => "csv",
+        "sarif" => "sarif",
+        "csv" => "csv",
         "ndjson" => "ndjson",
-        "md"     => "md",
-        "html"   => "html",
-        _        => "json",
+        "md" => "md",
+        "html" => "html",
+        _ => "json",
     };
     let report_path = format!("{}/{}_report.{}", args.output, report_name, ext);
 
     let save_result = match args.format.as_str() {
-        "sarif"  => rep.save_sarif(&report_path, &report_name, Some(&stream_r)),
-        "csv"    => rep.save_csv(&report_path, Some(&stream_r)),
+        "sarif" => rep.save_sarif(&report_path, &report_name, Some(&stream_r)),
+        "csv" => rep.save_csv(&report_path, Some(&stream_r)),
         "ndjson" => rep.save_ndjson(&report_path, Some(&stream_r)),
-        "md"     => rep.save_markdown(&report_path, &report_name, Some(&stream_r)),
-        "html"   => rep.save_html(&report_path, &report_name, Some(&stream_r)),
-        _        => rep.save_token_report(&report_path, &login, selected_repo_count, &stream_r),
+        "md" => rep.save_markdown(&report_path, &report_name, Some(&stream_r)),
+        "html" => rep.save_html(&report_path, &report_name, Some(&stream_r)),
+        _ => rep.save_token_report(&report_path, &login, selected_repo_count, &stream_r),
     };
 
     if let Err(e) = save_result {
@@ -1932,9 +2584,17 @@ async fn run_bitbucket_token_scan(
     // ── 8. Webhook delivery ──────────────────────
     if let Some(ref webhook_url) = args.webhook {
         if let Ok(json_body) = std::fs::read_to_string(&report_path) {
-            match try_deliver_webhook(&rep, args, webhook_url, &json_body).await {
-                Ok(true) => if verbose { println!("  ✔   Webhook delivered to {}", webhook_url); },
-                Ok(false) => if verbose { eprintln!("  ⚠   Webhook delivery failed (non-2xx response)"); },
+            match try_deliver_webhook(rep, args, webhook_url, &json_body).await {
+                Ok(true) => {
+                    if verbose {
+                        println!("  ✔   Webhook delivered to {}", webhook_url);
+                    }
+                }
+                Ok(false) => {
+                    if verbose {
+                        eprintln!("  ⚠   Webhook delivery failed (non-2xx response)");
+                    }
+                }
                 Err(e) => eprintln!("  ✗   Webhook refused: {}", e),
             }
         }
@@ -1956,6 +2616,7 @@ async fn run_bitbucket_token_scan(
     if verbose && !args.pipe {
         println!("  ✔  Done\n");
     }
+    Ok(())
 }
 
 /// Prompt for Gitea repository selection.
@@ -1982,14 +2643,14 @@ fn prompt_gitea_repo_selection(repos: &[gitea_api::GtRepo]) -> Vec<usize> {
 
 #[allow(clippy::too_many_lines)]
 async fn run_gitea_token_scan(
-    args:           &Cli,
-    rep:            &Reporter,
-    base_cfg:       HttpConfig,
-    token:          &str,
-    gitea_url:      Option<&str>,
+    args: &Cli,
+    rep: &Reporter,
+    base_cfg: HttpConfig,
+    token: &str,
+    gitea_url: Option<&str>,
     extra_patterns: Vec<streamer::DynPattern>,
-) {
-    let quiet   = args.quiet || args.pipe;
+) -> anyhow::Result<()> {
+    let quiet = args.quiet || args.pipe;
     let verbose = !quiet;
 
     // SEC-001: Validate Gitea token format
@@ -2009,43 +2670,49 @@ async fn run_gitea_token_scan(
 
     // ── 1. Build Gitea API client ───────────────
     let (gt_client, api_base) = match gitea_api::build_gitea_client(base_cfg, token, gitea_url) {
-        Ok(c)  => c,
+        Ok(c) => c,
         Err(e) => {
             eprintln!("  ✘  Failed to build Gitea API client: {}", e);
-            std::process::exit(1);
+            return Err(anyhow::anyhow!("forge scan setup failed"));
         }
     };
 
     // ── 2. Authenticate ──────────────────────────
-    if verbose { println!("  ◈  Authenticating with Gitea API..."); }
+    if verbose {
+        println!("  ◈  Authenticating with Gitea API...");
+    }
     let mut gt_forge = gitea_api::GiteaForgeClient::new(gt_client.clone(), api_base.clone());
 
     match gt_forge.authenticate(token).await {
-        Ok(_) => {},
+        Ok(_) => {}
         Err(e) => {
             eprintln!("  ✘  Authentication failed: {}", e);
-            std::process::exit(1);
+            return Err(anyhow::anyhow!("forge scan setup failed"));
         }
     }
 
     let (login, _name) = match gt_forge.whoami().await {
-        Ok(r)  => r,
+        Ok(r) => r,
         Err(e) => {
             eprintln!("  ✘  Failed to get user info: {}", e);
-            std::process::exit(1);
+            return Err(anyhow::anyhow!("forge scan setup failed"));
         }
     };
 
-    if verbose { println!("  ✔  Authenticated as: {}\n", login.cyan().bold()); }
+    if verbose {
+        println!("  ✔  Authenticated as: {}\n", login.cyan().bold());
+    }
 
     // ── 3. Enumerate repositories ────────────────
-    if verbose { println!("  ◈  Enumerating repositories..."); }
+    if verbose {
+        println!("  ◈  Enumerating repositories...");
+    }
 
     let all_repos = match gt_forge.enumerate_repos(forge::EnumScope::All).await {
-        Ok(r)  => r,
+        Ok(r) => r,
         Err(e) => {
             eprintln!("  ✘  Failed to list repositories: {}", e);
-            std::process::exit(1);
+            return Err(anyhow::anyhow!("forge scan setup failed"));
         }
     };
 
@@ -2054,24 +2721,27 @@ async fn run_gitea_token_scan(
         if verbose {
             println!("  ⚠   Tidak ada repository yang bisa di-scan.\n");
         }
-        return;
+        return Ok(());
     }
 
-    if verbose { println!("  ✔  Found {} repositories\n", total_repos); }
+    if verbose {
+        println!("  ✔  Found {} repositories\n", total_repos);
+    }
 
     let interactive = !args.quiet && !args.pipe;
 
     // Convert to a displayable format for selection
-    let gt_repos: Vec<gitea_api::GtRepo> = all_repos.iter().map(|r| {
-        gitea_api::GtRepo {
+    let gt_repos: Vec<gitea_api::GtRepo> = all_repos
+        .iter()
+        .map(|r| gitea_api::GtRepo {
             full_name: r.full_name.clone(),
             owner: r.owner.clone(),
             name: r.name.clone(),
             private: r.private,
             default_branch: r.default_branch.clone(),
             clone_url: r.clone_url.clone(),
-        }
-    }).collect();
+        })
+        .collect();
 
     let selected_indexes = if interactive {
         prompt_gitea_repo_selection(&gt_repos)
@@ -2087,11 +2757,14 @@ async fn run_gitea_token_scan(
     let selected_repo_count = selected_repos.len();
     if selected_repo_count == 0 {
         eprintln!("  ✘  Tidak ada repository valid yang dipilih.");
-        return;
+        return Ok(());
     }
 
     if verbose {
-        println!("  ✔  Selected {} repositories for scanning", selected_repo_count);
+        println!(
+            "  ✔  Selected {} repositories for scanning",
+            selected_repo_count
+        );
     }
 
     let persist_source = if interactive {
@@ -2103,22 +2776,28 @@ async fn run_gitea_token_scan(
     if verbose {
         println!(
             "  ◈  Source persistence: {}\n",
-            if persist_source { "enabled (--save behavior)" } else { "disabled (temporary workspace)" }
+            if persist_source {
+                "enabled (--save behavior)"
+            } else {
+                "disabled (temporary workspace)"
+            }
         );
     }
 
     // ── 4. Acquire source workspace and scan selected repositories ─────
-    let t0              = Instant::now();
-    let all_findings    = Arc::new(tokio::sync::Mutex::new(Vec::<streamer::Finding>::new()));
-    let tech_stack_set  = Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::<String>::new()));
-    let blobs_scanned   = Arc::new(AtomicUsize::new(0));
-    let blobs_failed    = Arc::new(AtomicUsize::new(0));
-    let bytes_scanned   = Arc::new(AtomicUsize::new(0));
-    let stop_flag       = Arc::new(AtomicBool::new(false));
+    let t0 = Instant::now();
+    let all_findings = Arc::new(tokio::sync::Mutex::new(Vec::<streamer::Finding>::new()));
+    let tech_stack_set = Arc::new(tokio::sync::Mutex::new(
+        std::collections::HashSet::<String>::new(),
+    ));
+    let blobs_scanned = Arc::new(AtomicUsize::new(0));
+    let blobs_failed = Arc::new(AtomicUsize::new(0));
+    let bytes_scanned = Arc::new(AtomicUsize::new(0));
+    let stop_flag = Arc::new(AtomicBool::new(false));
 
     let max_blob_bytes = args.max_blob_size * 1024 * 1024;
-    let extra_pat_arc  = Arc::new(extra_patterns);
-    let save_root      = if persist_source {
+    let extra_pat_arc = Arc::new(extra_patterns);
+    let save_root = if persist_source {
         Some(std::path::PathBuf::from(&args.output).join(format!("gitea_{}", login)))
     } else {
         None
@@ -2136,21 +2815,30 @@ async fn run_gitea_token_scan(
         let _ = std::fs::create_dir_all(&p);
         Some(TempDirGuard::new(p))
     };
-    let temp_root = temp_guard.as_ref().and_then(|g| g.path().map(|p| p.to_path_buf()));
+    let temp_root = temp_guard
+        .as_ref()
+        .and_then(|g| g.path().map(|p| p.to_path_buf()));
 
     // Ensure temp_guard stays alive for the entire scan
     let _temp_guard = temp_guard;
 
     for (repo_idx, repo) in selected_repos.iter().enumerate() {
-        if stop_flag.load(Ordering::Relaxed) { break; }
+        if stop_flag.load(Ordering::Relaxed) {
+            break;
+        }
 
         if verbose {
-            println!("  ▶  [{}/{}] {}", repo_idx + 1, selected_repo_count, repo.full_name);
+            println!(
+                "  ▶  [{}/{}] {}",
+                repo_idx + 1,
+                selected_repo_count,
+                repo.full_name
+            );
         }
 
         // Get HEAD SHA for the default branch
         let _head_sha = match gt_forge.get_head_sha(repo, &repo.default_branch).await {
-            Ok(s)  => s,
+            Ok(s) => s,
             Err(e) => {
                 if verbose {
                     eprintln!("    ⚠   Cannot resolve HEAD for {}: {}", repo.full_name, e);
@@ -2161,7 +2849,7 @@ async fn run_gitea_token_scan(
 
         // Fetch the full recursive tree
         let tree = match gt_forge.get_tree(repo, &repo.default_branch).await {
-            Ok(t)  => t,
+            Ok(t) => t,
             Err(e) => {
                 if verbose {
                     eprintln!("    ⚠   Cannot get tree for {}: {}", repo.full_name, e);
@@ -2180,7 +2868,8 @@ async fn run_gitea_token_scan(
         let _ = std::fs::create_dir_all(&repo_workspace);
 
         // Reconstruct source workspace from tree blobs
-        let blobs: Vec<_> = tree.into_iter()
+        let blobs: Vec<_> = tree
+            .into_iter()
             .filter(|e| e.obj_type == "blob")
             .filter(|e| e.size.is_none_or(|s| s <= max_blob_bytes as u64))
             .collect();
@@ -2191,14 +2880,18 @@ async fn run_gitea_token_scan(
 
         let reconstruct_stream = futures::stream::iter(blobs)
             .map(|entry| {
-                let client          = gt_client.clone();
-                let api_base        = api_base.clone();
-                let owner           = repo.owner.clone();
-                let name            = repo.name.clone();
-                let workspace       = repo_workspace.clone();
+                let client = gt_client.clone();
+                let api_base = api_base.clone();
+                let owner = repo.owner.clone();
+                let name = repo.name.clone();
+                let workspace = repo_workspace.clone();
                 async move {
-                    let data = match gitea_api::get_blob_content(&client, &api_base, &owner, &name, &entry.sha).await {
-                        Ok(d)  => d,
+                    let data = match gitea_api::get_blob_content(
+                        &client, &api_base, &owner, &name, &entry.sha,
+                    )
+                    .await
+                    {
+                        Ok(d) => d,
                         Err(_) => return false,
                     };
                     if data.len() > max_blob_bytes {
@@ -2231,10 +2924,18 @@ async fn run_gitea_token_scan(
 
         let mut candidates: Vec<PathBuf> = collect_local_files(&repo_workspace)
             .into_iter()
-            .filter(|(p, size)| !is_binary_extension(&p.to_string_lossy()) && *size <= max_blob_bytes as u64)
+            .filter(|(p, size)| {
+                !is_binary_extension(&p.to_string_lossy()) && *size <= max_blob_bytes as u64
+            })
             .map(|(p, _)| p)
             .collect();
-        candidates.sort_by_key(|p| if streamer::is_ai_sensitive_path(&p.to_string_lossy()) { 0 } else { 1 });
+        candidates.sort_by_key(|p| {
+            if streamer::is_ai_sensitive_path(&p.to_string_lossy()) {
+                0
+            } else {
+                1
+            }
+        });
 
         if verbose {
             println!("      Scanning {} workspace files", candidates.len());
@@ -2270,7 +2971,16 @@ async fn run_gitea_token_scan(
                         .map(|p| p.to_string_lossy().replace('\\', "/"))
                         .unwrap_or_else(|_| path.to_string_lossy().replace('\\', "/"));
                     let source = format!("{}/{}", full_name, rel);
-                    let findings = streamer::scan_text(&text, &source, &extra_patterns, entropy_thresh);
+                    let findings = if args.exhaustive {
+                        streamer::scan_text_exhaustive(
+                            &text,
+                            &source,
+                            &extra_patterns,
+                            entropy_thresh,
+                        )
+                    } else {
+                        streamer::scan_text(&text, &source, &extra_patterns, entropy_thresh)
+                    };
 
                     let mut techs = Vec::new();
                     detect_tech_from_path(&rel, &mut techs);
@@ -2281,7 +2991,8 @@ async fn run_gitea_token_scan(
             .buffer_unordered(args.workers);
 
         futures::pin_mut!(file_stream);
-        while let Some((findings, techs, bytes, failed, skipped_by_stop)) = file_stream.next().await {
+        while let Some((findings, techs, bytes, failed, skipped_by_stop)) = file_stream.next().await
+        {
             if skipped_by_stop {
                 continue;
             }
@@ -2296,13 +3007,20 @@ async fn run_gitea_token_scan(
 
             if !techs.is_empty() {
                 let mut ts = tech_stack_set.lock().await;
-                for t in techs { ts.insert(t); }
+                for t in techs {
+                    ts.insert(t);
+                }
             }
-            if findings.is_empty() { continue; }
+            if findings.is_empty() {
+                continue;
+            }
 
             if args.live || args.pipe {
                 for f in &findings {
-                    println!("{}", serde_json::to_string(&f.to_dict()).unwrap_or_default());
+                    println!(
+                        "{}",
+                        serde_json::to_string(&f.to_dict()).unwrap_or_default()
+                    );
                 }
             }
 
@@ -2326,21 +3044,21 @@ async fn run_gitea_token_scan(
     // SEC-004: temp_guard automatically cleans up when dropped at end of scope
 
     // ── 5. Assemble result ───────────────────────
-    let elapsed_s   = t0.elapsed().as_secs_f64();
-    let findings    = all_findings.lock().await.clone();
+    let elapsed_s = t0.elapsed().as_secs_f64();
+    let findings = all_findings.lock().await.clone();
     let mut ts_vec: Vec<String> = tech_stack_set.lock().await.iter().cloned().collect();
     ts_vec.sort();
 
     let stream_r = StreamResult {
         findings,
-        contributors:      vec![],
-        tech_stack:        ts_vec,
-        commit_count:      0,
-        blobs_scanned:     blobs_scanned.load(Ordering::Relaxed),
-        blobs_failed:      blobs_failed.load(Ordering::Relaxed),
-        bytes_scanned:     bytes_scanned.load(Ordering::Relaxed),
+        contributors: vec![],
+        tech_stack: ts_vec,
+        commit_count: 0,
+        blobs_scanned: blobs_scanned.load(Ordering::Relaxed),
+        blobs_failed: blobs_failed.load(Ordering::Relaxed),
+        bytes_scanned: bytes_scanned.load(Ordering::Relaxed),
         elapsed_s,
-        files_saved:       0,
+        files_saved: 0,
         files_save_failed: 0,
         cache_hits: 0,
         cache_misses: 0,
@@ -2358,22 +3076,22 @@ async fn run_gitea_token_scan(
     // ── 7. Save report ───────────────────────────
     let report_name = format!("gitea_{}", login);
     let ext = match args.format.as_str() {
-        "sarif"  => "sarif",
-        "csv"    => "csv",
+        "sarif" => "sarif",
+        "csv" => "csv",
         "ndjson" => "ndjson",
-        "md"     => "md",
-        "html"   => "html",
-        _        => "json",
+        "md" => "md",
+        "html" => "html",
+        _ => "json",
     };
     let report_path = format!("{}/{}_report.{}", args.output, report_name, ext);
 
     let save_result = match args.format.as_str() {
-        "sarif"  => rep.save_sarif(&report_path, &report_name, Some(&stream_r)),
-        "csv"    => rep.save_csv(&report_path, Some(&stream_r)),
+        "sarif" => rep.save_sarif(&report_path, &report_name, Some(&stream_r)),
+        "csv" => rep.save_csv(&report_path, Some(&stream_r)),
         "ndjson" => rep.save_ndjson(&report_path, Some(&stream_r)),
-        "md"     => rep.save_markdown(&report_path, &report_name, Some(&stream_r)),
-        "html"   => rep.save_html(&report_path, &report_name, Some(&stream_r)),
-        _        => rep.save_token_report(&report_path, &login, selected_repo_count, &stream_r),
+        "md" => rep.save_markdown(&report_path, &report_name, Some(&stream_r)),
+        "html" => rep.save_html(&report_path, &report_name, Some(&stream_r)),
+        _ => rep.save_token_report(&report_path, &login, selected_repo_count, &stream_r),
     };
 
     if let Err(e) = save_result {
@@ -2387,9 +3105,17 @@ async fn run_gitea_token_scan(
     // ── 8. Webhook delivery ──────────────────────
     if let Some(ref webhook_url) = args.webhook {
         if let Ok(json_body) = std::fs::read_to_string(&report_path) {
-            match try_deliver_webhook(&rep, args, webhook_url, &json_body).await {
-                Ok(true) => if verbose { println!("  ✔   Webhook delivered to {}", webhook_url); },
-                Ok(false) => if verbose { eprintln!("  ⚠   Webhook delivery failed (non-2xx response)"); },
+            match try_deliver_webhook(rep, args, webhook_url, &json_body).await {
+                Ok(true) => {
+                    if verbose {
+                        println!("  ✔   Webhook delivered to {}", webhook_url);
+                    }
+                }
+                Ok(false) => {
+                    if verbose {
+                        eprintln!("  ⚠   Webhook delivery failed (non-2xx response)");
+                    }
+                }
                 Err(e) => eprintln!("  ✗   Webhook refused: {}", e),
             }
         }
@@ -2411,18 +3137,19 @@ async fn run_gitea_token_scan(
     if verbose && !args.pipe {
         println!("  ✔  Done\n");
     }
+    Ok(())
 }
 
 #[allow(clippy::too_many_lines)]
 async fn run_azure_token_scan(
-    args:           &Cli,
-    rep:            &Reporter,
-    base_cfg:       HttpConfig,
-    token:          &str,
-    azure_url:      Option<&str>,
+    args: &Cli,
+    rep: &Reporter,
+    base_cfg: HttpConfig,
+    token: &str,
+    azure_url: Option<&str>,
     extra_patterns: Vec<streamer::DynPattern>,
-) {
-    let quiet   = args.quiet || args.pipe;
+) -> anyhow::Result<()> {
+    let quiet = args.quiet || args.pipe;
     let verbose = !quiet;
 
     // SEC-001: Validate Azure DevOps token format
@@ -2442,45 +3169,53 @@ async fn run_azure_token_scan(
 
     // ── 1. Build Azure DevOps API client ───────────────
     let (az_client, api_base) = match azure_api::build_azure_client(base_cfg, token, azure_url) {
-        Ok(c)  => c,
+        Ok(c) => c,
         Err(e) => {
             eprintln!("  ✘  Failed to build Azure DevOps API client: {}", e);
-            std::process::exit(1);
+            return Err(anyhow::anyhow!("forge scan setup failed"));
         }
     };
 
     // ── 2. Authenticate ──────────────────────────
-    if verbose { println!("  ◈  Authenticating with Azure DevOps API..."); }
+    if verbose {
+        println!("  ◈  Authenticating with Azure DevOps API...");
+    }
     let mut az_forge = azure_api::AzureForgeClient::new(az_client.clone(), api_base.clone());
 
     match az_forge.authenticate(token).await {
-        Ok(_) => {},
+        Ok(_) => {}
         Err(e) => {
             eprintln!("  ✘  Authentication failed: {}", e);
-            std::process::exit(1);
+            return Err(anyhow::anyhow!("forge scan setup failed"));
         }
     }
 
     let (login, _name) = match az_forge.whoami().await {
-        Ok(r)  => r,
+        Ok(r) => r,
         Err(e) => {
             eprintln!("  ✘  Failed to get user info: {}", e);
-            std::process::exit(1);
+            return Err(anyhow::anyhow!("forge scan setup failed"));
         }
     };
 
-    if verbose { println!("  ✔  Authenticated as: {}\n", login.cyan().bold()); }
+    if verbose {
+        println!("  ✔  Authenticated as: {}\n", login.cyan().bold());
+    }
 
     // ── 3. Enumerate repositories ────────────────
-    if verbose { println!("  ◈  Enumerating repositories..."); }
+    if verbose {
+        println!("  ◈  Enumerating repositories...");
+    }
 
     let all_repos = match az_forge.enumerate_repos(forge::EnumScope::All).await {
-        Ok(r)  => r,
+        Ok(r) => r,
         Err(e) => {
             eprintln!("  ✘  Failed to list repositories: {}", e);
             eprintln!("  →  For Azure DevOps, you may need to specify the organization/project.");
-            eprintln!("  →  Use --azure-url https://dev.azure.com/{{org}} for a specific organization.");
-            std::process::exit(1);
+            eprintln!(
+                "  →  Use --azure-url https://dev.azure.com/{{org}} for a specific organization."
+            );
+            return Err(anyhow::anyhow!("forge scan setup failed"));
         }
     };
 
@@ -2492,16 +3227,19 @@ async fn run_azure_token_scan(
             println!("  →  --azure-url https://dev.azure.com/{{org}}");
             println!("  →  For on-premise: --azure-url https://{{server}}/{{collection}}");
         }
-        return;
+        return Ok(());
     }
 
-    if verbose { println!("  ✔  Found {} repositories\n", total_repos); }
+    if verbose {
+        println!("  ✔  Found {} repositories\n", total_repos);
+    }
 
     let interactive = !args.quiet && !args.pipe;
 
     // Convert to a displayable format for selection
-    let az_repos: Vec<azure_api::AzRepo> = all_repos.iter().map(|r| {
-        azure_api::AzRepo {
+    let az_repos: Vec<azure_api::AzRepo> = all_repos
+        .iter()
+        .map(|r| azure_api::AzRepo {
             id: r.full_name.clone(),
             name: r.name.clone(),
             private: r.private,
@@ -2509,8 +3247,8 @@ async fn run_azure_token_scan(
             clone_url: r.clone_url.clone(),
             description: r.description.clone(),
             updated_at: r.updated_at.clone(),
-        }
-    }).collect();
+        })
+        .collect();
 
     let selected_indexes = if interactive {
         prompt_azure_repo_selection(&az_repos)
@@ -2526,11 +3264,14 @@ async fn run_azure_token_scan(
     let selected_repo_count = selected_repos.len();
     if selected_repo_count == 0 {
         eprintln!("  ✘  No valid repositories selected.");
-        return;
+        return Ok(());
     }
 
     if verbose {
-        println!("  ✔  Selected {} repositories for scanning", selected_repo_count);
+        println!(
+            "  ✔  Selected {} repositories for scanning",
+            selected_repo_count
+        );
     }
 
     let persist_source = if interactive {
@@ -2542,22 +3283,28 @@ async fn run_azure_token_scan(
     if verbose {
         println!(
             "  ◈  Source persistence: {}\n",
-            if persist_source { "enabled (--save behavior)" } else { "disabled (temporary workspace)" }
+            if persist_source {
+                "enabled (--save behavior)"
+            } else {
+                "disabled (temporary workspace)"
+            }
         );
     }
 
     // ── 4. Acquire source workspace and scan selected repositories ─────
-    let t0              = Instant::now();
-    let all_findings    = Arc::new(tokio::sync::Mutex::new(Vec::<streamer::Finding>::new()));
-    let tech_stack_set  = Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::<String>::new()));
-    let blobs_scanned   = Arc::new(AtomicUsize::new(0));
-    let blobs_failed    = Arc::new(AtomicUsize::new(0));
-    let bytes_scanned   = Arc::new(AtomicUsize::new(0));
-    let stop_flag       = Arc::new(AtomicBool::new(false));
+    let t0 = Instant::now();
+    let all_findings = Arc::new(tokio::sync::Mutex::new(Vec::<streamer::Finding>::new()));
+    let tech_stack_set = Arc::new(tokio::sync::Mutex::new(
+        std::collections::HashSet::<String>::new(),
+    ));
+    let blobs_scanned = Arc::new(AtomicUsize::new(0));
+    let blobs_failed = Arc::new(AtomicUsize::new(0));
+    let bytes_scanned = Arc::new(AtomicUsize::new(0));
+    let stop_flag = Arc::new(AtomicBool::new(false));
 
     let max_blob_bytes = args.max_blob_size * 1024 * 1024;
-    let extra_pat_arc  = Arc::new(extra_patterns);
-    let save_root      = if persist_source {
+    let extra_pat_arc = Arc::new(extra_patterns);
+    let save_root = if persist_source {
         Some(std::path::PathBuf::from(&args.output).join(format!("azure_{}", login)))
     } else {
         None
@@ -2575,21 +3322,30 @@ async fn run_azure_token_scan(
         let _ = std::fs::create_dir_all(&p);
         Some(TempDirGuard::new(p))
     };
-    let temp_root = temp_guard.as_ref().and_then(|g| g.path().map(|p| p.to_path_buf()));
+    let temp_root = temp_guard
+        .as_ref()
+        .and_then(|g| g.path().map(|p| p.to_path_buf()));
 
     // Ensure temp_guard stays alive for the entire scan
     let _temp_guard = temp_guard;
 
     for (repo_idx, repo) in selected_repos.iter().enumerate() {
-        if stop_flag.load(Ordering::Relaxed) { break; }
+        if stop_flag.load(Ordering::Relaxed) {
+            break;
+        }
 
         if verbose {
-            println!("  ▶  [{}/{}] {}", repo_idx + 1, selected_repo_count, repo.full_name);
+            println!(
+                "  ▶  [{}/{}] {}",
+                repo_idx + 1,
+                selected_repo_count,
+                repo.full_name
+            );
         }
 
         // Get HEAD SHA for the default branch
         let _head_sha = match az_forge.get_head_sha(repo, &repo.default_branch).await {
-            Ok(s)  => s,
+            Ok(s) => s,
             Err(e) => {
                 if verbose {
                     eprintln!("    ⚠   Cannot resolve HEAD for {}: {}", repo.full_name, e);
@@ -2600,7 +3356,7 @@ async fn run_azure_token_scan(
 
         // Fetch the full recursive tree
         let tree = match az_forge.get_tree(repo, &repo.default_branch).await {
-            Ok(t)  => t,
+            Ok(t) => t,
             Err(e) => {
                 if verbose {
                     eprintln!("    ⚠   Cannot get tree for {}: {}", repo.full_name, e);
@@ -2619,7 +3375,8 @@ async fn run_azure_token_scan(
         let _ = std::fs::create_dir_all(&repo_workspace);
 
         // Reconstruct source workspace from tree blobs
-        let blobs: Vec<_> = tree.into_iter()
+        let blobs: Vec<_> = tree
+            .into_iter()
             .filter(|e| e.obj_type == "blob")
             .filter(|e| e.size.is_none_or(|s| s <= max_blob_bytes as u64))
             .collect();
@@ -2630,17 +3387,20 @@ async fn run_azure_token_scan(
 
         let reconstruct_stream = futures::stream::iter(blobs)
             .map(|entry| {
-                let client          = az_client.clone();
-                let api_base        = api_base.clone();
-                let repo_id         = repo.full_name.clone();
-                let workspace       = repo_workspace.clone();
-                let entry_path      = entry.path.clone();
-                let entry_sha        = entry.sha.clone();
+                let client = az_client.clone();
+                let api_base = api_base.clone();
+                let repo_id = repo.full_name.clone();
+                let workspace = repo_workspace.clone();
+                let entry_path = entry.path.clone();
+                let entry_sha = entry.sha.clone();
                 async move {
-                    let data = match azure_api::get_blob_content(&client, &api_base, &repo_id, &entry_sha).await {
-                        Ok(d)  => d,
-                        Err(_) => return false,
-                    };
+                    let data =
+                        match azure_api::get_blob_content(&client, &api_base, &repo_id, &entry_sha)
+                            .await
+                        {
+                            Ok(d) => d,
+                            Err(_) => return false,
+                        };
                     if data.len() > max_blob_bytes {
                         return false;
                     }
@@ -2671,10 +3431,18 @@ async fn run_azure_token_scan(
 
         let mut candidates: Vec<PathBuf> = collect_local_files(&repo_workspace)
             .into_iter()
-            .filter(|(p, size)| !is_binary_extension(&p.to_string_lossy()) && *size <= max_blob_bytes as u64)
+            .filter(|(p, size)| {
+                !is_binary_extension(&p.to_string_lossy()) && *size <= max_blob_bytes as u64
+            })
             .map(|(p, _)| p)
             .collect();
-        candidates.sort_by_key(|p| if streamer::is_ai_sensitive_path(&p.to_string_lossy()) { 0 } else { 1 });
+        candidates.sort_by_key(|p| {
+            if streamer::is_ai_sensitive_path(&p.to_string_lossy()) {
+                0
+            } else {
+                1
+            }
+        });
 
         if verbose {
             println!("      Scanning {} workspace files", candidates.len());
@@ -2710,7 +3478,16 @@ async fn run_azure_token_scan(
                         .map(|p| p.to_string_lossy().replace('\\', "/"))
                         .unwrap_or_else(|_| path.to_string_lossy().replace('\\', "/"));
                     let source = format!("{}/{}", full_name, rel);
-                    let findings = streamer::scan_text(&text, &source, &extra_patterns, entropy_thresh);
+                    let findings = if args.exhaustive {
+                        streamer::scan_text_exhaustive(
+                            &text,
+                            &source,
+                            &extra_patterns,
+                            entropy_thresh,
+                        )
+                    } else {
+                        streamer::scan_text(&text, &source, &extra_patterns, entropy_thresh)
+                    };
 
                     let mut techs = Vec::new();
                     detect_tech_from_path(&rel, &mut techs);
@@ -2721,7 +3498,8 @@ async fn run_azure_token_scan(
             .buffer_unordered(args.workers);
 
         futures::pin_mut!(file_stream);
-        while let Some((findings, techs, bytes, failed, skipped_by_stop)) = file_stream.next().await {
+        while let Some((findings, techs, bytes, failed, skipped_by_stop)) = file_stream.next().await
+        {
             if skipped_by_stop {
                 continue;
             }
@@ -2736,13 +3514,20 @@ async fn run_azure_token_scan(
 
             if !techs.is_empty() {
                 let mut ts = tech_stack_set.lock().await;
-                for t in techs { ts.insert(t); }
+                for t in techs {
+                    ts.insert(t);
+                }
             }
-            if findings.is_empty() { continue; }
+            if findings.is_empty() {
+                continue;
+            }
 
             if args.live || args.pipe {
                 for f in &findings {
-                    println!("{}", serde_json::to_string(&f.to_dict()).unwrap_or_default());
+                    println!(
+                        "{}",
+                        serde_json::to_string(&f.to_dict()).unwrap_or_default()
+                    );
                 }
             }
 
@@ -2766,21 +3551,21 @@ async fn run_azure_token_scan(
     // SEC-004: temp_guard automatically cleans up when dropped at end of scope
 
     // ── 5. Assemble result ───────────────────────
-    let elapsed_s   = t0.elapsed().as_secs_f64();
-    let findings    = all_findings.lock().await.clone();
+    let elapsed_s = t0.elapsed().as_secs_f64();
+    let findings = all_findings.lock().await.clone();
     let mut ts_vec: Vec<String> = tech_stack_set.lock().await.iter().cloned().collect();
     ts_vec.sort();
 
     let stream_r = StreamResult {
         findings,
-        contributors:      vec![],
-        tech_stack:        ts_vec,
-        commit_count:      0,
-        blobs_scanned:     blobs_scanned.load(Ordering::Relaxed),
-        blobs_failed:      blobs_failed.load(Ordering::Relaxed),
-        bytes_scanned:     bytes_scanned.load(Ordering::Relaxed),
+        contributors: vec![],
+        tech_stack: ts_vec,
+        commit_count: 0,
+        blobs_scanned: blobs_scanned.load(Ordering::Relaxed),
+        blobs_failed: blobs_failed.load(Ordering::Relaxed),
+        bytes_scanned: bytes_scanned.load(Ordering::Relaxed),
         elapsed_s,
-        files_saved:       0,
+        files_saved: 0,
         files_save_failed: 0,
         cache_hits: 0,
         cache_misses: 0,
@@ -2798,22 +3583,22 @@ async fn run_azure_token_scan(
     // ── 7. Save report ───────────────────────────
     let report_name = format!("azure_{}", login);
     let ext = match args.format.as_str() {
-        "sarif"  => "sarif",
-        "csv"    => "csv",
+        "sarif" => "sarif",
+        "csv" => "csv",
         "ndjson" => "ndjson",
-        "md"     => "md",
-        "html"   => "html",
-        _        => "json",
+        "md" => "md",
+        "html" => "html",
+        _ => "json",
     };
     let report_path = format!("{}/{}_report.{}", args.output, report_name, ext);
 
     let save_result = match args.format.as_str() {
-        "sarif"  => rep.save_sarif(&report_path, &report_name, Some(&stream_r)),
-        "csv"    => rep.save_csv(&report_path, Some(&stream_r)),
+        "sarif" => rep.save_sarif(&report_path, &report_name, Some(&stream_r)),
+        "csv" => rep.save_csv(&report_path, Some(&stream_r)),
         "ndjson" => rep.save_ndjson(&report_path, Some(&stream_r)),
-        "md"     => rep.save_markdown(&report_path, &report_name, Some(&stream_r)),
-        "html"   => rep.save_html(&report_path, &report_name, Some(&stream_r)),
-        _        => rep.save_json(&report_path, "azure_token", None, None, Some(&stream_r)),
+        "md" => rep.save_markdown(&report_path, &report_name, Some(&stream_r)),
+        "html" => rep.save_html(&report_path, &report_name, Some(&stream_r)),
+        _ => rep.save_json(&report_path, "azure_token", None, None, Some(&stream_r)),
     };
 
     if save_result.is_ok() && !args.quiet {
@@ -2828,8 +3613,12 @@ async fn run_azure_token_scan(
     // (the persisted report body) as GitHub/GitLab/Bitbucket/Gitea.
     if let Some(ref webhook_url) = args.webhook {
         if let Ok(json_body) = std::fs::read_to_string(&report_path) {
-            match try_deliver_webhook(&rep, args, webhook_url, &json_body).await {
-                Ok(true) => if !args.quiet { println!("  📡  Webhook sent\n"); },
+            match try_deliver_webhook(rep, args, webhook_url, &json_body).await {
+                Ok(true) => {
+                    if !args.quiet {
+                        println!("  📡  Webhook sent\n");
+                    }
+                }
                 Ok(false) => eprintln!("  ⚠   Webhook delivery failed (non-2xx response)"),
                 Err(e) => eprintln!("  ✗   Webhook refused: {}", e),
             }
@@ -2855,6 +3644,7 @@ async fn run_azure_token_scan(
     if verbose && !args.pipe {
         println!("  ✔  Done\n");
     }
+    Ok(())
 }
 
 /// Prompt for Azure DevOps repository selection.
@@ -2863,7 +3653,13 @@ fn prompt_azure_repo_selection(repos: &[azure_api::AzRepo]) -> Vec<usize> {
     for (i, r) in repos.iter().enumerate() {
         let visibility = if r.private { "🔒" } else { "🌍" };
         let desc = r.description.as_deref().unwrap_or("No description");
-        println!("    [{}] {} {} - {}", (i + 1).to_string().cyan(), visibility, r.name.bold(), desc.dimmed());
+        println!(
+            "    [{}] {} {} - {}",
+            (i + 1).to_string().cyan(),
+            visibility,
+            r.name.bold(),
+            desc.dimmed()
+        );
     }
     println!();
 
@@ -2873,10 +3669,10 @@ fn prompt_azure_repo_selection(repos: &[azure_api::AzRepo]) -> Vec<usize> {
 
         let mut input = String::new();
         match io::stdin().read_line(&mut input) {
-            Ok(_) => {},
+            Ok(_) => {}
             Err(_) => {
                 eprintln!("  ✘  Failed to read input");
-                std::process::exit(1);
+                return (0..repos.len()).collect();
             }
         }
 
@@ -2915,20 +3711,17 @@ fn prompt_azure_repo_selection(repos: &[azure_api::AzRepo]) -> Vec<usize> {
 async fn run_dir_scan(
     args: &Cli,
     rep: &Reporter,
-    client: &HttpClient,
+    _client: &HttpClient,
     dir: &str,
     extra_patterns: Vec<streamer::DynPattern>,
-) {
+) -> anyhow::Result<ScanSummary> {
     let quiet = args.quiet || args.pipe;
     let verbose = !quiet;
 
     // SEC-001: Validate directory path
     let canonical_root = match validation::validate_directory_path(dir) {
         Ok(p) => PathBuf::from(p),
-        Err(e) => {
-            eprintln!("  ✘  {}", e);
-            std::process::exit(1);
-        }
+        Err(e) => return Err(e),
     };
 
     if !quiet {
@@ -2943,11 +3736,17 @@ async fn run_dir_scan(
 
     let mut candidates: Vec<PathBuf> = all_files
         .into_iter()
-        .filter(|(p, _)| !is_binary_extension(&p.to_string_lossy()))
+        .filter(|(p, _)| !args.no_scan_binaries || !is_binary_extension(&p.to_string_lossy()))
         .filter(|(_, size)| *size <= max_blob_bytes as u64)
         .map(|(p, _)| p)
         .collect();
-    candidates.sort_by_key(|p| if streamer::is_ai_sensitive_path(&p.to_string_lossy()) { 0 } else { 1 });
+    candidates.sort_by_key(|p| {
+        if streamer::is_ai_sensitive_path(&p.to_string_lossy()) {
+            0
+        } else {
+            1
+        }
+    });
 
     if verbose {
         println!("  ◈  Found {} candidate files\n", candidates.len());
@@ -2955,14 +3754,16 @@ async fn run_dir_scan(
 
     let t0 = Instant::now();
     let all_findings = Arc::new(tokio::sync::Mutex::new(Vec::<streamer::Finding>::new()));
-    let tech_stack_set = Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::<String>::new()));
+    let tech_stack_set = Arc::new(tokio::sync::Mutex::new(
+        std::collections::HashSet::<String>::new(),
+    ));
     let blobs_scanned = Arc::new(AtomicUsize::new(0));
     let blobs_failed = Arc::new(AtomicUsize::new(0));
     let bytes_scanned = Arc::new(AtomicUsize::new(0));
     let stop_flag = Arc::new(AtomicBool::new(false));
     let extra_pat_arc = Arc::new(extra_patterns);
     let display_root = canonical_root.to_string_lossy().to_string();
-
+    let no_scan_binaries = args.no_scan_binaries;
     let file_stream = futures::stream::iter(candidates)
         .map(|path| {
             let stop = stop_flag.clone();
@@ -2987,7 +3788,16 @@ async fn run_dir_scan(
                 let probe = &data[..data.len().min(BINARY_DETECTION_PROBE_SIZE)];
                 let null_count = probe.iter().filter(|&&b| b == 0).count();
                 if null_count > NULL_BYTE_THRESHOLD {
-                    return (vec![], vec![], 0usize, false, false);
+                    if no_scan_binaries {
+                        return (vec![], vec![], data.len(), false, false);
+                    }
+                    let findings = binary_findings_to_findings(
+                        &data,
+                        &path.to_string_lossy(),
+                        max_blob_bytes,
+                        args.exhaustive,
+                    );
+                    return (findings, vec![], data.len(), false, false);
                 }
 
                 let text = String::from_utf8_lossy(&data);
@@ -2996,7 +3806,11 @@ async fn run_dir_scan(
                     .map(|p| p.to_string_lossy().replace('\\', "/"))
                     .unwrap_or_else(|_| path.to_string_lossy().replace('\\', "/"));
                 let source = format!("{}/{}", display_root, rel);
-                let findings = streamer::scan_text(&text, &source, &extra_patterns, entropy_thresh);
+                let findings = if args.exhaustive {
+                    streamer::scan_text_exhaustive(&text, &source, &extra_patterns, entropy_thresh)
+                } else {
+                    streamer::scan_text(&text, &source, &extra_patterns, entropy_thresh)
+                };
 
                 let mut techs = Vec::new();
                 detect_tech_from_path(&rel, &mut techs);
@@ -3035,7 +3849,10 @@ async fn run_dir_scan(
 
         if args.live || args.pipe {
             for f in &findings {
-                println!("{}", serde_json::to_string(&f.to_dict()).unwrap_or_default());
+                println!(
+                    "{}",
+                    serde_json::to_string(&f.to_dict()).unwrap_or_default()
+                );
             }
         }
 
@@ -3112,12 +3929,19 @@ async fn run_dir_scan(
     if verbose && !args.pipe {
         rep.print_summary(&display_root, &stream_r, &report_path);
     }
-
     if let Some(ref webhook_url) = args.webhook {
         if let Ok(json_body) = std::fs::read_to_string(&report_path) {
-            match try_deliver_webhook(&rep, args, webhook_url, &json_body).await {
-                Ok(true) => if verbose { println!("  ✔   Webhook delivered to {}", webhook_url); },
-                Ok(false) => if verbose { eprintln!("  ⚠   Webhook delivery failed (non-2xx response)"); },
+            match try_deliver_webhook(rep, args, webhook_url, &json_body).await {
+                Ok(true) => {
+                    if verbose {
+                        println!("  ✔   Webhook delivered to {}", webhook_url);
+                    }
+                }
+                Ok(false) => {
+                    if verbose {
+                        eprintln!("  ⚠   Webhook delivery failed (non-2xx response)");
+                    }
+                }
                 Err(e) => eprintln!("  ✗   Webhook refused: {}", e),
             }
         }
@@ -3138,23 +3962,46 @@ async fn run_dir_scan(
     if verbose && !args.pipe {
         println!("  ✔  Done\n");
     }
+    Ok(ScanSummary {
+        report_path,
+        findings_count: stream_r.findings.len(),
+        risk_score: stream_r.risk_score(),
+    })
 }
-
 /// Detect tech stack from a file path (filename/extension signals only).
 fn detect_tech_from_path(path: &str, out: &mut Vec<String>) {
     use lazy_static::lazy_static;
     use regex::Regex;
     lazy_static! {
         static ref TECH_PATTERNS: Vec<(&'static str, Regex)> = vec![
-            ("Python",    Regex::new(r"requirements\.txt|setup\.py|Pipfile|pyproject\.toml|manage\.py").unwrap()),
-            ("Node.js",   Regex::new(r"package\.json|yarn\.lock|package-lock\.json|\.nvmrc").unwrap()),
-            ("PHP",       Regex::new(r"composer\.json|composer\.lock|\.php$").unwrap()),
-            ("Ruby",      Regex::new(r"Gemfile|\.ruby-version|\.rb$|Rakefile").unwrap()),
-            ("Java",      Regex::new(r"pom\.xml|build\.gradle|\.java$").unwrap()),
-            ("Go",        Regex::new(r"go\.mod|go\.sum|\.go$").unwrap()),
-            ("Rust",      Regex::new(r"Cargo\.toml|Cargo\.lock|\.rs$").unwrap()),
-            (".NET",      Regex::new(r"\.csproj|\.sln|web\.config").unwrap()),
-            ("Docker",    Regex::new(r"Dockerfile|docker-compose").unwrap()),
+            (
+                "Python",
+                Regex::new(r"requirements\.txt|setup\.py|Pipfile|pyproject\.toml|manage\.py")
+                    .unwrap()
+            ),
+            (
+                "Node.js",
+                Regex::new(r"package\.json|yarn\.lock|package-lock\.json|\.nvmrc").unwrap()
+            ),
+            (
+                "PHP",
+                Regex::new(r"composer\.json|composer\.lock|\.php$").unwrap()
+            ),
+            (
+                "Ruby",
+                Regex::new(r"Gemfile|\.ruby-version|\.rb$|Rakefile").unwrap()
+            ),
+            (
+                "Java",
+                Regex::new(r"pom\.xml|build\.gradle|\.java$").unwrap()
+            ),
+            ("Go", Regex::new(r"go\.mod|go\.sum|\.go$").unwrap()),
+            (
+                "Rust",
+                Regex::new(r"Cargo\.toml|Cargo\.lock|\.rs$").unwrap()
+            ),
+            (".NET", Regex::new(r"\.csproj|\.sln|web\.config").unwrap()),
+            ("Docker", Regex::new(r"Dockerfile|docker-compose").unwrap()),
             ("Terraform", Regex::new(r"\.tf$|terraform\.tfvars").unwrap()),
         ];
     }
@@ -3175,21 +4022,21 @@ fn build_plain_http_config(args: &Cli) -> anyhow::Result<HttpConfig> {
     };
 
     Ok(HttpConfig {
-        timeout:          Duration::from_secs(args.timeout),
-        retries:          args.retries,
-        delay:            Duration::ZERO,
-        jitter:           Duration::ZERO,
-        proxy:            args.proxy.clone(),
-        verify_ssl:       !args.insecure,  // BUG-HTTP-003: Use insecure flag to control SSL verification
-        custom_ua:        None,
-        extra_headers:    vec![],
-        max_size:         100 * 1024 * 1024,
+        timeout: Duration::from_secs(args.timeout),
+        retries: args.retries,
+        delay: Duration::ZERO,
+        jitter: Duration::ZERO,
+        proxy: args.proxy.clone(),
+        verify_ssl: !args.insecure, // BUG-HTTP-003: Use insecure flag to control SSL verification
+        custom_ua: None,
+        extra_headers: vec![],
+        max_size: 100 * 1024 * 1024,
         adaptive_timeout: false,
-        max_timeout:      Duration::from_secs(args.max_timeout),
-        use_http2:        args.http2,
-        rate_limit_rps:   None,
-        proxy_list:       vec![],
-        ua_pool:          vec![],
+        max_timeout: Duration::from_secs(args.max_timeout),
+        use_http2: args.http2,
+        rate_limit_rps: None,
+        proxy_list: vec![],
+        ua_pool: vec![],
         retry_strategy,
     })
 }
@@ -3215,12 +4062,14 @@ async fn try_deliver_webhook(
     )?;
     let cfg = build_plain_http_config(args)?;
     let plain_client = http_client::HttpClient::new(cfg)?;
-    Ok(reporter.send_webhook(
-        webhook_url,
-        args.webhook_secret.as_deref(),
-        body,
-        &plain_client,
-    ).await)
+    Ok(reporter
+        .send_webhook(
+            webhook_url,
+            args.webhook_secret.as_deref(),
+            body,
+            &plain_client,
+        )
+        .await)
 }
 
 // ════════════════════════════════════════════════
@@ -3249,10 +4098,11 @@ async fn main() {
         tokio::spawn(async move {
             use signal_hook_tokio::Signals;
 
-            let mut signals = match Signals::new([signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM]) {
-                Ok(s) => s,
-                Err(_) => return,
-            };
+            let mut signals =
+                match Signals::new([signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM]) {
+                    Ok(s) => s,
+                    Err(_) => return,
+                };
 
             #[allow(clippy::never_loop)]
             #[allow(clippy::while_let_loop)]
@@ -3289,19 +4139,24 @@ async fn main() {
         std::process::exit(2);
     }
     if args.max_blob_size == 0 || args.max_blob_size > 10_240 {
-        eprintln!("  ✘  --max-blob-size must be in [1, 10240] MB, got {}", args.max_blob_size);
+        eprintln!(
+            "  ✘  --max-blob-size must be in [1, 10240] MB, got {}",
+            args.max_blob_size
+        );
         std::process::exit(2);
     }
     if args.max_history > 1_000_000 {
-        eprintln!("  ✘  --max-history must be in [0, 1_000_000], got {}", args.max_history);
-        std::process::exit(2);
-    }
-    if args.parallel_targets == 0 || args.parallel_targets > 64 {
-        eprintln!("  ✘  --parallel-targets must be in [1, 64], got {}", args.parallel_targets);
+        eprintln!(
+            "  ✘  --max-history must be in [0, 1_000_000], got {}",
+            args.max_history
+        );
         std::process::exit(2);
     }
     if args.checkpoint_interval == 0 || args.checkpoint_interval > 1_000_000 {
-        eprintln!("  ✘  --checkpoint-interval must be in [1, 1_000_000], got {}", args.checkpoint_interval);
+        eprintln!(
+            "  ✘  --checkpoint-interval must be in [1, 1_000_000], got {}",
+            args.checkpoint_interval
+        );
         std::process::exit(2);
     }
 
@@ -3312,15 +4167,16 @@ async fn main() {
     }
 
     // SCAN-001: Parse false-positive keywords from CLI flag
-    let false_positive_keywords: Vec<String> = if let Some(ref keywords_str) = args.false_positive_keywords {
-        keywords_str
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect()
-    } else {
-        Vec::new()
-    };
+    let false_positive_keywords: Vec<String> =
+        if let Some(ref keywords_str) = args.false_positive_keywords {
+            keywords_str
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        } else {
+            Vec::new()
+        };
 
     // DX-1: --patterns-help
     if args.patterns_help {
@@ -3386,9 +4242,9 @@ async fn main() {
     }
 
     // Setup reporter and flags — done early so token mode can use them
-    let quiet   = args.quiet || args.pipe;
+    let quiet = args.quiet || args.pipe;
     let verbose = !quiet;
-    let rep     = Reporter::new(args.no_color, &theme);
+    let rep = Reporter::new(args.no_color, &theme);
 
     // SEC-001: Validate output path — reject empty, non-directory, and system paths
     // (Sprint 4 S4.2: rejects /etc, /usr, /var, /root, /boot, /sys, /proc, /dev on
@@ -3419,7 +4275,12 @@ async fn main() {
 
     // PERF-001: --resume flag logic
     // When --resume is used without a URL, find the latest checkpoint and resume
-    let resume_target = if args.resume && args.url.is_none() && args.targets.is_none() && args.token.is_none() && args.dir.is_none() {
+    let resume_target = if args.resume
+        && args.url.is_none()
+        && args.targets.is_none()
+        && args.token.is_none()
+        && args.dir.is_none()
+    {
         if verbose {
             println!("  ◈  --resume flag: searching for latest checkpoint...");
         }
@@ -3427,9 +4288,10 @@ async fn main() {
         match checkpoint::find_latest_checkpoints(1) {
             Ok(latest) if !latest.is_empty() => {
                 let latest_cp = &latest[0];
-                let ts = chrono::DateTime::<chrono::Utc>::from_timestamp(latest_cp.updated_at as i64, 0)
-                    .map(|dt| dt.to_rfc3339())
-                    .unwrap_or_else(|| "unknown".to_string());
+                let ts =
+                    chrono::DateTime::<chrono::Utc>::from_timestamp(latest_cp.updated_at as i64, 0)
+                        .map(|dt| dt.to_rfc3339())
+                        .unwrap_or_else(|| "unknown".to_string());
 
                 if verbose {
                     println!("  ◈  Found checkpoint for: {}", latest_cp.target);
@@ -3442,7 +4304,9 @@ async fn main() {
                 if latest_cp.target.starts_with("token_") || latest_cp.target.starts_with("dir_") {
                     if verbose {
                         eprintln!("  ⚠   Resume from token/dir mode checkpoints requires manual specification");
-                        eprintln!("  → Use: gitrecon --resume with original --token or --dir argument");
+                        eprintln!(
+                            "  → Use: gitrecon --resume with original --token or --dir argument"
+                        );
                     }
                     std::process::exit(0);
                 }
@@ -3480,7 +4344,7 @@ async fn main() {
                         std::process::exit(1);
                     }
                 }
-            },
+            }
             Err(e) => {
                 eprintln!("  ⚠   Cannot read UA file '{}': {}", ua_file, e);
                 // Not fatal - continue with empty pool
@@ -3496,7 +4360,11 @@ async fn main() {
     let mut proxy_list = vec![];
     if let Some(ref pl_file) = args.proxy_list {
         if let Ok(content) = std::fs::read_to_string(pl_file) {
-            proxy_list = content.lines().filter(|l| !l.trim().is_empty()).map(|l| l.to_string()).collect();
+            proxy_list = content
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .map(|l| l.to_string())
+                .collect();
         }
     }
 
@@ -3525,26 +4393,30 @@ async fn main() {
 
     // Build HTTP config (cloned for token mode before consuming)
     let base_cfg = HttpConfig {
-        timeout:          Duration::from_secs(args.timeout),
-        retries:          args.retries,
-        delay:            Duration::from_secs_f64(args.delay),
-        jitter:           Duration::from_secs_f64(args.jitter),
-        proxy:            args.proxy.clone(),
-        verify_ssl:       !args.insecure,  // BUG-HTTP-003: Use insecure flag to control SSL verification
-        custom_ua:        if args.ua_git { Some("git/2.46.0".to_string()) } else { args.user_agent.clone() },
+        timeout: Duration::from_secs(args.timeout),
+        retries: args.retries,
+        delay: Duration::from_secs_f64(args.delay),
+        jitter: Duration::from_secs_f64(args.jitter),
+        proxy: args.proxy.clone(),
+        verify_ssl: !args.insecure, // BUG-HTTP-003: Use insecure flag to control SSL verification
+        custom_ua: if args.ua_git {
+            Some("git/2.46.0".to_string())
+        } else {
+            args.user_agent.clone()
+        },
         extra_headers,
-        max_size:         100 * 1024 * 1024,
+        max_size: 100 * 1024 * 1024,
         adaptive_timeout: !args.no_adaptive_timeout,
-        max_timeout:      Duration::from_secs(args.max_timeout),
-        use_http2:        args.http2,
-        rate_limit_rps:   args.rate,
+        max_timeout: Duration::from_secs(args.max_timeout),
+        use_http2: args.http2,
+        rate_limit_rps: args.rate,
         proxy_list,
         ua_pool,
         retry_strategy,
     };
 
     let client = match HttpClient::new(base_cfg.clone()) {
-        Ok(c)  => c,
+        Ok(c) => c,
         Err(e) => {
             eprintln!("  ✘  Failed to create HTTP client: {}", e);
             std::process::exit(1);
@@ -3556,7 +4428,10 @@ async fn main() {
         match load_extra_patterns(patterns_file) {
             Ok(patterns) => patterns,
             Err(e) => {
-                eprintln!("  ⚠   Failed to load patterns from '{}': {}", patterns_file, e);
+                eprintln!(
+                    "  ⚠   Failed to load patterns from '{}': {}",
+                    patterns_file, e
+                );
                 std::process::exit(1);
             }
         }
@@ -3565,23 +4440,63 @@ async fn main() {
     };
 
     // Validate mutually exclusive modes
-    if args.token.is_some() && (args.dir.is_some() || args.targets.is_some() || args.url.is_some() || args.gitlab_token.is_some() || args.bitbucket_token.is_some() || args.gitea_token.is_some() || args.azure_token.is_some()) {
+    if args.token.is_some()
+        && (args.dir.is_some()
+            || args.targets.is_some()
+            || args.url.is_some()
+            || args.gitlab_token.is_some()
+            || args.bitbucket_token.is_some()
+            || args.gitea_token.is_some()
+            || args.azure_token.is_some())
+    {
         eprintln!("  ✘  --token mode cannot be combined with --dir, <URL>, --targets, --gitlab-token, --bitbucket-token, --gitea-token, or --azure-token.");
         std::process::exit(1);
     }
-    if args.gitlab_token.is_some() && (args.dir.is_some() || args.targets.is_some() || args.url.is_some() || args.token.is_some() || args.bitbucket_token.is_some() || args.gitea_token.is_some() || args.azure_token.is_some()) {
+    if args.gitlab_token.is_some()
+        && (args.dir.is_some()
+            || args.targets.is_some()
+            || args.url.is_some()
+            || args.token.is_some()
+            || args.bitbucket_token.is_some()
+            || args.gitea_token.is_some()
+            || args.azure_token.is_some())
+    {
         eprintln!("  ✘  --gitlab-token mode cannot be combined with --dir, <URL>, --targets, --token, --bitbucket-token, --gitea-token, or --azure-token.");
         std::process::exit(1);
     }
-    if args.bitbucket_token.is_some() && (args.dir.is_some() || args.targets.is_some() || args.url.is_some() || args.token.is_some() || args.gitlab_token.is_some() || args.gitea_token.is_some() || args.azure_token.is_some()) {
+    if args.bitbucket_token.is_some()
+        && (args.dir.is_some()
+            || args.targets.is_some()
+            || args.url.is_some()
+            || args.token.is_some()
+            || args.gitlab_token.is_some()
+            || args.gitea_token.is_some()
+            || args.azure_token.is_some())
+    {
         eprintln!("  ✘  --bitbucket-token mode cannot be combined with --dir, <URL>, --targets, --token, --gitlab-token, --gitea-token, or --azure-token.");
         std::process::exit(1);
     }
-    if args.gitea_token.is_some() && (args.dir.is_some() || args.targets.is_some() || args.url.is_some() || args.token.is_some() || args.gitlab_token.is_some() || args.bitbucket_token.is_some() || args.azure_token.is_some()) {
+    if args.gitea_token.is_some()
+        && (args.dir.is_some()
+            || args.targets.is_some()
+            || args.url.is_some()
+            || args.token.is_some()
+            || args.gitlab_token.is_some()
+            || args.bitbucket_token.is_some()
+            || args.azure_token.is_some())
+    {
         eprintln!("  ✘  --gitea-token mode cannot be combined with --dir, <URL>, --targets, --token, --gitlab-token, --bitbucket-token, or --azure-token.");
         std::process::exit(1);
     }
-    if args.azure_token.is_some() && (args.dir.is_some() || args.targets.is_some() || args.url.is_some() || args.token.is_some() || args.gitlab_token.is_some() || args.bitbucket_token.is_some() || args.gitea_token.is_some()) {
+    if args.azure_token.is_some()
+        && (args.dir.is_some()
+            || args.targets.is_some()
+            || args.url.is_some()
+            || args.token.is_some()
+            || args.gitlab_token.is_some()
+            || args.bitbucket_token.is_some()
+            || args.gitea_token.is_some())
+    {
         eprintln!("  ✘  --azure-token mode cannot be combined with --dir, <URL>, --targets, --token, --gitlab-token, --bitbucket-token, or --gitea-token.");
         std::process::exit(1);
     }
@@ -3592,37 +4507,91 @@ async fn main() {
 
     // ── Token mode: enumerate GitHub repos and scan ──
     if let Some(ref token) = args.token {
-        run_token_scan(&args, &rep, base_cfg, token, extra_patterns).await;
+        if let Err(e) = run_token_scan(&args, &rep, base_cfg, token, None, extra_patterns).await {
+            eprintln!("  ✘  Token scan failed: {}", e);
+            std::process::exit(1);
+        }
         return;
     }
 
     // ── GitLab Token mode: enumerate GitLab projects and scan ──
     if let Some(ref gitlab_token) = args.gitlab_token {
-        run_gitlab_token_scan(&args, &rep, base_cfg, gitlab_token, args.gitlab_url.as_deref(), extra_patterns).await;
+        if let Err(e) = run_gitlab_token_scan(
+            &args,
+            &rep,
+            base_cfg,
+            gitlab_token,
+            args.gitlab_url.as_deref(),
+            extra_patterns,
+        )
+        .await
+        {
+            eprintln!("  ✘  GitLab token scan failed: {}", e);
+            std::process::exit(1);
+        }
         return;
     }
 
     // ── Bitbucket Token mode: enumerate Bitbucket repositories and scan ──
     if let Some(ref bitbucket_token) = args.bitbucket_token {
-        run_bitbucket_token_scan(&args, &rep, base_cfg, bitbucket_token, args.bitbucket_url.as_deref(), extra_patterns).await;
+        if let Err(e) = run_bitbucket_token_scan(
+            &args,
+            &rep,
+            base_cfg,
+            bitbucket_token,
+            args.bitbucket_url.as_deref(),
+            extra_patterns,
+        )
+        .await
+        {
+            eprintln!("  ✘  Bitbucket token scan failed: {}", e);
+            std::process::exit(1);
+        }
         return;
     }
 
     // ── Gitea Token mode: enumerate Gitea/Forgejo repositories and scan ──
     if let Some(ref gitea_token) = args.gitea_token {
-        run_gitea_token_scan(&args, &rep, base_cfg, gitea_token, args.gitea_url.as_deref(), extra_patterns).await;
+        if let Err(e) = run_gitea_token_scan(
+            &args,
+            &rep,
+            base_cfg,
+            gitea_token,
+            args.gitea_url.as_deref(),
+            extra_patterns,
+        )
+        .await
+        {
+            eprintln!("  ✘  Gitea token scan failed: {}", e);
+            std::process::exit(1);
+        }
         return;
     }
 
     // ── Azure DevOps Token mode: enumerate Azure DevOps repositories and scan ──
     if let Some(ref azure_token) = args.azure_token {
-        run_azure_token_scan(&args, &rep, base_cfg, azure_token, args.azure_url.as_deref(), extra_patterns).await;
+        if let Err(e) = run_azure_token_scan(
+            &args,
+            &rep,
+            base_cfg,
+            azure_token,
+            args.azure_url.as_deref(),
+            extra_patterns,
+        )
+        .await
+        {
+            eprintln!("  ✘  Azure token scan failed: {}", e);
+            std::process::exit(1);
+        }
         return;
     }
 
     // ── Directory mode: local recursive text scan ──
     if let Some(ref dir) = args.dir {
-        run_dir_scan(&args, &rep, &client, dir, extra_patterns).await;
+        if let Err(e) = run_dir_scan(&args, &rep, &client, dir, extra_patterns).await {
+            eprintln!("  ✘  Directory scan failed: {}", e);
+            std::process::exit(1);
+        }
         return;
     }
 
@@ -3679,327 +4648,154 @@ async fn main() {
         }]
     };
 
-    // A-1: Process each target (sequential for simplicity, parallel for --parallel-targets > 1)
-    let mut all_results: Vec<serde_json::Value> = Vec::new();
-
-    for (idx, target) in targets.iter().enumerate() {
-        let target_num = idx + 1;
+    let mut all_results: Vec<TargetOutcome> = Vec::new();
+    if args.parallel_targets > 1 {
+        let args_ref = &args;
+        let rep_ref = &rep;
+        let client_ref = &client;
+        let base_cfg_ref = &base_cfg;
+        let false_positive_ref = &false_positive_keywords;
         let total_targets = targets.len();
-
-        // A-1: Handle different target types
-        match target {
-            Target::Url { url, fuzz } => {
-                let url = url.clone();
-                let fuzz = fuzz.unwrap_or(args.fuzz);
-
-                if !args.pipe && !quiet {
-                    rep.banner();
-                    println!("  Target [{}/{}]: {}\n", target_num, total_targets, url);
-                }
-
-                // ── Detect ──────────────────────────────────────────────────
-                if verbose {
-                    println!("  ◈  Target identification...");
-                }
-
-                let dr = detect::run(&client, &url, fuzz).await;
-
-                let dr = match dr {
-                    Some(r) => r,
-                    None => {
-                        if verbose {
-                            println!("  ✘  No .git exposure detected");
+        let mut parallel_results = futures::stream::iter(targets.iter().cloned().enumerate())
+            .map(|(index, target)| {
+                let patterns = extra_patterns.clone();
+                async move {
+                    let outcome = match target {
+                        Target::Url { url, fuzz } => {
+                            run_url_target(
+                                UrlRunContext {
+                                    args: args_ref,
+                                    rep: rep_ref,
+                                    client: client_ref,
+                                    target_num: index + 1,
+                                    total_targets,
+                                    extra_patterns: patterns,
+                                    false_positive_keywords: false_positive_ref,
+                                    quiet,
+                                    verbose,
+                                },
+                                url,
+                                fuzz.unwrap_or(args_ref.fuzz),
+                            )
+                            .await
                         }
-                        continue;
-                    }
-                };
+                        non_url_target => {
+                            run_non_url_target(
+                                args_ref,
+                                rep_ref,
+                                client_ref,
+                                base_cfg_ref,
+                                non_url_target,
+                                patterns,
+                            )
+                            .await
+                        }
+                    };
+                    (index, outcome)
+                }
+            })
+            .buffer_unordered(args.parallel_targets)
+            .collect::<Vec<_>>()
+            .await;
+        parallel_results.sort_by_key(|(index, _)| *index);
+        all_results.extend(parallel_results.into_iter().map(|(_, outcome)| outcome));
+    } else {
+        for (idx, target) in targets.iter().enumerate() {
+            let target_num = idx + 1;
+            let total_targets = targets.len();
 
-                if dr.confidence < args.min_confidence {
+            // A-1: Handle different target types
+            match target {
+                Target::Url { url, fuzz } => {
+                    let outcome = run_url_target(
+                        UrlRunContext {
+                            args: &args,
+                            rep: &rep,
+                            client: &client,
+                            target_num,
+                            total_targets,
+                            extra_patterns: extra_patterns.clone(),
+                            false_positive_keywords: &false_positive_keywords,
+                            quiet,
+                            verbose,
+                        },
+                        url.clone(),
+                        fuzz.unwrap_or(args.fuzz),
+                    )
+                    .await;
+                    all_results.push(outcome);
+                }
+                Target::Token { token, repos } => {
+                    let target = format!("token:{}", &token[..token.len().min(8)]);
                     if verbose {
-                        println!("  ✘  Confidence {}% < minimum {}%", dr.confidence, args.min_confidence);
+                        println!("  [{}] Running token target {}", target_num, target);
                     }
-                    continue;
-                }
-
-                if verbose {
-                    println!("  ✔  Git detected! ({}%, {})", dr.confidence, dr.label);
-                }
-
-                // ── Reconnaissance ───────────────────────────────────────────
-                if verbose {
-                    println!("  ◈  Repository reconnaissance...");
-                }
-
-                let mapper  = mapper::Mapper::new(client.clone()).with_max_history(args.max_history);
-                let map_r   = mapper.run(&dr.git_url, dr.branch.as_deref(), args.verify_objects).await;
-
-                // DX-4: --dry-run
-                if args.dry_run {
-                    println!("\n  ◈  [DRY RUN] Detection + Reconnaissance complete. Analysis skipped.");
-                    println!("  SHA1 objects   : {}", map_r.all_sha1s().len());
-                    println!("  Blobs (index)  : {}", map_r.blob_sha1s.len());
-                    println!("  Commits/trees  : {}", map_r.commit_sha1s.len());
-                    println!("  Est. disk size : {} ({} files)", map_r.size_human(), map_r.estimated_files);
-                    println!("  Branches       : {}", map_r.branches[..map_r.branches.len().min(8)].join(", "));
-                    if !map_r.remote_urls.is_empty() {
-                        if let Some(u) = map_r.remote_urls.first().and_then(|m| m.get("url")) {
-                            println!("  Remote origin  : {}", u);
-                        }
-                    }
-                    println!();
-                    continue;
-                }
-
-                let total = map_r.all_sha1s().len();
-                if verbose {
-                    println!("  ✔  Repository mapped: {} objects", total);
-                }
-
-                // VERIFICATION: Check if git objects are actually accessible
-                // This catches partial exposure cases where only metadata is exposed
-                if !map_r.objects_accessible {
-                    if verbose {
-                        println!("  ⚠  PARTIAL EXPOSURE DETECTED: Git metadata files (HEAD, index, config) are accessible, but git objects cannot be fetched (blocked, 404, or non-git response)");
-                        println!("  → Skipping analysis (no accessible objects to scan)");
-                        println!("  → Detection downgraded from {} to PARTIAL", dr.label);
-                    } else {
-                        eprintln!("  ⚠  Partial exposure: metadata only, objects not accessible");
-                    }
-
-                    // Generate a report indicating partial exposure
-                    let partial_report = format!("{}/{}_report_partial.json", args.output, target_name(&url));
-                    if let Err(e) = std::fs::write(
-                        &partial_report,
-                        serde_json::json!({
-                            "target": url,
-                            "timestamp": chrono::Utc::now().to_rfc3339(),
-                            "tool": "GitRecon",
-                            "version": env!("CARGO_PKG_VERSION"),
-                            "detection": {
-                                "confidence": dr.confidence,
-                                "label": format!("{}_PARTIAL", dr.label),
-                                "git_url": dr.git_url,
-                                "exposure_type": "metadata_only"
-                            },
-                            "map": {
-                                "metadata_accessible": true,
-                                "objects_accessible": false,
-                                "blob_sha1s_found": map_r.blob_sha1s.len(),
-                                "branches": map_r.branches,
-                                "remote_urls": map_r.remote_urls
-                            },
-                            "result": {
-                                "blobs_scanned": 0,
-                                "findings": [],
-                                "severity_counts": {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0},
-                                "note": "Git metadata files (HEAD, config, index) are accessible, but git objects (blobs/trees/commits) cannot be fetched. This indicates partial .git exposure where the server blocks or restricts access to objects/, or returns non-git responses."
-                            }
-                        }).to_string()
-                    ) {
-                        if verbose {
-                            eprintln!("  ✗ Failed to write partial exposure report: {}", e);
-                        }
-                    } else if verbose {
-                        println!("  → Partial exposure report saved: {}", partial_report);
-                    }
-
-                    // Skip to next target
-                    continue;
-                }
-
-                // ── Analysis ─────────────────────────────────────────────────
-                if verbose {
-                    println!("  ◈  Deep object analysis...");
-                    rep.print_stream_start(total);
-                }
-
-                let save_dir = if args.save {
-                    Some(std::path::PathBuf::from(&args.output).join(target_name(&url)))
-                } else {
-                    None
-                };
-
-                // PERF-005: Create cache
-                let cache = if !args.no_cache {
-                    match cache::ObjectCache::new(args.cache_ttl as i64, args.no_cache) {
-                        Ok(c) => Some(Arc::new(c)),
+                    let scan_result = run_token_scan(
+                        &args,
+                        &rep,
+                        base_cfg.clone(),
+                        token,
+                        repos.as_deref(),
+                        extra_patterns.clone(),
+                    )
+                    .await;
+                    let (status, error_code, error, summary) = match scan_result {
+                        Ok(summary) => (TargetStatus::Success, None, None, Some(summary)),
                         Err(e) => {
-                            eprintln!("  ⚠   Failed to initialize cache: {}", e);
-                            None
+                            let error = e.to_string();
+                            (
+                                TargetStatus::Failed,
+                                Some(classify_error(&error)),
+                                Some(error),
+                                None,
+                            )
                         }
-                    }
-                } else {
-                    None
-                };
-
-                // PERF-005: Log cache status (BUG-ERR-009: now async)
-                if verbose {
-                    if let Some(ref cache) = cache {
-                        if cache.is_disabled() {
-                            println!("  ◈  Cache: disabled (--no-cache)");
-                        } else {
-                            let stats = cache.stats().await;
-                            println!("  ◈  Cache: enabled ({} entries, {})",
-                                stats.total_entries, stats.size_human());
-                        }
-                    } else {
-                        println!("  ◈  Cache: disabled (initialization failed)");
-                    }
-                }
-
-                let streamer = streamer::Streamer::new(
-                    client.clone(),
-                    args.workers,
-                    args.mem_limit,
-                    verbose,
-                    args.max_findings,
-                    args.stop_on_critical,
-                    extra_patterns.clone(),
-                    args.max_blob_size,
-                    args.entropy_threshold,
-                    args.live || args.pipe,
-                    !args.no_adaptive,
-                    args.resume,
-                    args.checkpoint_interval,
-                    Some(url.clone()),
-                    cache,
-                    false_positive_keywords.clone(),
-                );
-
-                let rep_arc          = Arc::new(rep.clone());
-                let rep_for_progress = rep_arc.clone();
-                let stream_r = streamer.run(
-                    &dr.git_url,
-                    &map_r,
-                    if quiet {
-                        None
-                    } else {
-                        Some(Arc::new(move |done: usize, total: usize| {
-                            rep_for_progress.progress_bar(done, total, 0);
-                        }))
-                    },
-                    save_dir,
-                ).await;
-
-                if verbose {
-                    println!();
-                }
-
-                // ── Intelligence Report ──────────────────────────────────────
-                if verbose {
-                    println!("  ◈  Generating intelligence report...");
-                }
-
-                if !args.pipe {
-                    rep.print_stream_done(&stream_r);
-                }
-
-                if verbose && !args.pipe {
-                    rep.print_findings_summary(&stream_r.findings);
-                }
-
-                // Save report in requested format
-                let tname = target_name(&url);
-                let ext = match args.format.as_str() {
-                    "sarif"  => "sarif",
-                    "csv"    => "csv",
-                    "ndjson" => "ndjson",
-                    "md"     => "md",
-                    "html"   => "html",
-                    _        => "json",
-                };
-                let report_path = format!("{}/{}_report.{}", args.output, tname, ext);
-
-                match args.format.as_str() {
-                    "sarif" => {
-                        if let Err(e) = rep.save_sarif(&report_path, &url, Some(&stream_r)) {
-                            eprintln!("  ⚠   Could not save SARIF report: {}", e);
-                        }
-                    }
-                    "csv" => {
-                        if let Err(e) = rep.save_csv(&report_path, Some(&stream_r)) {
-                            eprintln!("  ⚠   Could not save CSV report: {}", e);
-                        }
-                    }
-                    "ndjson" => {
-                        if let Err(e) = rep.save_ndjson(&report_path, Some(&stream_r)) {
-                            eprintln!("  ⚠   Could not save NDJSON report: {}", e);
-                        }
-                    }
-                    "md" => {
-                        if let Err(e) = rep.save_markdown(&report_path, &url, Some(&stream_r)) {
-                            eprintln!("  ⚠   Could not save Markdown report: {}", e);
-                        }
-                    }
-                    "html" => {
-                        if let Err(e) = rep.save_html(&report_path, &url, Some(&stream_r)) {
-                            eprintln!("  ⚠   Could not save HTML report: {}", e);
-                        }
-                    }
-                    _ => {
-                        if let Err(e) = rep.save_json(&report_path, &url, Some(&dr), Some(&map_r), Some(&stream_r)) {
-                            eprintln!("  ⚠   Could not save report: {}", e);
-                        }
-                    }
-                }
-
-                if verbose && !args.pipe {
-                    rep.print_report(&dr, &map_r, &stream_r, &report_path);
-                }
-
-                // Collect result for aggregate report
-                all_results.push(serde_json::json!({
-                    "target": url,
-                    "target_type": "URL",
-                    "report_path": report_path,
-                    "findings_count": stream_r.findings.len(),
-                    "risk_score": stream_r.risk_score(),
-                    "severity_counts": stream_r.severity_counts(),
-                }));
-
-                // O-4: Webhook delivery
-                if let Some(ref webhook_url) = args.webhook {
-                    if let Ok(json_body) = std::fs::read_to_string(&report_path) {
-                        match try_deliver_webhook(&rep, &args, webhook_url, &json_body).await {
-                            Ok(true) => if verbose { println!("  ✔   Webhook delivered to {}", webhook_url); },
-                            Ok(false) => if verbose { eprintln!("  ⚠   Webhook delivery failed (non-2xx response)"); },
-                            Err(e) => eprintln!("  ✗   Webhook refused: {}", e),
-                        }
-                    }
-                }
-
-                // A-6: --pipe mode summary
-                if args.pipe {
-                    let summary = serde_json::json!({
-                        "type": "summary",
-                        "target": url,
-                        "findings": stream_r.findings.len(),
-                        "risk_score": stream_r.risk_score(),
+                    };
+                    all_results.push(TargetOutcome {
+                        target,
+                        target_type: "TOKEN".to_string(),
+                        status,
+                        report_path: summary.as_ref().and_then(|s| {
+                            (!s.report_path.is_empty()).then(|| s.report_path.clone())
+                        }),
+                        findings_count: summary.as_ref().map_or(0, |s| s.findings_count),
+                        risk_score: summary.as_ref().map_or(0, |s| s.risk_score),
+                        error_code,
+                        error,
                     });
-                    println!("{}", serde_json::to_string(&summary).unwrap_or_default());
                 }
-
-                if verbose && !args.pipe {
-                    println!("  ✔  Done\n");
+                Target::Dir { dir } => {
+                    if verbose {
+                        println!("  [{}] Running directory target {}", target_num, dir);
+                    }
+                    let target = dir.clone();
+                    let scan_result =
+                        run_dir_scan(&args, &rep, &client, dir, extra_patterns.clone()).await;
+                    let (status, error_code, error, summary) = match scan_result {
+                        Ok(summary) => (TargetStatus::Success, None, None, Some(summary)),
+                        Err(e) => (
+                            TargetStatus::Failed,
+                            Some(TargetErrorCode::ScanFailed),
+                            Some(e.to_string()),
+                            None,
+                        ),
+                    };
+                    all_results.push(TargetOutcome {
+                        target,
+                        target_type: "DIR".to_string(),
+                        status,
+                        report_path: summary.as_ref().and_then(|s| {
+                            (!s.report_path.is_empty()).then(|| s.report_path.clone())
+                        }),
+                        findings_count: summary.as_ref().map_or(0, |s| s.findings_count),
+                        risk_score: summary.as_ref().map_or(0, |s| s.risk_score),
+                        error_code,
+                        error,
+                    });
                 }
-            }
-            Target::Token { token: _, repos: _ } => {
-                if verbose {
-                    println!("  [{}] Token target: not yet implemented (use --token mode directly)", target_num);
-                }
-                // TODO: Implement token target handling in future iteration
-                continue;
-            }
-            Target::Dir { dir: _ } => {
-                if verbose {
-                    println!("  [{}] Dir target: not yet implemented (use --dir mode directly)", target_num);
-                }
-                // TODO: Implement dir target handling in future iteration
-                continue;
             }
         }
     }
-
     // A-1: Generate aggregate report if multiple targets were processed
     if targets.len() > 1 && !all_results.is_empty() {
         let aggregate_path = format!("{}/aggregate_report.json", args.output);
@@ -4012,7 +4808,8 @@ async fn main() {
                 "total_targets": targets.len(),
                 "scanned_targets": all_results.len(),
                 "results": all_results,
-            })).unwrap_or_default()
+            }))
+            .unwrap_or_default(),
         ) {
             if verbose {
                 eprintln!("  ⚠   Could not save aggregate report: {}", e);
@@ -4039,67 +4836,11 @@ async fn main() {
 pub async fn create_forge_client_from_url(
     url: &str,
     base_cfg: HttpConfig,
+    token: &str,
 ) -> anyhow::Result<Box<dyn Forge>> {
     let platform = forge::Platform::from_url(url)
         .ok_or_else(|| anyhow::anyhow!("Could not detect platform from URL: {}", url))?;
-
-    create_forge_client(platform, base_cfg).await
-}
-
-/// Create a forge client for the specified platform.
-///
-/// # Arguments
-/// * `platform` - Target platform
-/// * `base_cfg` - HTTP configuration base
-///
-/// # Returns
-/// * `Ok(Box<dyn Forge>)` - Configured forge client
-/// * `Err` - If client creation fails
-pub async fn create_forge_client(
-    platform: forge::Platform,
-    _base_cfg: HttpConfig,
-) -> anyhow::Result<Box<dyn Forge>> {
-    match platform {
-        forge::Platform::GitHub => {
-            // GitHubForgeClient will be created after authentication
-            anyhow::bail!("GitHub client requires authentication token; use authenticate_github_client()");
-        }
-        forge::Platform::GitLab => {
-            // TODO: Implement GitLab client
-            anyhow::bail!("GitLab client not yet implemented");
-        }
-        forge::Platform::Bitbucket => {
-            // TODO: Implement Bitbucket client
-            anyhow::bail!("Bitbucket client not yet implemented");
-        }
-        forge::Platform::Gitea => {
-            // GiteaForgeClient can be created but requires token for authentication
-            anyhow::bail!("Gitea client requires authentication token; use authenticate_gitea_client()");
-        }
-        forge::Platform::AzureDevOps => {
-            // TODO: Implement Azure DevOps client
-            anyhow::bail!("Azure DevOps client not yet implemented");
-        }
-    }
-}
-
-/// Create and authenticate a GitHub forge client.
-///
-/// # Arguments
-/// * `base_cfg` - HTTP configuration base
-/// * `token` - GitHub personal access token
-///
-/// # Returns
-/// * `Ok(GitHubForgeClient)` - Authenticated GitHub client
-/// * `Err` - If authentication fails
-pub async fn authenticate_github_client(
-    base_cfg: HttpConfig,
-    token: &str,
-) -> anyhow::Result<github_api::GitHubForgeClient> {
-    let client = github_api::build_github_client(base_cfg, token)?;
-    let mut gh_client = github_api::GitHubForgeClient::new(client);
-    gh_client.authenticate(token).await?;
-    Ok(gh_client)
+    create_forge_client(platform, base_cfg, token, Some(url)).await
 }
 
 /// Detect platform from a repository URL.
@@ -4112,7 +4853,9 @@ pub fn detect_platform(url: &str) -> Option<forge::Platform> {
     forge::Platform::from_url(url)
 }
 
-fn load_extra_patterns(file_path: &str) -> Result<Vec<streamer::DynPattern>, Box<dyn std::error::Error>> {
+fn load_extra_patterns(
+    file_path: &str,
+) -> Result<Vec<streamer::DynPattern>, Box<dyn std::error::Error>> {
     // SEC-006: Validate path to prevent path traversal attacks
     let validated_path = validation::validate_patterns_path(file_path)?;
     let content = std::fs::read_to_string(validated_path)?;
@@ -4124,20 +4867,32 @@ fn load_extra_patterns(file_path: &str) -> Result<Vec<streamer::DynPattern>, Box
 
     let json: serde_json::Value = serde_json::from_str(&content)?;
 
-    let patterns = json["patterns"].as_array()
+    let patterns = json["patterns"]
+        .as_array()
         .ok_or("Missing 'patterns' array in JSON")?;
 
     let mut result = Vec::new();
     for p in patterns {
         let id = p["id"].as_str().ok_or("Missing 'id' field")?.to_string();
-        let sev = p["severity"].as_str().ok_or("Missing 'severity' field")?.to_string();
-        let desc = p["description"].as_str().ok_or("Missing 'description' field")?.to_string();
+        let sev = p["severity"]
+            .as_str()
+            .ok_or("Missing 'severity' field")?
+            .to_string();
+        let desc = p["description"]
+            .as_str()
+            .ok_or("Missing 'description' field")?
+            .to_string();
         let regex_str = p["regex"].as_str().ok_or("Missing 'regex' field")?;
 
         // SEC-005: Additional regex validation (already done in validate_patterns_json, but compile anyway)
         let regex = regex::Regex::new(regex_str)?;
 
-        result.push(streamer::DynPattern { id, sev, desc, regex });
+        result.push(streamer::DynPattern {
+            id,
+            sev,
+            desc,
+            regex,
+        });
     }
 
     Ok(result)
@@ -4146,6 +4901,27 @@ fn load_extra_patterns(file_path: &str) -> Result<Vec<streamer::DynPattern>, Box
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cli_offensive_defaults_and_opt_outs() {
+        let defaults = Cli::try_parse_from(["gitrecon", "--dir", "./target"]).unwrap();
+        assert!(!defaults.exhaustive);
+        assert!(!defaults.no_scan_binaries);
+        assert!(!defaults.no_verify_objects);
+
+        let opt_outs = Cli::try_parse_from([
+            "gitrecon",
+            "--dir",
+            "./target",
+            "--exhaustive",
+            "--no-scan-binaries",
+            "--no-verify-objects",
+        ])
+        .unwrap();
+        assert!(opt_outs.exhaustive);
+        assert!(opt_outs.no_scan_binaries);
+        assert!(opt_outs.no_verify_objects);
+    }
 
     fn mk_find(severity: &str) -> streamer::Finding {
         streamer::Finding {
@@ -4198,7 +4974,10 @@ mod tests {
 
     #[test]
     fn test_parse_repo_selection_input_multi_and_dedup() {
-        assert_eq!(parse_repo_selection_input(" 3,1,3, 2 ", 4).unwrap(), vec![0, 1, 2]);
+        assert_eq!(
+            parse_repo_selection_input(" 3,1,3, 2 ", 4).unwrap(),
+            vec![0, 1, 2]
+        );
     }
 
     #[test]
@@ -4233,8 +5012,8 @@ mod tests {
     // SEC-004: Tests for temp cleanup
     #[test]
     fn test_temp_dir_guard_basic() {
-        use temp_cleanup::TempDirGuard;
         use std::fs;
+        use temp_cleanup::TempDirGuard;
 
         let temp_dir = std::env::temp_dir().join("gitrecon_test_guard_basic");
         fs::create_dir_all(&temp_dir).unwrap();
@@ -4251,8 +5030,8 @@ mod tests {
 
     #[test]
     fn test_temp_dir_guard_nested_paths() {
-        use temp_cleanup::TempDirGuard;
         use std::fs;
+        use temp_cleanup::TempDirGuard;
 
         let temp_dir = std::env::temp_dir().join("gitrecon_test_nested");
         let nested_file = temp_dir.join("subdir").join("file.txt");
@@ -4275,8 +5054,8 @@ mod tests {
 
     #[test]
     fn test_temp_dir_guard_release() {
-        use temp_cleanup::TempDirGuard;
         use std::fs;
+        use temp_cleanup::TempDirGuard;
 
         let temp_dir = std::env::temp_dir().join("gitrecon_test_guard_release");
         fs::create_dir_all(&temp_dir).unwrap();

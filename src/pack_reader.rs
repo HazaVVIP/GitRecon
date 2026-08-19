@@ -78,14 +78,22 @@ fn type_name(t: u8) -> Option<&'static str> {
 /// scanner just needed to enumerate names). We add offset extraction here.
 pub fn parse_idx_v2_offsets(idx: &[u8]) -> Option<Vec<(String, u64)>> {
     // Magic (\xff\x74\x4f\x63) + version (2u32).
-    if idx.len() < 8 { return None; }
-    if &idx[..4] != &[0xff, 0x74, 0x4f, 0x63] { return None; }
+    if idx.len() < 8 {
+        return None;
+    }
+    if idx[..4] != [0xff, 0x74, 0x4f, 0x63] {
+        return None;
+    }
     let version = read_u32_be(idx, 4)?;
-    if version != 2 { return None; }
+    if version != 2 {
+        return None;
+    }
 
     // Fanout table: 256 * u32, last entry = total object count.
     let n = read_u32_be(idx, 8 + 255 * 4)? as usize;
-    if n == 0 || n > 5_000_000 { return None; }
+    if n == 0 || n > 5_000_000 {
+        return None;
+    }
 
     // Layout after fanout:
     //   SHA1 table:      n * 20 bytes         (start = 1032)
@@ -97,7 +105,9 @@ pub fn parse_idx_v2_offsets(idx: &[u8]) -> Option<Vec<(String, u64)>> {
     let ofs_start = crc_start.checked_add(n.checked_mul(4)?)?;
     let large_start = ofs_start.checked_add(n.checked_mul(4)?)?;
 
-    if idx.len() < large_start { return None; }
+    if idx.len() < large_start {
+        return None;
+    }
 
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
@@ -109,7 +119,9 @@ pub fn parse_idx_v2_offsets(idx: &[u8]) -> Option<Vec<(String, u64)>> {
             // MSB set → index into large-offset table (u64).
             let large_idx = (raw & 0x7FFF_FFFF) as usize;
             let large_pos = large_start.checked_add(large_idx.checked_mul(8)?)?;
-            if idx.len() < large_pos + 8 { return None; }
+            if idx.len() < large_pos + 8 {
+                return None;
+            }
             u64::from_be_bytes(idx[large_pos..large_pos + 8].try_into().ok()?)
         } else {
             raw as u64
@@ -170,8 +182,7 @@ pub fn read_pack(idx: &[u8], pack: &[u8]) -> Result<Vec<PackObject>, String> {
 
     // Get offsets from idx. Sort by offset ascending so we can resolve
     // OFS_DELTA (which references an earlier object by negative offset).
-    let mut idx_pairs = parse_idx_v2_offsets(idx)
-        .ok_or("Failed to parse .idx (offsets)")?;
+    let mut idx_pairs = parse_idx_v2_offsets(idx).ok_or("Failed to parse .idx (offsets)")?;
     if idx_pairs.len() != count {
         return Err(format!(
             ".idx claims {} objects but .pack header claims {count}",
@@ -187,7 +198,8 @@ pub fn read_pack(idx: &[u8], pack: &[u8]) -> Result<Vec<PackObject>, String> {
     let mut resolved = Vec::with_capacity(count);
 
     // Also confirm each idx SHA1 lines up with what we read.
-    let expected_sha: HashMap<u64, String> = idx_pairs.iter()
+    let expected_sha: HashMap<u64, String> = idx_pairs
+        .iter()
         .map(|(sha, off)| (*off, sha.clone()))
         .collect();
 
@@ -260,7 +272,8 @@ pub fn read_pack(idx: &[u8], pack: &[u8]) -> Result<Vec<PackObject>, String> {
 
     // Re-order resolved back to .idx order (callers may depend on this).
     resolved.sort_by_key(|obj| {
-        idx_pairs.iter()
+        idx_pairs
+            .iter()
             .find(|(s, _)| s == &obj.sha1)
             .map(|(_, o)| *o)
             .unwrap_or(u64::MAX)
@@ -303,9 +316,12 @@ fn read_pack_object(
         byte = pack[pos];
         pos += 1;
         // Cap at a huge but bounded value to avoid usize overflow.
-        let chunk = ((byte & 0x7F) as usize).checked_shl(shift)
+        let chunk = ((byte & 0x7F) as usize)
+            .checked_shl(shift)
             .ok_or("Size overflow in object header")?;
-        size = size.checked_add(chunk).ok_or("Size overflow in object header")?;
+        size = size
+            .checked_add(chunk)
+            .ok_or("Size overflow in object header")?;
         shift += 7;
         if size > MAX_INFLATED {
             return Err(format!("Declared object size {size} exceeds MAX_INFLATED"));
@@ -317,29 +333,40 @@ fn read_pack_object(
             let data = inflate_from(pack, pos, size)?;
             let type_str = type_name(obj_type).unwrap().to_string();
             let sha1 = sha1_git(&type_str, &data);
-            Ok(PackObject { sha1, obj_type: type_str, data })
+            Ok(PackObject {
+                sha1,
+                obj_type: type_str,
+                data,
+            })
         }
         OBJ_OFS_DELTA => {
             // Variable-length base-offset: like size but encoded differently.
             // See git pack-format spec — "offset encoding".
             let (base_delta, hdr_end) = read_offset_delta(pack, pos)?;
-            let base_abs = offset.checked_sub(base_delta)
+            let base_abs = offset
+                .checked_sub(base_delta)
                 .ok_or("OFS_DELTA points before pack start")?;
-            let base = by_offset.get(&base_abs)
+            let base = by_offset
+                .get(&base_abs)
                 .cloned()
                 .ok_or_else(|| format!("OFS_DELTA base at offset {base_abs} not yet resolved"))?;
             let delta = inflate_from(pack, hdr_end, size)?;
             let data = apply_delta(&base.data, &delta)?;
             let type_str = base.obj_type;
             let sha1 = sha1_git(&type_str, &data);
-            Ok(PackObject { sha1, obj_type: type_str, data })
+            Ok(PackObject {
+                sha1,
+                obj_type: type_str,
+                data,
+            })
         }
         OBJ_REF_DELTA => {
             if pos + 20 > pack.len() {
                 return Err("Truncated REF_DELTA base SHA1".into());
             }
             let base_sha = hex::encode(&pack[pos..pos + 20]);
-            let base = by_sha.get(&base_sha)
+            let base = by_sha
+                .get(&base_sha)
                 .cloned()
                 .ok_or_else(|| format!("REF_DELTA base {base_sha} not yet resolved"))?;
             let delta = inflate_from(pack, pos + 20, size)?;
@@ -347,7 +374,11 @@ fn read_pack_object(
             let _ = depth; // (recursion here would be through by_sha lookup already resolved)
             let type_str = base.obj_type;
             let sha1 = sha1_git(&type_str, &data);
-            Ok(PackObject { sha1, obj_type: type_str, data })
+            Ok(PackObject {
+                sha1,
+                obj_type: type_str,
+                data,
+            })
         }
         _ => Err(format!("Unknown object type {obj_type} at offset {offset}")),
     }
@@ -362,7 +393,8 @@ fn inflate_from(pack: &[u8], pos: usize, expected_size: usize) -> Result<Vec<u8>
     let cap = expected_size.min(MAX_INFLATED);
     let decoder = ZlibDecoder::new(&pack[pos..]);
     let mut out = Vec::with_capacity(cap);
-    decoder.take((cap as u64).saturating_add(1))
+    decoder
+        .take((cap as u64).saturating_add(1))
         .read_to_end(&mut out)
         .map_err(|e| format!("Inflate failed: {e}"))?;
     if out.len() != expected_size {
@@ -371,7 +403,8 @@ fn inflate_from(pack: &[u8], pos: usize, expected_size: usize) -> Result<Vec<u8>
         // verify will catch corruption.
         log::debug!(
             "pack inflate: expected {} bytes, got {} — continuing",
-            expected_size, out.len()
+            expected_size,
+            out.len()
         );
     }
     Ok(out)
@@ -380,17 +413,23 @@ fn inflate_from(pack: &[u8], pos: usize, expected_size: usize) -> Result<Vec<u8>
 /// Read the OFS_DELTA variable-length offset encoding. Returns
 /// `(base_delta_bytes_back, bytes_consumed_into_pack)`.
 fn read_offset_delta(pack: &[u8], mut pos: usize) -> Result<(u64, usize), String> {
-    if pos >= pack.len() { return Err("Truncated OFS_DELTA".into()); }
+    if pos >= pack.len() {
+        return Err("Truncated OFS_DELTA".into());
+    }
     let mut byte = pack[pos];
     pos += 1;
     let mut val: u64 = (byte & 0x7F) as u64;
     while byte & 0x80 != 0 {
-        if pos >= pack.len() { return Err("Truncated OFS_DELTA".into()); }
+        if pos >= pack.len() {
+            return Err("Truncated OFS_DELTA".into());
+        }
         val = val.checked_add(1).ok_or("Offset overflow")?;
         val = val.checked_shl(7).ok_or("Offset overflow")?;
         byte = pack[pos];
         pos += 1;
-        val = val.checked_add((byte & 0x7F) as u64).ok_or("Offset overflow")?;
+        val = val
+            .checked_add((byte & 0x7F) as u64)
+            .ok_or("Offset overflow")?;
     }
     Ok((val, pos))
 }
@@ -417,7 +456,8 @@ fn apply_delta(base: &[u8], delta: &[u8]) -> Result<Vec<u8>, String> {
     if base.len() != src_size as usize {
         return Err(format!(
             "Delta base size mismatch: expected {} got {}",
-            src_size, base.len()
+            src_size,
+            base.len()
         ));
     }
     if tgt_size as usize > MAX_INFLATED {
@@ -433,7 +473,9 @@ fn apply_delta(base: &[u8], delta: &[u8]) -> Result<Vec<u8>, String> {
             let mut cp_off: u32 = 0;
             for i in 0..4 {
                 if op & (1 << i) != 0 {
-                    if pos >= delta.len() { return Err("Truncated delta COPY offset".into()); }
+                    if pos >= delta.len() {
+                        return Err("Truncated delta COPY offset".into());
+                    }
                     cp_off |= (delta[pos] as u32) << (i * 8);
                     pos += 1;
                 }
@@ -441,17 +483,26 @@ fn apply_delta(base: &[u8], delta: &[u8]) -> Result<Vec<u8>, String> {
             let mut cp_size: u32 = 0;
             for i in 0..3 {
                 if op & (1 << (i + 4)) != 0 {
-                    if pos >= delta.len() { return Err("Truncated delta COPY size".into()); }
+                    if pos >= delta.len() {
+                        return Err("Truncated delta COPY size".into());
+                    }
                     cp_size |= (delta[pos] as u32) << (i * 8);
                     pos += 1;
                 }
             }
-            if cp_size == 0 { cp_size = 0x10000; } // Spec quirk.
-            let end = (cp_off as usize).checked_add(cp_size as usize)
+            if cp_size == 0 {
+                cp_size = 0x10000;
+            } // Spec quirk.
+            let end = (cp_off as usize)
+                .checked_add(cp_size as usize)
                 .ok_or("Delta COPY end overflow")?;
             if end > base.len() {
-                return Err(format!("Delta COPY range {}..{} beyond base ({})",
-                    cp_off, end, base.len()));
+                return Err(format!(
+                    "Delta COPY range {}..{} beyond base ({})",
+                    cp_off,
+                    end,
+                    base.len()
+                ));
             }
             out.extend_from_slice(&base[cp_off as usize..end]);
         } else if op != 0 {
@@ -468,7 +519,9 @@ fn apply_delta(base: &[u8], delta: &[u8]) -> Result<Vec<u8>, String> {
     }
     if out.len() != tgt_size as usize {
         return Err(format!(
-            "Applied delta produced {} bytes, expected {}", out.len(), tgt_size
+            "Applied delta produced {} bytes, expected {}",
+            out.len(),
+            tgt_size
         ));
     }
     Ok(out)
@@ -479,13 +532,19 @@ fn read_varint(buf: &[u8], mut pos: usize) -> Result<(u64, usize), String> {
     let mut val: u64 = 0;
     let mut shift = 0;
     loop {
-        if pos >= buf.len() { return Err("Truncated varint".into()); }
+        if pos >= buf.len() {
+            return Err("Truncated varint".into());
+        }
         let b = buf[pos];
         pos += 1;
         val |= ((b & 0x7F) as u64) << shift;
-        if b & 0x80 == 0 { break; }
+        if b & 0x80 == 0 {
+            break;
+        }
         shift += 7;
-        if shift > 63 { return Err("Varint too large".into()); }
+        if shift > 63 {
+            return Err("Varint too large".into());
+        }
     }
     Ok((val, pos))
 }
@@ -521,16 +580,6 @@ pub fn encode_as_loose(obj: &PackObject) -> std::io::Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flate2::write::ZlibEncoder;
-    use flate2::Compression;
-    use std::io::Write;
-
-    fn zlib(data: &[u8]) -> Vec<u8> {
-        let mut e = ZlibEncoder::new(Vec::new(), Compression::default());
-        e.write_all(data).unwrap();
-        e.finish().unwrap()
-    }
-
     #[test]
     fn read_pack_rejects_bad_magic() {
         let bad = b"NOPE\0\0\0\x02\0\0\0\0";
@@ -549,7 +598,10 @@ mod tests {
     #[test]
     fn sha1_git_matches_canonical_empty_tree() {
         // Well-known: empty tree object hash.
-        assert_eq!(sha1_git("tree", b""), "4b825dc642cb6eb9a060e54bf8d69288fbee4904");
+        assert_eq!(
+            sha1_git("tree", b""),
+            "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+        );
     }
 
     #[test]
@@ -568,14 +620,9 @@ mod tests {
     #[test]
     fn apply_delta_copy_full_base() {
         let base = b"Hello, world!"; // 13 bytes
-        // src_size=13, tgt_size=13, COPY offset=0 size=13.
-        let mut delta = Vec::new();
-        delta.push(13);   // src_size varint (single byte)
-        delta.push(13);   // tgt_size varint (single byte)
-        // Copy op: MSB=1, offset byte 0 present (bit 0), size byte 0 present (bit 4)
-        delta.push(0x80 | 0x01 | 0x10);
-        delta.push(0);    // offset LSB
-        delta.push(13);   // size LSB
+                                     // src_size=13, tgt_size=13, COPY offset=0 size=13.
+                                     // Copy op: MSB=1, offset byte 0 present (bit 0), size byte 0 present (bit 4)
+        let delta = vec![13, 13, 0x80 | 0x01 | 0x10, 0, 13];
         let out = apply_delta(base, &delta).unwrap();
         assert_eq!(out, base);
     }
@@ -583,9 +630,7 @@ mod tests {
     #[test]
     fn apply_delta_rejects_size_mismatch() {
         let base = b"12345";
-        let mut delta = Vec::new();
-        delta.push(99); // wrong src_size
-        delta.push(5);
+        let delta = vec![99, 5]; // wrong src_size
         assert!(apply_delta(base, &delta).is_err());
     }
 
