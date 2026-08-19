@@ -2140,6 +2140,59 @@ async fn finalize_provider_report(
     }
 }
 
+async fn finalize_dir_report(
+    args: &Cli,
+    rep: &Reporter,
+    display_root: &str,
+    report_name: &str,
+    stream_r: &streamer::StreamResult,
+    verbose: bool,
+) -> ScanSummary {
+    let report_path = reporter::build_report_path(&args.output, report_name, &args.format);
+    let save_result = rep.save_scan_report(
+        &report_path,
+        &args.format,
+        display_root,
+        stream_r,
+        ReportContext::Stream {
+            target: display_root,
+        },
+    );
+    if let Err(error) = save_result {
+        eprintln!("  ⚠   Could not save report: {}", error);
+    }
+    if verbose && !args.pipe {
+        rep.print_summary(display_root, stream_r, &report_path);
+    }
+    deliver_report_webhook_if_configured(
+        rep,
+        args,
+        &report_path,
+        verbose,
+        WebhookSuccessStyle::Standard,
+    )
+    .await;
+    if args.pipe {
+        let summary = serde_json::json!({
+            "type": "summary",
+            "mode": "dir",
+            "target": display_root,
+            "files_scanned": stream_r.blobs_scanned,
+            "findings": stream_r.findings.len(),
+            "risk_score": stream_r.risk_score(),
+        });
+        println!("{}", serde_json::to_string(&summary).unwrap_or_default());
+    }
+    if verbose && !args.pipe {
+        println!("  ✔  Done\\n");
+    }
+    ScanSummary {
+        report_path,
+        findings_count: stream_r.findings.len(),
+        risk_score: stream_r.risk_score(),
+    }
+}
+
 /// Prompt for Azure DevOps repository selection.
 fn prompt_azure_repo_selection(repos: &[azure_api::AzRepo]) -> Vec<usize> {
     println!("  📋  Available repositories:\n");
@@ -2200,7 +2253,6 @@ fn prompt_azure_repo_selection(repos: &[azure_api::AzRepo]) -> Vec<usize> {
     }
 }
 
-#[allow(clippy::too_many_lines)]
 async fn run_dir_scan(
     args: &Cli,
     rep: &Reporter,
@@ -2264,56 +2316,8 @@ async fn run_dir_scan(
         rep.print_findings_summary(&stream_r.findings);
     }
 
-    let dir_name = dir_target_name(&canonical_root);
-    let report_name = format!("dir_{}", dir_name);
-    let report_path = reporter::build_report_path(&args.output, &report_name, &args.format);
-
-    let save_result = rep.save_scan_report(
-        &report_path,
-        &args.format,
-        &display_root,
-        &stream_r,
-        ReportContext::Stream {
-            target: &display_root,
-        },
-    );
-
-    if let Err(e) = save_result {
-        eprintln!("  ⚠   Could not save report: {}", e);
-    }
-
-    if verbose && !args.pipe {
-        rep.print_summary(&display_root, &stream_r, &report_path);
-    }
-    deliver_report_webhook_if_configured(
-        rep,
-        args,
-        &report_path,
-        verbose,
-        WebhookSuccessStyle::Standard,
-    )
-    .await;
-
-    if args.pipe {
-        let summary = serde_json::json!({
-            "type": "summary",
-            "mode": "dir",
-            "target": display_root,
-            "files_scanned": stream_r.blobs_scanned,
-            "findings": stream_r.findings.len(),
-            "risk_score": stream_r.risk_score(),
-        });
-        println!("{}", serde_json::to_string(&summary).unwrap_or_default());
-    }
-
-    if verbose && !args.pipe {
-        println!("  ✔  Done\n");
-    }
-    Ok(ScanSummary {
-        report_path,
-        findings_count: stream_r.findings.len(),
-        risk_score: stream_r.risk_score(),
-    })
+    let report_name = format!("dir_{}", dir_target_name(&canonical_root));
+    Ok(finalize_dir_report(args, rep, &display_root, &report_name, &stream_r, verbose).await)
 }
 /// Detect tech stack from a file path (filename/extension signals only).
 fn detect_tech_from_path(path: &str, out: &mut Vec<String>) {
