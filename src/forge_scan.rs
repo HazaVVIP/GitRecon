@@ -5,16 +5,17 @@
 
 use std::collections::HashSet;
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::forge::Repository;
+use crate::forge::{Forge, Repository};
 use crate::streamer::{DynPattern, Finding, StreamResult};
+use crate::temp_cleanup::TempDirGuard;
 use tokio::sync::Mutex;
 
-pub(crate) trait BlobEntry: Clone + Send + 'static {
+pub(crate) trait BlobEntry: Clone + Send {
     fn is_blob(&self) -> bool;
     fn path(&self) -> &str;
     fn sha(&self) -> &str;
@@ -50,6 +51,48 @@ impl_blob_entry!(crate::bitbucket_api::BbTreeEntry);
 impl_blob_entry!(crate::gitea_api::GtTreeEntry);
 impl_blob_entry!(crate::azure_api::AzTreeEntry);
 use futures::StreamExt;
+
+/// Owns persisted or temporary workspace roots for a forge scan.
+pub(crate) struct WorkspaceLifecycle {
+    save_root: Option<PathBuf>,
+    temp_guard: Option<TempDirGuard>,
+}
+
+impl WorkspaceLifecycle {
+    pub(crate) fn new(
+        output: &Path,
+        report_name: &str,
+        persist_source: bool,
+        temp_prefix: &str,
+    ) -> Self {
+        let save_root = persist_source.then(|| output.join(report_name));
+        let temp_guard = if persist_source {
+            None
+        } else {
+            let path = std::env::temp_dir().join(format!(
+                "{}_{}_{}",
+                temp_prefix,
+                std::process::id(),
+                chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+            ));
+            let _ = std::fs::create_dir_all(&path);
+            Some(TempDirGuard::new(path))
+        };
+        Self {
+            save_root,
+            temp_guard,
+        }
+    }
+
+    pub(crate) fn repository_path(&self, workspace_name: &str) -> Option<PathBuf> {
+        if let Some(root) = self.save_root.as_ref() {
+            return Some(root.join(workspace_name));
+        }
+        self.temp_guard
+            .as_ref()
+            .and_then(|guard| guard.path().map(|root| root.join(workspace_name)))
+    }
+}
 
 /// Common context for scanning one repository from an authenticated forge.
 #[derive(Debug, Clone)]
@@ -118,7 +161,7 @@ pub(crate) async fn reconstruct_blobs<E, F, Fut>(
 ) -> usize
 where
     E: BlobEntry,
-    F: Fn(E) -> Fut + Clone + Send + Sync + 'static,
+    F: Fn(E) -> Fut + Clone + Send + Sync,
     Fut: Future<Output = anyhow::Result<Vec<u8>>> + Send,
 {
     let blobs: Vec<_> = tree
@@ -340,6 +383,92 @@ pub(crate) async fn scan_workspace_files(config: FileScanConfig) {
     }
 }
 
+/// Execute the common per-repository forge scan lifecycle through the Forge trait.
+pub(crate) async fn run_repository_scan_loop(
+    forge: &dyn Forge,
+    selected_repos: &[Repository],
+    workspace_lifecycle: &WorkspaceLifecycle,
+    scan_config: FileScanConfig,
+    started_at: Instant,
+) -> StreamResult {
+    for (repo_idx, repo) in selected_repos.iter().enumerate() {
+        if scan_config.stop_flag.load(Ordering::Relaxed) {
+            break;
+        }
+        let scan_request = RepositoryScanRequest::new(repo.clone(), repo_idx, selected_repos.len());
+        if scan_config.verbose {
+            println!("  ▶  {}", scan_request.progress_label());
+        }
+        if let Err(error) = forge.get_head_sha(repo, &repo.default_branch).await {
+            if scan_config.verbose {
+                eprintln!(
+                    "    ⚠   Cannot resolve HEAD for {}: {}",
+                    repo.full_name, error
+                );
+            }
+            continue;
+        }
+        let tree = match forge.get_tree(repo, &repo.default_branch).await {
+            Ok(tree) => tree,
+            Err(error) => {
+                if scan_config.verbose {
+                    eprintln!("    ⚠   Cannot get tree for {}: {}", repo.full_name, error);
+                }
+                continue;
+            }
+        };
+        let Some(repo_workspace) =
+            workspace_lifecycle.repository_path(&scan_request.workspace_name())
+        else {
+            continue;
+        };
+        let _ = std::fs::create_dir_all(&repo_workspace);
+        let blob_count = tree
+            .iter()
+            .filter(|entry| entry.obj_type == "blob")
+            .filter(|entry| {
+                entry
+                    .size
+                    .is_none_or(|size| size <= scan_config.max_blob_bytes as u64)
+            })
+            .count();
+        if scan_config.verbose && blob_count > 0 {
+            println!("      Reconstructing {} files into workspace", blob_count);
+        }
+        let forge_ref = forge;
+        let repo_for_blob = repo.clone();
+        let failed = reconstruct_blobs(
+            tree,
+            repo_workspace.clone(),
+            scan_config.max_blob_bytes,
+            scan_config.workers,
+            move |entry| {
+                let repo = repo_for_blob.clone();
+                async move { forge_ref.get_blob(&repo, entry.sha()).await }
+            },
+        )
+        .await;
+        scan_config
+            .blobs_failed
+            .fetch_add(failed, Ordering::Relaxed);
+        scan_workspace_files(FileScanConfig {
+            workspace: repo_workspace,
+            repository_name: repo.full_name.clone(),
+            ..scan_config.clone()
+        })
+        .await;
+    }
+    build_stream_result(
+        started_at,
+        scan_config.all_findings.clone(),
+        scan_config.tech_stack_set.clone(),
+        scan_config.blobs_scanned.clone(),
+        scan_config.blobs_failed.clone(),
+        scan_config.bytes_scanned.clone(),
+    )
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
@@ -350,7 +479,7 @@ mod tests {
 
     use super::{
         build_stream_result, reconstruct_blobs, scan_workspace_files, FileScanConfig,
-        RepositoryScanOutcome, RepositoryScanRequest,
+        RepositoryScanOutcome, RepositoryScanRequest, WorkspaceLifecycle,
     };
     use crate::forge::{Platform, Repository, TreeEntry};
     use crate::streamer::DynPattern;
@@ -472,6 +601,36 @@ mod tests {
         assert_eq!(bytes_scanned.load(Ordering::Relaxed), 15);
         drop(findings);
         fs::remove_dir_all(workspace).expect("test workspace should be removable");
+    }
+
+    #[test]
+    fn workspace_lifecycle_selects_persistent_or_temporary_roots() {
+        let output =
+            std::env::temp_dir().join(format!("gitrecon-workspace-root-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&output);
+        fs::create_dir_all(&output).expect("test output root should be creatable");
+
+        let persisted =
+            WorkspaceLifecycle::new(&output, "github_example", true, "gitrecon_workspace_test");
+        assert_eq!(
+            persisted.repository_path("acme_example"),
+            Some(output.join("github_example/acme_example"))
+        );
+        drop(persisted);
+
+        let temporary =
+            WorkspaceLifecycle::new(&output, "github_example", false, "gitrecon_workspace_test");
+        let temporary_repo = temporary
+            .repository_path("acme_example")
+            .expect("temporary repository path should exist");
+        let temporary_root = temporary_repo
+            .parent()
+            .expect("temporary repository root should exist")
+            .to_path_buf();
+        assert!(temporary_root.exists());
+        drop(temporary);
+        assert!(!temporary_root.exists());
+        fs::remove_dir_all(output).expect("test output root should be removable");
     }
 
     #[tokio::test]

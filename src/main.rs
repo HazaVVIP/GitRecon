@@ -57,11 +57,9 @@ use std::time::{Duration, Instant};
 use clap::Parser;
 use forge::Forge;
 use forge_factory::create_forge_client;
-use forge_scan::{BlobEntry, RepositoryScanRequest};
+use forge_scan::BlobEntry;
 use futures::StreamExt;
 use outcome::{classify_error, ScanSummary, TargetErrorCode, TargetOutcome, TargetStatus};
-
-use temp_cleanup::TempDirGuard; // SEC-004
 
 use binary_adapter::{binary_findings_to_findings, is_binary_extension};
 use colored::Colorize;
@@ -1205,31 +1203,12 @@ async fn run_token_scan(
 
     let max_blob_bytes = args.max_blob_size * 1024 * 1024;
     let extra_pat_arc = Arc::new(extra_patterns);
-    let save_root = if persist_source {
-        Some(std::path::PathBuf::from(&args.output).join(format!("token_{}", login)))
-    } else {
-        None
-    };
-
-    // SEC-004: RAII guard for temp workspace
-    // The guard will automatically clean up on Drop (including signal interruption)
-    let temp_guard: Option<TempDirGuard> = if persist_source {
-        None
-    } else {
-        let p = std::env::temp_dir().join(format!(
-            "gitrecon_token_scan_{}_{}",
-            std::process::id(),
-            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
-        ));
-        let _ = std::fs::create_dir_all(&p);
-        Some(TempDirGuard::new(p))
-    };
-    let temp_root = temp_guard
-        .as_ref()
-        .and_then(|g| g.path().map(|p| p.to_path_buf()));
-
-    // Ensure temp_guard stays alive for the entire scan
-    let _temp_guard = temp_guard;
+    let workspace_lifecycle = forge_scan::WorkspaceLifecycle::new(
+        Path::new(&args.output),
+        &format!("token_{}", login),
+        persist_source,
+        "gitrecon_token_scan",
+    );
 
     for (repo_idx, repo) in selected_repos.iter().enumerate() {
         if stop_flag.load(Ordering::Relaxed) {
@@ -1275,11 +1254,9 @@ async fn run_token_scan(
             }
         };
 
-        let repo_workspace = if let Some(root) = save_root.as_ref() {
-            root.join(repo.full_name.replace('/', "_"))
-        } else if let Some(root) = temp_root.as_ref() {
-            root.join(repo.full_name.replace('/', "_"))
-        } else {
+        let Some(repo_workspace) =
+            workspace_lifecycle.repository_path(&repo.full_name.replace('/', "_"))
+        else {
             continue;
         };
         let _ = std::fs::create_dir_all(&repo_workspace);
@@ -1569,108 +1546,20 @@ async fn run_gitlab_token_scan(
 
     let max_blob_bytes = args.max_blob_size * 1024 * 1024;
     let extra_pat_arc = Arc::new(extra_patterns);
-    let save_root = if persist_source {
-        Some(std::path::PathBuf::from(&args.output).join(format!("gitlab_{}", login)))
-    } else {
-        None
-    };
+    let workspace_lifecycle = forge_scan::WorkspaceLifecycle::new(
+        Path::new(&args.output),
+        &format!("gitlab_{}", login),
+        persist_source,
+        "gitrecon_gitlab_scan",
+    );
 
-    // SEC-004: RAII guard for temp workspace
-    let temp_guard: Option<TempDirGuard> = if persist_source {
-        None
-    } else {
-        let p = std::env::temp_dir().join(format!(
-            "gitrecon_gitlab_scan_{}_{}",
-            std::process::id(),
-            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
-        ));
-        let _ = std::fs::create_dir_all(&p);
-        Some(TempDirGuard::new(p))
-    };
-    let temp_root = temp_guard
-        .as_ref()
-        .and_then(|g| g.path().map(|p| p.to_path_buf()));
-
-    // Ensure temp_guard stays alive for the entire scan
-    let _temp_guard = temp_guard;
-
-    for (repo_idx, repo) in selected_repos.iter().enumerate() {
-        if stop_flag.load(Ordering::Relaxed) {
-            break;
-        }
-
-        let scan_request = RepositoryScanRequest::new(repo.clone(), repo_idx, selected_repo_count);
-        if verbose {
-            println!("  ▶  {}", scan_request.progress_label());
-        }
-
-        // Get HEAD SHA for the default branch
-        let _head_sha = match gl_forge.get_head_sha(repo, &repo.default_branch).await {
-            Ok(s) => s,
-            Err(e) => {
-                if verbose {
-                    eprintln!("    ⚠   Cannot resolve HEAD for {}: {}", repo.full_name, e);
-                }
-                continue;
-            }
-        };
-
-        // Fetch the full recursive tree
-        let tree = match gl_forge.get_tree(repo, &repo.default_branch).await {
-            Ok(t) => t,
-            Err(e) => {
-                if verbose {
-                    eprintln!("    ⚠   Cannot get tree for {}: {}", repo.full_name, e);
-                }
-                continue;
-            }
-        };
-
-        let repo_workspace = if let Some(root) = save_root.as_ref() {
-            root.join(scan_request.workspace_name())
-        } else if let Some(root) = temp_root.as_ref() {
-            root.join(scan_request.workspace_name())
-        } else {
-            continue;
-        };
-        let _ = std::fs::create_dir_all(&repo_workspace);
-
-        // Reconstruct source workspace from tree blobs.
-        let blob_count = tree
-            .iter()
-            .filter(|entry| entry.obj_type == "blob")
-            .filter(|entry| entry.size.is_none_or(|size| size <= max_blob_bytes as u64))
-            .count();
-        if verbose && blob_count > 0 {
-            println!("      Reconstructing {} files into workspace", blob_count);
-        }
-        let client = gl_client.clone();
-        let api_base = api_base.clone();
-        let owner = repo.owner.clone();
-        let name = repo.name.clone();
-        let failed = forge_scan::reconstruct_blobs(
-            tree,
-            repo_workspace.clone(),
-            max_blob_bytes,
-            args.workers,
-            move |entry| {
-                let client = client.clone();
-                let api_base = api_base.clone();
-                let owner = owner.clone();
-                let name = name.clone();
-                async move {
-                    gitlab_api::get_blob_content(&client, &api_base, &owner, &name, entry.sha())
-                        .await
-                        .map_err(|error| anyhow::anyhow!(error))
-                }
-            },
-        )
-        .await;
-        blobs_failed.fetch_add(failed, Ordering::Relaxed);
-
-        forge_scan::scan_workspace_files(forge_scan::FileScanConfig {
-            workspace: repo_workspace.clone(),
-            repository_name: repo.full_name.clone(),
+    let stream_r = forge_scan::run_repository_scan_loop(
+        &gl_forge,
+        &selected_repos,
+        &workspace_lifecycle,
+        forge_scan::FileScanConfig {
+            workspace: PathBuf::new(),
+            repository_name: String::new(),
             max_blob_bytes,
             workers: args.workers,
             exhaustive: args.exhaustive,
@@ -1680,25 +1569,15 @@ async fn run_gitlab_token_scan(
             verbose,
             max_findings: args.max_findings,
             stop_on_critical: args.stop_on_critical,
-            extra_patterns: extra_pat_arc.clone(),
-            stop_flag: stop_flag.clone(),
-            all_findings: all_findings.clone(),
-            tech_stack_set: tech_stack_set.clone(),
-            blobs_scanned: blobs_scanned.clone(),
-            blobs_failed: blobs_failed.clone(),
-            bytes_scanned: bytes_scanned.clone(),
-        })
-        .await;
-    }
-
-    // ── 5. Assemble result ───────────────────────
-    let stream_r = forge_scan::build_stream_result(
+            extra_patterns: extra_pat_arc,
+            stop_flag,
+            all_findings,
+            tech_stack_set,
+            blobs_scanned,
+            blobs_failed,
+            bytes_scanned,
+        },
         t0,
-        all_findings.clone(),
-        tech_stack_set.clone(),
-        blobs_scanned.clone(),
-        blobs_failed.clone(),
-        bytes_scanned.clone(),
     )
     .await;
 
@@ -1974,30 +1853,12 @@ async fn run_bitbucket_token_scan(
 
     let max_blob_bytes = args.max_blob_size * 1024 * 1024;
     let extra_pat_arc = Arc::new(extra_patterns);
-    let save_root = if persist_source {
-        Some(std::path::PathBuf::from(&args.output).join(format!("bitbucket_{}", login)))
-    } else {
-        None
-    };
-
-    // SEC-004: RAII guard for temp workspace
-    let temp_guard: Option<TempDirGuard> = if persist_source {
-        None
-    } else {
-        let p = std::env::temp_dir().join(format!(
-            "gitrecon_bitbucket_scan_{}_{}",
-            std::process::id(),
-            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
-        ));
-        let _ = std::fs::create_dir_all(&p);
-        Some(TempDirGuard::new(p))
-    };
-    let temp_root = temp_guard
-        .as_ref()
-        .and_then(|g| g.path().map(|p| p.to_path_buf()));
-
-    // Ensure temp_guard stays alive for the entire scan
-    let _temp_guard = temp_guard;
+    let workspace_lifecycle = forge_scan::WorkspaceLifecycle::new(
+        Path::new(&args.output),
+        &format!("bitbucket_{}", login),
+        persist_source,
+        "gitrecon_bitbucket_scan",
+    );
 
     for (repo_idx, repo) in selected_repos.iter().enumerate() {
         if stop_flag.load(Ordering::Relaxed) {
@@ -2035,11 +1896,9 @@ async fn run_bitbucket_token_scan(
             }
         };
 
-        let repo_workspace = if let Some(root) = save_root.as_ref() {
-            root.join(repo.full_name.replace('/', "_"))
-        } else if let Some(root) = temp_root.as_ref() {
-            root.join(repo.full_name.replace('/', "_"))
-        } else {
+        let Some(repo_workspace) =
+            workspace_lifecycle.repository_path(&repo.full_name.replace('/', "_"))
+        else {
             continue;
         };
         let _ = std::fs::create_dir_all(&repo_workspace);
@@ -2369,30 +2228,12 @@ async fn run_gitea_token_scan(
 
     let max_blob_bytes = args.max_blob_size * 1024 * 1024;
     let extra_pat_arc = Arc::new(extra_patterns);
-    let save_root = if persist_source {
-        Some(std::path::PathBuf::from(&args.output).join(format!("gitea_{}", login)))
-    } else {
-        None
-    };
-
-    // SEC-004: RAII guard for temp workspace
-    let temp_guard: Option<TempDirGuard> = if persist_source {
-        None
-    } else {
-        let p = std::env::temp_dir().join(format!(
-            "gitrecon_gitea_scan_{}_{}",
-            std::process::id(),
-            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
-        ));
-        let _ = std::fs::create_dir_all(&p);
-        Some(TempDirGuard::new(p))
-    };
-    let temp_root = temp_guard
-        .as_ref()
-        .and_then(|g| g.path().map(|p| p.to_path_buf()));
-
-    // Ensure temp_guard stays alive for the entire scan
-    let _temp_guard = temp_guard;
+    let workspace_lifecycle = forge_scan::WorkspaceLifecycle::new(
+        Path::new(&args.output),
+        &format!("gitea_{}", login),
+        persist_source,
+        "gitrecon_gitea_scan",
+    );
 
     for (repo_idx, repo) in selected_repos.iter().enumerate() {
         if stop_flag.load(Ordering::Relaxed) {
@@ -2430,11 +2271,9 @@ async fn run_gitea_token_scan(
             }
         };
 
-        let repo_workspace = if let Some(root) = save_root.as_ref() {
-            root.join(repo.full_name.replace('/', "_"))
-        } else if let Some(root) = temp_root.as_ref() {
-            root.join(repo.full_name.replace('/', "_"))
-        } else {
+        let Some(repo_workspace) =
+            workspace_lifecycle.repository_path(&repo.full_name.replace('/', "_"))
+        else {
             continue;
         };
         let _ = std::fs::create_dir_all(&repo_workspace);
@@ -2741,30 +2580,12 @@ async fn run_azure_token_scan(
 
     let max_blob_bytes = args.max_blob_size * 1024 * 1024;
     let extra_pat_arc = Arc::new(extra_patterns);
-    let save_root = if persist_source {
-        Some(std::path::PathBuf::from(&args.output).join(format!("azure_{}", login)))
-    } else {
-        None
-    };
-
-    // SEC-004: RAII guard for temp workspace
-    let temp_guard: Option<TempDirGuard> = if persist_source {
-        None
-    } else {
-        let p = std::env::temp_dir().join(format!(
-            "gitrecon_azure_scan_{}_{}",
-            std::process::id(),
-            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
-        ));
-        let _ = std::fs::create_dir_all(&p);
-        Some(TempDirGuard::new(p))
-    };
-    let temp_root = temp_guard
-        .as_ref()
-        .and_then(|g| g.path().map(|p| p.to_path_buf()));
-
-    // Ensure temp_guard stays alive for the entire scan
-    let _temp_guard = temp_guard;
+    let workspace_lifecycle = forge_scan::WorkspaceLifecycle::new(
+        Path::new(&args.output),
+        &format!("azure_{}", login),
+        persist_source,
+        "gitrecon_azure_scan",
+    );
 
     for (repo_idx, repo) in selected_repos.iter().enumerate() {
         if stop_flag.load(Ordering::Relaxed) {
@@ -2802,11 +2623,9 @@ async fn run_azure_token_scan(
             }
         };
 
-        let repo_workspace = if let Some(root) = save_root.as_ref() {
-            root.join(repo.full_name.replace('/', "_"))
-        } else if let Some(root) = temp_root.as_ref() {
-            root.join(repo.full_name.replace('/', "_"))
-        } else {
+        let Some(repo_workspace) =
+            workspace_lifecycle.repository_path(&repo.full_name.replace('/', "_"))
+        else {
             continue;
         };
         let _ = std::fs::create_dir_all(&repo_workspace);
