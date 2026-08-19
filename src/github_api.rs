@@ -221,7 +221,27 @@ impl Forge for GitHubForgeClient {
         }
 
         let json: serde_json::Value = serde_json::from_slice(&resp.body)?;
-        let gh_entries = parse_tree_entries(&json);
+        let gh_entries = if json["truncated"].as_bool().unwrap_or(false) {
+            log::warn!(
+                "GitHub tree for {}/{}@{} is truncated; falling back to subtree traversal",
+                repo.owner,
+                repo.name,
+                &sha[..sha.len().min(8)]
+            );
+            eprintln!(
+                "  [!] Tree truncated at API layer; recursing subtree-by-subtree for {}/{}",
+                repo.owner, repo.name
+            );
+            walk_tree_recursive(
+                &self.client,
+                &repo.owner,
+                &repo.name,
+                parse_tree_entries(&json),
+            )
+            .await?
+        } else {
+            parse_tree_entries(&json)
+        };
 
         // Convert to unified TreeEntry format
         Ok(gh_entries
@@ -557,56 +577,6 @@ pub async fn get_head_sha(
         resp.status,
         fallback_resp.status
     )
-}
-
-/// Retrieve all file-tree entries for a commit, recursively.
-///
-/// Uses `GET /repos/{owner}/{repo}/git/trees/{sha}?recursive=1` first. When GitHub
-/// flags the response `truncated: true` (over 100k entries OR over 7 MB response),
-/// Sprint 4 (S4.5) falls back to per-subtree traversal (`git/trees/<sha>` without
-/// `?recursive=1`) so a monorepo like linux.git is scanned completely instead of
-/// silently missing everything past the truncation point.
-///
-/// Returns entries prefixed with their full path relative to the repo root.
-pub async fn get_tree(
-    client: &HttpClient,
-    owner: &str,
-    repo: &str,
-    sha: &str,
-) -> anyhow::Result<Vec<GhTreeEntry>> {
-    let url = format!(
-        "{}/repos/{}/{}/git/trees/{}?recursive=1",
-        GH_API, owner, repo, sha
-    );
-    let resp = client.get(&url).await;
-    if !resp.ok() {
-        anyhow::bail!(
-            "GET tree {} returned HTTP {}",
-            crate::validation::redact_url(&url),
-            resp.status
-        );
-    }
-    let json: serde_json::Value = serde_json::from_slice(&resp.body)?;
-
-    // Fast path — GitHub returned the whole tree in one shot.
-    if !json["truncated"].as_bool().unwrap_or(false) {
-        return Ok(parse_tree_entries(&json));
-    }
-
-    log::warn!(
-        "GitHub tree for {}/{}@{} truncated at ~100k entries or 7 MB — falling back \
-         to per-subtree traversal (may take several API calls)",
-        owner,
-        repo,
-        &sha[..sha.len().min(8)],
-    );
-    eprintln!(
-        "  [!] Tree truncated at API layer; recursing subtree-by-subtree for {}/{}",
-        owner, repo,
-    );
-
-    let seed = parse_tree_entries(&json);
-    walk_tree_recursive(client, owner, repo, seed).await
 }
 
 /// Sprint 4 (S4.5) fallback: walk `truncated=true` trees by fetching each subtree
