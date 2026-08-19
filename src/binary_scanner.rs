@@ -4,7 +4,7 @@
 //! Detects and extracts credentials from binary files:
 //! - SQLite databases via table scanning and string extraction
 //! - JAR/ZIP archives via recursive unpacking with size limits
-//! - ELF binaries via printable string extraction
+//! - ELF binaries via section-aware string extraction with safe fallback
 //! - Magic bytes detection for file type identification
 
 use once_cell::sync::Lazy;
@@ -356,19 +356,176 @@ fn extract_printable_strings(data: &[u8], min_length: usize) -> Vec<String> {
     strings
 }
 
-/// Extract strings from ELF binaries
+/// Extract strings from ELF binaries.
 ///
-/// Focuses on .rodata, .data, and .strtab sections if possible,
-/// otherwise falls back to full binary string extraction.
+/// Prefer common string-bearing sections when a complete ELF section table is
+/// available. Unsupported, malformed, stripped, and truncated inputs retain the
+/// previous full-binary string fallback so scanning effectiveness is not reduced.
 fn extract_elf_strings(data: &[u8]) -> Vec<String> {
-    // Basic ELF validation
     if !data.starts_with(magic::ELF) {
         return Vec::new();
     }
+    let Some(&class) = data.get(4) else {
+        return extract_printable_strings(data, 4);
+    };
+    let Some(&endianness) = data.get(5) else {
+        return extract_printable_strings(data, 4);
+    };
+    let big_endian = match endianness {
+        1 => false,
+        2 => true,
+        _ => return extract_printable_strings(data, 4),
+    };
+    let (shoff_width, shoff_offset, shentsize_offset, shnum_offset, shstrndx_offset) = match class {
+        1 => (4, 32, 46, 48, 50),
+        2 => (8, 40, 58, 60, 62),
+        _ => return extract_printable_strings(data, 4),
+    };
+    let Some(section_offset) = read_elf_uint(data, shoff_offset, shoff_width, big_endian)
+        .and_then(|value| usize::try_from(value).ok())
+    else {
+        return extract_printable_strings(data, 4);
+    };
+    let Some(section_size) = read_elf_uint(data, shentsize_offset, 2, big_endian)
+        .and_then(|value| usize::try_from(value).ok())
+    else {
+        return extract_printable_strings(data, 4);
+    };
+    let Some(section_count) = read_elf_uint(data, shnum_offset, 2, big_endian)
+        .and_then(|value| usize::try_from(value).ok())
+    else {
+        return extract_printable_strings(data, 4);
+    };
+    let Some(name_table_index) = read_elf_uint(data, shstrndx_offset, 2, big_endian)
+        .and_then(|value| usize::try_from(value).ok())
+    else {
+        return extract_printable_strings(data, 4);
+    };
+    let minimum_section_size = if class == 1 { 40 } else { 64 };
+    if section_count == 0
+        || name_table_index >= section_count
+        || section_size < minimum_section_size
+    {
+        return extract_printable_strings(data, 4);
+    }
+    let Some(table_size) = section_size.checked_mul(section_count) else {
+        return extract_printable_strings(data, 4);
+    };
+    let Some(table_end) = section_offset.checked_add(table_size) else {
+        return extract_printable_strings(data, 4);
+    };
+    if table_end > data.len() {
+        return extract_printable_strings(data, 4);
+    }
+    let name_table_header = section_offset + section_size * name_table_index;
+    let (name_offset_field, name_size_field, name_offset_width) =
+        if class == 1 { (16, 20, 4) } else { (24, 32, 8) };
+    let Some(name_table_offset) = read_elf_uint(
+        data,
+        name_table_header + name_offset_field,
+        name_offset_width,
+        big_endian,
+    )
+    .and_then(|value| usize::try_from(value).ok()) else {
+        return extract_printable_strings(data, 4);
+    };
+    let Some(name_table_size) = read_elf_uint(
+        data,
+        name_table_header + name_size_field,
+        name_offset_width,
+        big_endian,
+    )
+    .and_then(|value| usize::try_from(value).ok()) else {
+        return extract_printable_strings(data, 4);
+    };
+    let Some(name_table_end) = name_table_offset.checked_add(name_table_size) else {
+        return extract_printable_strings(data, 4);
+    };
+    let Some(name_table) = data.get(name_table_offset..name_table_end) else {
+        return extract_printable_strings(data, 4);
+    };
+    let mut strings = Vec::new();
+    let mut seen = HashSet::new();
+    for index in 0..section_count {
+        let header = section_offset + section_size * index;
+        let Some(name_index) = read_elf_uint(data, header, 4, big_endian)
+            .and_then(|value| usize::try_from(value).ok())
+        else {
+            continue;
+        };
+        let Some(name) = elf_section_name(name_table, name_index) else {
+            continue;
+        };
+        if !matches!(
+            name,
+            ".rodata" | ".data" | ".data.rel.ro" | ".strtab" | ".dynstr" | ".comment"
+        ) {
+            continue;
+        }
+        let Some(offset) = read_elf_uint(
+            data,
+            header + name_offset_field,
+            name_offset_width,
+            big_endian,
+        )
+        .and_then(|value| usize::try_from(value).ok()) else {
+            continue;
+        };
+        let Some(size) = read_elf_uint(
+            data,
+            header + name_size_field,
+            name_offset_width,
+            big_endian,
+        )
+        .and_then(|value| usize::try_from(value).ok()) else {
+            continue;
+        };
+        let Some(end) = offset.checked_add(size) else {
+            continue;
+        };
+        let Some(section) = data.get(offset..end) else {
+            continue;
+        };
+        for value in extract_printable_strings(section, 4) {
+            if seen.insert(value.clone()) {
+                strings.push(value);
+            }
+        }
+    }
+    if strings.is_empty() {
+        extract_printable_strings(data, 4)
+    } else {
+        strings
+    }
+}
 
-    // Use bounded printable-string extraction until section-table metadata is
-    // available; malformed or truncated ELF inputs are handled safely above.
-    extract_printable_strings(data, 4)
+fn read_elf_uint(data: &[u8], offset: usize, width: usize, big_endian: bool) -> Option<u64> {
+    let end = offset.checked_add(width)?;
+    let bytes = data.get(offset..end)?;
+    match width {
+        2 => Some(if big_endian {
+            u16::from_be_bytes(bytes.try_into().ok()?) as u64
+        } else {
+            u16::from_le_bytes(bytes.try_into().ok()?) as u64
+        }),
+        4 => Some(if big_endian {
+            u32::from_be_bytes(bytes.try_into().ok()?) as u64
+        } else {
+            u32::from_le_bytes(bytes.try_into().ok()?) as u64
+        }),
+        8 => Some(if big_endian {
+            u64::from_be_bytes(bytes.try_into().ok()?)
+        } else {
+            u64::from_le_bytes(bytes.try_into().ok()?)
+        }),
+        _ => None,
+    }
+}
+
+fn elf_section_name(table: &[u8], offset: usize) -> Option<&str> {
+    let bytes = table.get(offset..)?;
+    let end = bytes.iter().position(|byte| *byte == 0)?;
+    std::str::from_utf8(&bytes[..end]).ok()
 }
 
 /// Static lazy regex patterns for secret detection
@@ -448,6 +605,47 @@ mod tests {
         let strings = extract_printable_strings(data, 4);
         assert!(strings.iter().any(|s| s.contains("password123")));
         assert!(strings.iter().any(|s| s.contains("AKIA")));
+    }
+
+    #[test]
+    fn test_extract_elf_strings_prefers_named_sections() {
+        let mut elf = vec![0u8; 0x300];
+        elf[..4].copy_from_slice(magic::ELF);
+        elf[4] = 2;
+        elf[5] = 1;
+        let section_table_offset = 0x200u64;
+        elf[40..48].copy_from_slice(&section_table_offset.to_le_bytes());
+        elf[58..60].copy_from_slice(&(64u16).to_le_bytes());
+        elf[60..62].copy_from_slice(&(3u16).to_le_bytes());
+        elf[62..64].copy_from_slice(&(2u16).to_le_bytes());
+
+        let rodata_offset = 0x100usize;
+        let rodata = [b"SAFE\0".as_slice(), synthetic_aws_key().as_bytes()].concat();
+        elf[rodata_offset..rodata_offset + rodata.len()].copy_from_slice(&rodata);
+        let off_section = b"outside-section\0";
+        elf[0x80..0x80 + off_section.len()].copy_from_slice(off_section);
+        let names = b"\0.rodata\0.shstrtab\0";
+        let names_offset = 0x180usize;
+        elf[names_offset..names_offset + names.len()].copy_from_slice(names);
+
+        let first_section = section_table_offset as usize + 64;
+        elf[first_section..first_section + 4].copy_from_slice(&(1u32).to_le_bytes());
+        elf[first_section + 24..first_section + 32]
+            .copy_from_slice(&(rodata_offset as u64).to_le_bytes());
+        elf[first_section + 32..first_section + 40]
+            .copy_from_slice(&(rodata.len() as u64).to_le_bytes());
+        let names_section = section_table_offset as usize + 128;
+        elf[names_section..names_section + 4].copy_from_slice(&(9u32).to_le_bytes());
+        elf[names_section + 24..names_section + 32]
+            .copy_from_slice(&(names_offset as u64).to_le_bytes());
+        elf[names_section + 32..names_section + 40]
+            .copy_from_slice(&(names.len() as u64).to_le_bytes());
+
+        let strings = extract_elf_strings(&elf);
+        assert!(strings.iter().any(|value| value.contains("AKIA")));
+        assert!(!strings
+            .iter()
+            .any(|value| value.contains("outside-section")));
     }
 
     #[test]
