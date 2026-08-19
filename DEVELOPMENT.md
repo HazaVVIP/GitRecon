@@ -14,8 +14,8 @@ The project intentionally favors **offensive discovery effectiveness**. Normal s
 
 | Domain | Primary modules | Responsibility |
 |---|---|---|
-| Orchestration | `src/main.rs`, `src/config.rs`, `src/target_utils.rs`, `src/targets.rs`, `src/outcome.rs` | CLI parsing, runtime scan configuration, target planning, target dispatch, bounded concurrency, deterministic aggregate outcomes, and error classification |
-| Forge integrations | `src/forge.rs`, `src/forge_factory.rs`, `src/*_api.rs` | Common forge contract, provider construction, authentication, pagination, repository and object access; unified provider runtime extraction remains a planned follow-up because current public compatibility helpers keep the forge graph reachable from the binary root |
+| Orchestration | `src/main.rs`, `src/config.rs`, `src/target_utils.rs`, `src/targets.rs`, `src/outcome.rs` | CLI parsing, runtime scan configuration, target planning, shared repository selection, target dispatch, bounded concurrency, deterministic aggregate outcomes, and error classification |
+| Forge integrations | `src/forge.rs`, `src/forge_factory.rs`, `src/*_api.rs` | Common forge contract, provider construction, authentication, pagination, repository and object access; provider-neutral lifecycle tests and Gitea mock-server response contracts now protect the boundary |
 | Exposure pipeline | `src/detect.rs`, `src/mapper.rs`, `src/git_parser.rs`, `src/pack_reader.rs` | Detect exposed Git metadata, map object graphs, parse loose and packed objects, and resolve deltas |
 | Scanning | `src/streamer.rs`, `src/scanner_policy.rs`, `src/binary_scanner.rs`, `src/binary_adapter.rs` | Policy-driven pattern, entropy, multiline, database, AI-path, text, binary, and archive detection; custom pattern loading is centralized in `streamer::load_patterns_from_file` |
 | Reliability | `src/http_client.rs`, `src/cache.rs`, `src/checkpoint.rs`, `src/rate_limiter.rs`, `src/temp_cleanup.rs` | Timeouts, retries, rate limits, cache isolation, HMAC checkpoints, and temporary-resource cleanup |

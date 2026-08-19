@@ -54,3 +54,31 @@ pub(crate) fn parse_extra_headers(raw: &[String]) -> Vec<(String, String)> {
     }
     result
 }
+
+/// Select cloned items by stable indexes, ignoring indexes outside the source slice.
+///
+/// Forge providers use this after interactive or non-interactive repository
+/// selection so the selection semantics are identical across providers.
+pub(crate) fn select_by_indexes<T: Clone>(
+    items: &[T],
+    indexes: impl IntoIterator<Item = usize>,
+) -> Vec<T> {
+    indexes
+        .into_iter()
+        .filter_map(|index| items.get(index).cloned())
+        .collect()
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::select_by_indexes;
+
+    #[test]
+    fn selects_valid_indexes_and_ignores_out_of_range_values() {
+        let values = ["github", "gitlab", "gitea"];
+        assert_eq!(
+            select_by_indexes(&values, [2, 99, 0]),
+            vec!["gitea", "github"]
+        );
+    }
+}

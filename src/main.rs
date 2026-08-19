@@ -66,7 +66,9 @@ use colored::Colorize;
 use http_client::{HttpClient, HttpConfig};
 use reporter::{ReportContext, Reporter};
 use streamer::StreamResult;
-use target_utils::{dir_target_name, normalize_url, parse_extra_headers, target_name};
+use target_utils::{
+    dir_target_name, normalize_url, parse_extra_headers, select_by_indexes, target_name,
+};
 use targets::{load_targets, Target};
 use ui::theme::{BannerStyle as ThemeBannerStyle, Theme};
 
@@ -1159,10 +1161,7 @@ async fn run_token_scan(
     } else {
         (0..all_repos.len()).collect()
     };
-    let selected_repos: Vec<github_api::GhRepo> = selected_indexes
-        .into_iter()
-        .filter_map(|i| all_repos.get(i).cloned())
-        .collect();
+    let selected_repos: Vec<github_api::GhRepo> = select_by_indexes(&all_repos, selected_indexes);
     let selected_repo_count = selected_repos.len();
     if selected_repo_count == 0 {
         return Err(anyhow::anyhow!("Tidak ada repository valid yang dipilih."));
@@ -1658,10 +1657,7 @@ async fn run_gitlab_token_scan(
         (0..gl_projects.len()).collect()
     };
 
-    let selected_repos: Vec<forge::Repository> = selected_indexes
-        .into_iter()
-        .filter_map(|i| all_repos.get(i).cloned())
-        .collect();
+    let selected_repos: Vec<forge::Repository> = select_by_indexes(&all_repos, selected_indexes);
 
     let selected_repo_count = selected_repos.len();
     if selected_repo_count == 0 {
@@ -2205,10 +2201,7 @@ async fn run_bitbucket_token_scan(
         (0..bb_repos.len()).collect()
     };
 
-    let selected_repos: Vec<forge::Repository> = selected_indexes
-        .into_iter()
-        .filter_map(|i| all_repos.get(i).cloned())
-        .collect();
+    let selected_repos: Vec<forge::Repository> = select_by_indexes(&all_repos, selected_indexes);
 
     let selected_repo_count = selected_repos.len();
     if selected_repo_count == 0 {
@@ -2735,10 +2728,7 @@ async fn run_gitea_token_scan(
         (0..gt_repos.len()).collect()
     };
 
-    let selected_repos: Vec<forge::Repository> = selected_indexes
-        .into_iter()
-        .filter_map(|i| all_repos.get(i).cloned())
-        .collect();
+    let selected_repos: Vec<forge::Repository> = select_by_indexes(&all_repos, selected_indexes);
 
     let selected_repo_count = selected_repos.len();
     if selected_repo_count == 0 {
@@ -3244,10 +3234,7 @@ async fn run_azure_token_scan(
         (0..az_repos.len()).collect()
     };
 
-    let selected_repos: Vec<forge::Repository> = selected_indexes
-        .into_iter()
-        .filter_map(|i| all_repos.get(i).cloned())
-        .collect();
+    let selected_repos: Vec<forge::Repository> = select_by_indexes(&all_repos, selected_indexes);
 
     let selected_repo_count = selected_repos.len();
     if selected_repo_count == 0 {

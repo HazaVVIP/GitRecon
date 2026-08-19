@@ -547,3 +547,123 @@ mod tests {
             .any(|(k, v)| k == "Authorization" && v == "Bearer test_token"));
     }
 }
+
+#[cfg(test)]
+mod contract_tests {
+    use super::{EnumScope, Forge, Platform, RateLimitInfo, Repository, TreeEntry};
+    use async_trait::async_trait;
+    use std::time::Duration;
+
+    struct ContractForge {
+        authenticated: bool,
+    }
+
+    fn fixture_repository() -> Repository {
+        Repository {
+            full_name: "acme/example".to_string(),
+            owner: "acme".to_string(),
+            name: "example".to_string(),
+            private: true,
+            default_branch: "main".to_string(),
+            clone_url: "https://forge.example/acme/example.git".to_string(),
+            platform: Platform::GitHub,
+            stars: Some(7),
+            forks: Some(2),
+            description: Some("contract fixture".to_string()),
+            updated_at: None,
+        }
+    }
+
+    #[async_trait]
+    impl Forge for ContractForge {
+        async fn authenticate(&mut self, token: &str) -> anyhow::Result<()> {
+            anyhow::ensure!(!token.is_empty(), "empty token");
+            self.authenticated = true;
+            Ok(())
+        }
+
+        async fn enumerate_repos(&self, _scope: EnumScope) -> anyhow::Result<Vec<Repository>> {
+            anyhow::ensure!(self.authenticated, "not authenticated");
+            Ok(vec![fixture_repository()])
+        }
+
+        async fn get_tree(
+            &self,
+            _repo: &Repository,
+            branch: &str,
+        ) -> anyhow::Result<Vec<TreeEntry>> {
+            anyhow::ensure!(branch == "main", "unexpected branch");
+            Ok(vec![TreeEntry {
+                path: "config.txt".to_string(),
+                obj_type: "blob".to_string(),
+                sha: "0123456789012345678901234567890123456789".to_string(),
+                size: Some(12),
+                mode: Some("100644".to_string()),
+            }])
+        }
+
+        async fn get_blob(&self, _repo: &Repository, sha: &str) -> anyhow::Result<Vec<u8>> {
+            anyhow::ensure!(!sha.is_empty(), "empty blob sha");
+            Ok(b"TOKEN=fixture".to_vec())
+        }
+
+        fn rate_limit_remaining(&self) -> Option<(u32, Duration)> {
+            Some((4999, Duration::from_secs(30)))
+        }
+
+        fn rate_limit_info(&self) -> Option<RateLimitInfo> {
+            Some(RateLimitInfo {
+                remaining: 4999,
+                reset_in: Duration::from_secs(30),
+                limit: 5000,
+            })
+        }
+
+        fn platform(&self) -> Platform {
+            Platform::GitHub
+        }
+
+        async fn get_head_sha(&self, _repo: &Repository, branch: &str) -> anyhow::Result<String> {
+            anyhow::ensure!(branch == "main", "unexpected branch");
+            Ok("abcdef0123456789abcdef0123456789abcdef01".to_string())
+        }
+
+        async fn whoami(&self) -> anyhow::Result<(String, String)> {
+            anyhow::ensure!(self.authenticated, "not authenticated");
+            Ok(("fixture-user".to_string(), "Fixture User".to_string()))
+        }
+    }
+
+    #[tokio::test]
+    async fn forge_contract_covers_core_repository_lifecycle() {
+        let mut forge = ContractForge {
+            authenticated: false,
+        };
+        forge.authenticate("synthetic-token").await.unwrap();
+        let repos = forge.enumerate_repos(EnumScope::User).await.unwrap();
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0].full_name, "acme/example");
+
+        let tree = forge.get_tree(&repos[0], "main").await.unwrap();
+        assert_eq!(tree[0].obj_type, "blob");
+        let blob = forge.get_blob(&repos[0], &tree[0].sha).await.unwrap();
+        assert_eq!(blob, b"TOKEN=fixture");
+        assert_eq!(
+            forge.get_head_sha(&repos[0], "main").await.unwrap().len(),
+            40
+        );
+    }
+
+    #[tokio::test]
+    async fn forge_contract_exposes_identity_platform_and_rate_limit() {
+        let mut forge = ContractForge {
+            authenticated: false,
+        };
+        assert_eq!(forge.platform(), Platform::GitHub);
+        assert_eq!(forge.rate_limit_remaining().unwrap().0, 4999);
+        assert_eq!(forge.rate_limit_info().unwrap().limit, 5000);
+        assert!(forge.whoami().await.is_err());
+        forge.authenticate("synthetic-token").await.unwrap();
+        assert_eq!(forge.whoami().await.unwrap().0, "fixture-user");
+    }
+}
