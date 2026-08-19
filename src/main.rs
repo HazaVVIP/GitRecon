@@ -943,6 +943,28 @@ fn prompt_line(prompt: &str) -> io::Result<String> {
     Ok(line)
 }
 
+fn prompt_repository_indexes<F>(repository_count: usize, render_row: F, prompt: &str) -> Vec<usize>
+where
+    F: Fn(usize),
+{
+    for index in 0..repository_count {
+        render_row(index);
+    }
+    println!("      Input: satu nomor (contoh: 3), banyak nomor (1,3,7), atau all");
+    loop {
+        match prompt_line(prompt) {
+            Ok(input) => match parse_repo_selection_input(&input, repository_count) {
+                Ok(selection) => return selection,
+                Err(message) => eprintln!("  ✘  {} Coba lagi.", message),
+            },
+            Err(_) => {
+                eprintln!("  ⚠   Input tidak tersedia, default ke all.");
+                return (0..repository_count).collect();
+            }
+        }
+    }
+}
+
 fn github_repo_to_repository(repo: &github_api::GhRepo) -> forge::Repository {
     forge::Repository {
         full_name: repo.full_name.clone(),
@@ -961,23 +983,11 @@ fn github_repo_to_repository(repo: &github_api::GhRepo) -> forge::Repository {
 
 fn prompt_repo_selection(repos: &[forge::Repository]) -> Vec<usize> {
     println!("  ◈  Pilih repository yang ingin di-scan:");
-    for (idx, repo) in repos.iter().enumerate() {
-        println!("      {:>4}. {}", idx + 1, repo.full_name);
-    }
-    println!("      Input: satu nomor (contoh: 3), banyak nomor (1,3,7), atau all");
-
-    loop {
-        match prompt_line("  > Pilihan repo: ") {
-            Ok(input) => match parse_repo_selection_input(&input, repos.len()) {
-                Ok(v) => return v,
-                Err(msg) => eprintln!("  ✘  {} Coba lagi.", msg),
-            },
-            Err(_) => {
-                eprintln!("  ⚠   Input tidak tersedia, default ke all.");
-                return (0..repos.len()).collect();
-            }
-        }
-    }
+    prompt_repository_indexes(
+        repos.len(),
+        |index| println!("      {:>4}. {}", index + 1, repos[index].full_name),
+        "  > Pilihan repo: ",
+    )
 }
 
 fn prompt_save_choice(default: bool) -> bool {
@@ -1489,45 +1499,21 @@ async fn run_gitlab_token_scan(
 /// Prompt for GitLab repository selection.
 fn prompt_gitlab_repo_selection(repos: &[gitlab_api::GlProject]) -> Vec<usize> {
     println!("  ◈  Pilih repository yang ingin di-scan:");
-    for (idx, repo) in repos.iter().enumerate() {
-        println!("      {:>4}. {}", idx + 1, repo.full_name);
-    }
-    println!("      Input: satu nomor (contoh: 3), banyak nomor (1,3,7), atau all");
-
-    loop {
-        match prompt_line("  > Pilihan repo: ") {
-            Ok(input) => match parse_repo_selection_input(&input, repos.len()) {
-                Ok(v) => return v,
-                Err(msg) => eprintln!("  ✘  {} Coba lagi.", msg),
-            },
-            Err(_) => {
-                eprintln!("  ⚠   Input tidak tersedia, default ke all.");
-                return (0..repos.len()).collect();
-            }
-        }
-    }
+    prompt_repository_indexes(
+        repos.len(),
+        |index| println!("      {:>4}. {}", index + 1, repos[index].full_name),
+        "  > Pilihan repo: ",
+    )
 }
 
 /// Prompt for Bitbucket repository selection.
 fn prompt_bitbucket_repo_selection(repos: &[bitbucket_api::BbRepo]) -> Vec<usize> {
     println!("  ◈  Pilih repository yang ingin di-scan:");
-    for (idx, repo) in repos.iter().enumerate() {
-        println!("      {:>4}. {}", idx + 1, repo.full_name);
-    }
-    println!("      Input: satu nomor (contoh: 3), banyak nomor (1,3,7), atau all");
-
-    loop {
-        match prompt_line("  > Pilihan repo: ") {
-            Ok(input) => match parse_repo_selection_input(&input, repos.len()) {
-                Ok(v) => return v,
-                Err(msg) => eprintln!("  ✘  {} Coba lagi.", msg),
-            },
-            Err(_) => {
-                eprintln!("  ⚠   Input tidak tersedia, default ke all.");
-                return (0..repos.len()).collect();
-            }
-        }
-    }
+    prompt_repository_indexes(
+        repos.len(),
+        |index| println!("      {:>4}. {}", index + 1, repos[index].full_name),
+        "  > Pilihan repo: ",
+    )
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1762,23 +1748,11 @@ async fn run_bitbucket_token_scan(
 /// Prompt for Gitea repository selection.
 fn prompt_gitea_repo_selection(repos: &[gitea_api::GtRepo]) -> Vec<usize> {
     println!("  ◈  Pilih repository yang ingin di-scan:");
-    for (idx, repo) in repos.iter().enumerate() {
-        println!("      {:>4}. {}", idx + 1, repo.full_name);
-    }
-    println!("      Input: satu nomor (contoh: 3), banyak nomor (1,3,7), atau all");
-
-    loop {
-        match prompt_line("  > Pilihan repo: ") {
-            Ok(input) => match parse_repo_selection_input(&input, repos.len()) {
-                Ok(v) => return v,
-                Err(msg) => eprintln!("  ✘  {} Coba lagi.", msg),
-            },
-            Err(_) => {
-                eprintln!("  ⚠   Input tidak tersedia, default ke all.");
-                return (0..repos.len()).collect();
-            }
-        }
-    }
+    prompt_repository_indexes(
+        repos.len(),
+        |index| println!("      {:>4}. {}", index + 1, repos[index].full_name),
+        "  > Pilihan repo: ",
+    )
 }
 
 #[allow(clippy::too_many_lines)]
