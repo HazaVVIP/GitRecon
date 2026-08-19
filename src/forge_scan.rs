@@ -13,6 +13,7 @@ use std::time::Instant;
 use crate::forge::{Forge, Repository};
 use crate::streamer::{DynPattern, Finding, StreamResult};
 use crate::temp_cleanup::TempDirGuard;
+use colored::Colorize;
 use tokio::sync::Mutex;
 
 pub(crate) trait BlobEntry: Clone + Send {
@@ -51,6 +52,54 @@ impl_blob_entry!(crate::bitbucket_api::BbTreeEntry);
 impl_blob_entry!(crate::gitea_api::GtTreeEntry);
 impl_blob_entry!(crate::azure_api::AzTreeEntry);
 use futures::StreamExt;
+
+/// Authenticated forge state shared by provider-specific selection and reporting code.
+pub(crate) struct ForgeSession {
+    pub(crate) forge: Arc<dyn Forge>,
+    pub(crate) login: String,
+    pub(crate) repositories: Vec<Repository>,
+}
+
+/// Authenticate a forge, resolve identity, and enumerate accessible repositories.
+pub(crate) async fn establish_session(
+    forge: Box<dyn Forge>,
+    token: &str,
+    verbose: bool,
+    platform_name: &str,
+) -> anyhow::Result<ForgeSession> {
+    if verbose {
+        println!("  ◈  Authenticating with {} API...", platform_name);
+    }
+    let mut forge = forge;
+    forge
+        .authenticate(token)
+        .await
+        .map_err(|error| anyhow::anyhow!("Authentication failed: {}", error))?;
+    let (login, _name) = forge
+        .whoami()
+        .await
+        .map_err(|error| anyhow::anyhow!("Failed to get user info: {}", error))?;
+    if verbose {
+        println!("  ✔  Authenticated as: {}\n", login.cyan().bold());
+        println!("  ◈  Enumerating repositories...");
+    }
+    let repositories = forge
+        .enumerate_repos(crate::forge::EnumScope::All)
+        .await
+        .map_err(|error| anyhow::anyhow!("Failed to list repositories: {}", error))?;
+    if repositories.is_empty() {
+        if verbose {
+            println!("  ⚠   Tidak ada repository yang bisa di-scan.\n");
+        }
+    } else if verbose {
+        println!("  ✔  Found {} repositories\n", repositories.len());
+    }
+    Ok(ForgeSession {
+        forge: Arc::from(forge),
+        login,
+        repositories,
+    })
+}
 
 /// Owns persisted or temporary workspace roots for a forge scan.
 pub(crate) struct WorkspaceLifecycle {
@@ -495,8 +544,9 @@ mod tests {
     use std::time::Instant;
 
     use super::{
-        build_stream_result, reconstruct_blobs, run_repository_scan_loop, scan_workspace_files,
-        FileScanConfig, RepositoryScanOutcome, RepositoryScanRequest, WorkspaceLifecycle,
+        build_stream_result, establish_session, reconstruct_blobs, run_repository_scan_loop,
+        scan_workspace_files, FileScanConfig, RepositoryScanOutcome, RepositoryScanRequest,
+        WorkspaceLifecycle,
     };
     use crate::forge::{EnumScope, Forge, Platform, RateLimitInfo, Repository, TreeEntry};
     use crate::streamer::DynPattern;
@@ -693,6 +743,17 @@ mod tests {
         async fn whoami(&self) -> anyhow::Result<(String, String)> {
             Ok(("empty".to_string(), "Empty Forge".to_string()))
         }
+    }
+
+    #[tokio::test]
+    async fn establish_session_preserves_identity_and_empty_repository_state() {
+        let session =
+            establish_session(Box::new(EmptyForge), "synthetic-token", false, "Test Forge")
+                .await
+                .expect("empty forge session should establish");
+        assert_eq!(session.login, "empty");
+        assert!(session.repositories.is_empty());
+        assert_eq!(session.forge.platform(), Platform::GitHub);
     }
 
     #[tokio::test]

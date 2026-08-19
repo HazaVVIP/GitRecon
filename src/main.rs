@@ -1368,48 +1368,25 @@ async fn run_gitlab_token_scan(
         Err(e) => return Err(anyhow::anyhow!("Failed to build GitLab API client: {}", e)),
     };
 
-    // ── 2. Authenticate ──────────────────────────
-    if verbose {
-        println!("  ◈  Authenticating with GitLab API...");
-    }
-    let mut gl_forge = gitlab_api::GitLabForgeClient::new(gl_client.clone(), api_base.clone());
-
-    gl_forge
-        .authenticate(token)
-        .await
-        .map_err(|e| anyhow::anyhow!("Authentication failed: {}", e))?;
-
-    let (login, _name) = gl_forge
-        .whoami()
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to get user info: {}", e))?;
-
-    if verbose {
-        println!("  ✔  Authenticated as: {}\n", login.cyan().bold());
-    }
-
-    // ── 3. Enumerate repositories ────────────────
-    if verbose {
-        println!("  ◈  Enumerating repositories...");
-    }
-
-    let all_repos = gl_forge
-        .enumerate_repos(forge::EnumScope::All)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to list repositories: {}", e))?;
-
+    // ── 2–3. Authenticate, identify, and enumerate ─────
+    let session = forge_scan::establish_session(
+        Box::new(gitlab_api::GitLabForgeClient::new(
+            gl_client.clone(),
+            api_base.clone(),
+        )),
+        token,
+        verbose,
+        "GitLab",
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!("forge scan setup failed: {}", error))?;
+    let gl_forge = session.forge;
+    let login = session.login;
+    let all_repos = session.repositories;
     let total_repos = all_repos.len();
     if total_repos == 0 {
-        if verbose {
-            println!("  ⚠   Tidak ada repository yang bisa di-scan.\n");
-        }
         return Ok(());
     }
-
-    if verbose {
-        println!("  ✔  Found {} repositories\n", total_repos);
-    }
-
     let interactive = !args.quiet && !args.pipe;
 
     // Convert to a displayable format for selection
@@ -1484,7 +1461,7 @@ async fn run_gitlab_token_scan(
     );
 
     let stream_r = forge_scan::run_repository_scan_loop(
-        Arc::new(gl_forge),
+        gl_forge,
         &selected_repos,
         &workspace_lifecycle,
         forge_scan::FileScanConfig {
@@ -1666,58 +1643,25 @@ async fn run_bitbucket_token_scan(
             }
         };
 
-    // ── 2. Authenticate ──────────────────────────
-    if verbose {
-        println!("  ◈  Authenticating with Bitbucket API...");
-    }
-    let mut bb_forge =
-        bitbucket_api::BitbucketForgeClient::new(bb_client.clone(), api_base.clone());
-
-    match bb_forge.authenticate(token).await {
-        Ok(_) => {}
-        Err(e) => {
-            eprintln!("  ✘  Authentication failed: {}", e);
-            return Err(anyhow::anyhow!("forge scan setup failed"));
-        }
-    }
-
-    let (login, _name) = match bb_forge.whoami().await {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("  ✘  Failed to get user info: {}", e);
-            return Err(anyhow::anyhow!("forge scan setup failed"));
-        }
-    };
-
-    if verbose {
-        println!("  ✔  Authenticated as: {}\n", login.cyan().bold());
-    }
-
-    // ── 3. Enumerate repositories ────────────────
-    if verbose {
-        println!("  ◈  Enumerating repositories...");
-    }
-
-    let all_repos = match bb_forge.enumerate_repos(forge::EnumScope::All).await {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("  ✘  Failed to list repositories: {}", e);
-            return Err(anyhow::anyhow!("forge scan setup failed"));
-        }
-    };
-
+    // ── 2–3. Authenticate, identify, and enumerate ─────
+    let session = forge_scan::establish_session(
+        Box::new(bitbucket_api::BitbucketForgeClient::new(
+            bb_client.clone(),
+            api_base.clone(),
+        )),
+        token,
+        verbose,
+        "Bitbucket",
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!("forge scan setup failed: {}", error))?;
+    let bb_forge = session.forge;
+    let login = session.login;
+    let all_repos = session.repositories;
     let total_repos = all_repos.len();
     if total_repos == 0 {
-        if verbose {
-            println!("  ⚠   Tidak ada repository yang bisa di-scan.\n");
-        }
         return Ok(());
     }
-
-    if verbose {
-        println!("  ✔  Found {} repositories\n", total_repos);
-    }
-
     let interactive = !args.quiet && !args.pipe;
 
     // Convert to a displayable format for selection
@@ -1792,7 +1736,7 @@ async fn run_bitbucket_token_scan(
     );
 
     let stream_r = forge_scan::run_repository_scan_loop(
-        Arc::new(bb_forge),
+        bb_forge,
         &selected_repos,
         &workspace_lifecycle,
         forge_scan::FileScanConfig {
@@ -1966,57 +1910,25 @@ async fn run_gitea_token_scan(
         }
     };
 
-    // ── 2. Authenticate ──────────────────────────
-    if verbose {
-        println!("  ◈  Authenticating with Gitea API...");
-    }
-    let mut gt_forge = gitea_api::GiteaForgeClient::new(gt_client.clone(), api_base.clone());
-
-    match gt_forge.authenticate(token).await {
-        Ok(_) => {}
-        Err(e) => {
-            eprintln!("  ✘  Authentication failed: {}", e);
-            return Err(anyhow::anyhow!("forge scan setup failed"));
-        }
-    }
-
-    let (login, _name) = match gt_forge.whoami().await {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("  ✘  Failed to get user info: {}", e);
-            return Err(anyhow::anyhow!("forge scan setup failed"));
-        }
-    };
-
-    if verbose {
-        println!("  ✔  Authenticated as: {}\n", login.cyan().bold());
-    }
-
-    // ── 3. Enumerate repositories ────────────────
-    if verbose {
-        println!("  ◈  Enumerating repositories...");
-    }
-
-    let all_repos = match gt_forge.enumerate_repos(forge::EnumScope::All).await {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("  ✘  Failed to list repositories: {}", e);
-            return Err(anyhow::anyhow!("forge scan setup failed"));
-        }
-    };
-
+    // ── 2–3. Authenticate, identify, and enumerate ─────
+    let session = forge_scan::establish_session(
+        Box::new(gitea_api::GiteaForgeClient::new(
+            gt_client.clone(),
+            api_base.clone(),
+        )),
+        token,
+        verbose,
+        "Gitea",
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!("forge scan setup failed: {}", error))?;
+    let gt_forge = session.forge;
+    let login = session.login;
+    let all_repos = session.repositories;
     let total_repos = all_repos.len();
     if total_repos == 0 {
-        if verbose {
-            println!("  ⚠   Tidak ada repository yang bisa di-scan.\n");
-        }
         return Ok(());
     }
-
-    if verbose {
-        println!("  ✔  Found {} repositories\n", total_repos);
-    }
-
     let interactive = !args.quiet && !args.pipe;
 
     // Convert to a displayable format for selection
@@ -2091,7 +2003,7 @@ async fn run_gitea_token_scan(
     );
 
     let stream_r = forge_scan::run_repository_scan_loop(
-        Arc::new(gt_forge),
+        gt_forge,
         &selected_repos,
         &workspace_lifecycle,
         forge_scan::FileScanConfig {
@@ -2229,64 +2141,30 @@ async fn run_azure_token_scan(
         }
     };
 
-    // ── 2. Authenticate ──────────────────────────
-    if verbose {
-        println!("  ◈  Authenticating with Azure DevOps API...");
-    }
-    let mut az_forge = azure_api::AzureForgeClient::new(az_client.clone(), api_base.clone());
-
-    match az_forge.authenticate(token).await {
-        Ok(_) => {}
-        Err(e) => {
-            eprintln!("  ✘  Authentication failed: {}", e);
-            return Err(anyhow::anyhow!("forge scan setup failed"));
-        }
-    }
-
-    let (login, _name) = match az_forge.whoami().await {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("  ✘  Failed to get user info: {}", e);
-            return Err(anyhow::anyhow!("forge scan setup failed"));
-        }
-    };
-
-    if verbose {
-        println!("  ✔  Authenticated as: {}\n", login.cyan().bold());
-    }
-
-    // ── 3. Enumerate repositories ────────────────
-    if verbose {
-        println!("  ◈  Enumerating repositories...");
-    }
-
-    let all_repos = match az_forge.enumerate_repos(forge::EnumScope::All).await {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("  ✘  Failed to list repositories: {}", e);
-            eprintln!("  →  For Azure DevOps, you may need to specify the organization/project.");
-            eprintln!(
-                "  →  Use --azure-url https://dev.azure.com/{{org}} for a specific organization."
-            );
-            return Err(anyhow::anyhow!("forge scan setup failed"));
-        }
-    };
-
+    // ── 2–3. Authenticate, identify, and enumerate ─────
+    let session = forge_scan::establish_session(
+        Box::new(azure_api::AzureForgeClient::new(
+            az_client.clone(),
+            api_base.clone(),
+        )),
+        token,
+        verbose,
+        "Azure DevOps",
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!("forge scan setup failed: {}", error))?;
+    let az_forge = session.forge;
+    let login = session.login;
+    let all_repos = session.repositories;
     let total_repos = all_repos.len();
     if total_repos == 0 {
         if verbose {
-            println!("  ⚠   No accessible repositories found.\n");
             println!("  →  Azure DevOps requires organization context. Try specifying:");
             println!("  →  --azure-url https://dev.azure.com/{{org}}");
             println!("  →  For on-premise: --azure-url https://{{server}}/{{collection}}");
         }
         return Ok(());
     }
-
-    if verbose {
-        println!("  ✔  Found {} repositories\n", total_repos);
-    }
-
     let interactive = !args.quiet && !args.pipe;
 
     // Convert to a displayable format for selection
@@ -2362,7 +2240,7 @@ async fn run_azure_token_scan(
     );
 
     let stream_r = forge_scan::run_repository_scan_loop(
-        Arc::new(az_forge),
+        az_forge,
         &selected_repos,
         &workspace_lifecycle,
         forge_scan::FileScanConfig {
