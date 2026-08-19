@@ -346,15 +346,7 @@ async fn run_url_target(context: UrlRunContext<'_>, url: String, fuzz: bool) -> 
 
     // Save report in requested format
     let tname = target_name(&url);
-    let ext = match args.format.as_str() {
-        "sarif" => "sarif",
-        "csv" => "csv",
-        "ndjson" => "ndjson",
-        "md" => "md",
-        "html" => "html",
-        _ => "json",
-    };
-    let report_path = format!("{}/{}_report.{}", args.output, tname, ext);
+    let report_path = reporter::build_report_path(&args.output, &tname, &args.format);
 
     if let Err(e) = rep.save_scan_report(
         &report_path,
@@ -1241,15 +1233,7 @@ async fn run_token_scan(
 
     // ── 7. Save report ───────────────────────────
     let report_name = format!("token_{}", login);
-    let ext = match args.format.as_str() {
-        "sarif" => "sarif",
-        "csv" => "csv",
-        "ndjson" => "ndjson",
-        "md" => "md",
-        "html" => "html",
-        _ => "json",
-    };
-    let report_path = format!("{}/{}_report.{}", args.output, report_name, ext);
+    let report_path = reporter::build_report_path(&args.output, &report_name, &args.format);
 
     let save_result = rep.save_scan_report(
         &report_path,
@@ -1470,15 +1454,7 @@ async fn run_gitlab_token_scan(
     }
     // ── 7. Save report ───────────────────────────
     let report_name = format!("gitlab_{}", login);
-    let ext = match args.format.as_str() {
-        "sarif" => "sarif",
-        "csv" => "csv",
-        "ndjson" => "ndjson",
-        "md" => "md",
-        "html" => "html",
-        _ => "json",
-    };
-    let report_path = format!("{}/{}_report.{}", args.output, report_name, ext);
+    let report_path = reporter::build_report_path(&args.output, &report_name, &args.format);
 
     let save_result = rep.save_scan_report(
         &report_path,
@@ -1760,15 +1736,7 @@ async fn run_bitbucket_token_scan(
 
     // ── 7. Save report ───────────────────────────
     let report_name = format!("bitbucket_{}", login);
-    let ext = match args.format.as_str() {
-        "sarif" => "sarif",
-        "csv" => "csv",
-        "ndjson" => "ndjson",
-        "md" => "md",
-        "html" => "html",
-        _ => "json",
-    };
-    let report_path = format!("{}/{}_report.{}", args.output, report_name, ext);
+    let report_path = reporter::build_report_path(&args.output, &report_name, &args.format);
 
     let save_result = rep.save_scan_report(
         &report_path,
@@ -2013,15 +1981,7 @@ async fn run_gitea_token_scan(
 
     // ── 7. Save report ───────────────────────────
     let report_name = format!("gitea_{}", login);
-    let ext = match args.format.as_str() {
-        "sarif" => "sarif",
-        "csv" => "csv",
-        "ndjson" => "ndjson",
-        "md" => "md",
-        "html" => "html",
-        _ => "json",
-    };
-    let report_path = format!("{}/{}_report.{}", args.output, report_name, ext);
+    let report_path = reporter::build_report_path(&args.output, &report_name, &args.format);
 
     let save_result = rep.save_scan_report(
         &report_path,
@@ -2256,15 +2216,7 @@ async fn run_azure_token_scan(
 
     // ── 7. Save report ───────────────────────────
     let report_name = format!("azure_{}", login);
-    let ext = match args.format.as_str() {
-        "sarif" => "sarif",
-        "csv" => "csv",
-        "ndjson" => "ndjson",
-        "md" => "md",
-        "html" => "html",
-        _ => "json",
-    };
-    let report_path = format!("{}/{}_report.{}", args.output, report_name, ext);
+    let report_path = reporter::build_report_path(&args.output, &report_name, &args.format);
 
     let save_result = rep.save_scan_report(
         &report_path,
@@ -2578,15 +2530,7 @@ async fn run_dir_scan(
 
     let dir_name = dir_target_name(&canonical_root);
     let report_name = format!("dir_{}", dir_name);
-    let ext = match args.format.as_str() {
-        "sarif" => "sarif",
-        "csv" => "csv",
-        "ndjson" => "ndjson",
-        "md" => "md",
-        "html" => "html",
-        _ => "json",
-    };
-    let report_path = format!("{}/{}_report.{}", args.output, report_name, ext);
+    let report_path = reporter::build_report_path(&args.output, &report_name, &args.format);
 
     let save_result = rep.save_scan_report(
         &report_path,

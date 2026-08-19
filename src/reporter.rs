@@ -18,6 +18,19 @@ use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::path::Path;
 
+/// Build the canonical report filename for a target and output format.
+pub(crate) fn build_report_path(output: &str, report_name: &str, format: &str) -> String {
+    let extension = match format {
+        "sarif" => "sarif",
+        "csv" => "csv",
+        "ndjson" => "ndjson",
+        "md" => "md",
+        "html" => "html",
+        _ => "json",
+    };
+    format!("{}/{}_report.{}", output, report_name, extension)
+}
+
 // ════════════════════════════════════════════════
 // OUTPUT ESCAPING HELPERS (Sprint 2)
 // ════════════════════════════════════════════════
@@ -1285,6 +1298,22 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.path);
         }
+    }
+
+    #[test]
+    fn build_report_path_preserves_format_contract() {
+        assert_eq!(
+            build_report_path("out", "target", "sarif"),
+            "out/target_report.sarif"
+        );
+        assert_eq!(
+            build_report_path("out", "target", "html"),
+            "out/target_report.html"
+        );
+        assert_eq!(
+            build_report_path("out", "target", "unknown"),
+            "out/target_report.json"
+        );
     }
 
     fn unicode_finding() -> Finding {
