@@ -412,7 +412,11 @@ fn parse_tree_entries(json: &serde_json::Value) -> Vec<GhTreeEntry> {
 /// Calls `GET /user` and returns `(login, name)`.
 /// Returns an error on HTTP 401 (invalid/expired token) or any non-200 status.
 pub async fn whoami(client: &HttpClient) -> anyhow::Result<(String, String)> {
-    let url = format!("{}/user", GH_API);
+    whoami_at(client, GH_API).await
+}
+
+async fn whoami_at(client: &HttpClient, api_base: &str) -> anyhow::Result<(String, String)> {
+    let url = format!("{}/user", api_base);
     let resp = client.get(&url).await;
     if resp.status == 401 {
         anyhow::bail!("Invalid or expired token (HTTP 401)");
@@ -801,5 +805,43 @@ mod tests {
         });
         let repo = parse_repo(&v).unwrap();
         assert_eq!(repo.default_branch, "main", "Should default to 'main'");
+    }
+    async fn spawn_contract_server(status: u16, body: &'static str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 1024];
+            let _ = socket.read(&mut request).await;
+            let response = format!(
+                "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        format!("http://{address}")
+    }
+
+    #[tokio::test]
+    async fn mock_server_contract_covers_github_identity_success() {
+        let base_url =
+            spawn_contract_server(200, r#"{"login":"fixture","name":"Fixture User"}"#).await;
+        let client = build_github_client(HttpConfig::default(), "synthetic-token").unwrap();
+        let identity = whoami_at(&client, &base_url).await.unwrap();
+        assert_eq!(
+            identity,
+            ("fixture".to_string(), "Fixture User".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn mock_server_contract_maps_github_401_to_authentication_error() {
+        let base_url = spawn_contract_server(401, "{}").await;
+        let client = build_github_client(HttpConfig::default(), "synthetic-token").unwrap();
+        let error = whoami_at(&client, &base_url).await.unwrap_err().to_string();
+        assert!(error.contains("HTTP 401"));
     }
 }

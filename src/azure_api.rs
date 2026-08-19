@@ -756,4 +756,47 @@ mod tests {
             "%E7%89%B9%E6%AE%8A%E5%AD%97%E7%AC%A6"
         );
     }
+    async fn spawn_contract_server(status: u16, body: &'static str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 1024];
+            let _ = socket.read(&mut request).await;
+            let response = format!(
+                "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        format!("http://{address}")
+    }
+
+    #[tokio::test]
+    async fn mock_server_contract_covers_azure_identity_success() {
+        let base_url =
+            spawn_contract_server(200, r#"{"id":"fixture-id","displayName":"Fixture User"}"#).await;
+        let (client, api_base) =
+            build_azure_client(HttpConfig::default(), "synthetic-token", Some(&base_url)).unwrap();
+        let identity = whoami(&client, &api_base).await.unwrap();
+        assert_eq!(
+            identity,
+            ("fixture-id".to_string(), "Fixture User".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn mock_server_contract_documents_azure_identity_fallback_on_401() {
+        let base_url = spawn_contract_server(401, "{}").await;
+        let (client, api_base) =
+            build_azure_client(HttpConfig::default(), "synthetic-token", Some(&base_url)).unwrap();
+        let identity = whoami(&client, &api_base).await.unwrap();
+        assert_eq!(
+            identity,
+            ("azure-user".to_string(), "Azure DevOps User".to_string())
+        );
+    }
 }

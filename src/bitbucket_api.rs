@@ -846,4 +846,49 @@ mod tests {
             "special/chars/%E6%B5%8B%E8%AF%95"
         );
     }
+    async fn spawn_contract_server(status: u16, body: &'static str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 1024];
+            let _ = socket.read(&mut request).await;
+            let response = format!(
+                "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        format!("http://{address}")
+    }
+
+    #[tokio::test]
+    async fn mock_server_contract_covers_bitbucket_identity_success() {
+        let base_url = spawn_contract_server(
+            200,
+            r#"{"username":"fixture","display_name":"Fixture User"}"#,
+        )
+        .await;
+        let (client, api_base) =
+            build_bitbucket_client(HttpConfig::default(), "synthetic-token", Some(&base_url))
+                .unwrap();
+        let identity = whoami(&client, &api_base).await.unwrap();
+        assert_eq!(
+            identity,
+            ("fixture".to_string(), "Fixture User".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn mock_server_contract_maps_bitbucket_401_to_authentication_error() {
+        let base_url = spawn_contract_server(401, "{}").await;
+        let (client, api_base) =
+            build_bitbucket_client(HttpConfig::default(), "synthetic-token", Some(&base_url))
+                .unwrap();
+        let error = whoami(&client, &api_base).await.unwrap_err().to_string();
+        assert!(error.contains("HTTP 401"));
+    }
 }
