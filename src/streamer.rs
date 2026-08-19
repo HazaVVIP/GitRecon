@@ -53,6 +53,8 @@ pub fn load_patterns_from_file(path: &str) -> anyhow::Result<Vec<DynPattern>> {
     let validated_path = validation::validate_patterns_path(path)?;
     let raw = std::fs::read_to_string(&validated_path)
         .map_err(|e| anyhow::anyhow!("Cannot read patterns file '{}': {}", path, e))?;
+    crate::validation::validate_patterns_json(&raw)
+        .map_err(|error| anyhow::anyhow!("Pattern validation failed for '{}': {}", path, error))?;
     let json: serde_json::Value = serde_json::from_str(&raw)
         .map_err(|e| anyhow::anyhow!("Invalid JSON in patterns file '{}': {}", path, e))?;
     let arr = json["patterns"].as_array().ok_or_else(|| {

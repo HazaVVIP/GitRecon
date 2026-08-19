@@ -23,6 +23,7 @@ mod binary_scanner;
 mod bitbucket_api;
 mod cache; // PERF-005: SQLite cache layer
 mod checkpoint;
+mod config;
 mod detect;
 mod forge;
 mod forge_factory;
@@ -294,24 +295,42 @@ async fn run_url_target(context: UrlRunContext<'_>, url: String, fuzz: bool) -> 
         }
     }
 
-    let streamer = streamer::Streamer::new(
-        client.clone(),
+    let scan_config = config::ScanConfig::from_values(
         args.workers,
         args.mem_limit,
-        verbose,
         args.max_findings,
         args.stop_on_critical,
-        extra_patterns.clone(),
         args.max_blob_size,
+        args.max_history,
         args.entropy_threshold,
         args.live || args.pipe,
         !args.no_adaptive,
         args.resume,
         args.checkpoint_interval,
+        args.exhaustive,
+        !args.no_scan_binaries,
+        !args.no_verify_objects,
+        !args.no_cache,
+        args.cache_ttl,
+    );
+    let streamer = streamer::Streamer::new(
+        client.clone(),
+        scan_config.workers,
+        scan_config.mem_limit,
+        verbose,
+        scan_config.max_findings,
+        scan_config.stop_on_critical,
+        extra_patterns.clone(),
+        scan_config.max_blob_size,
+        scan_config.entropy_threshold,
+        scan_config.live,
+        scan_config.adaptive_workers,
+        scan_config.resume,
+        scan_config.checkpoint_interval,
         Some(url.clone()),
         cache,
         false_positive_keywords.to_vec(),
-        args.exhaustive,
+        scan_config.exhaustive,
     );
 
     let rep_arc = Arc::new(rep.clone());
@@ -4396,7 +4415,7 @@ async fn main() {
 
     // Load extra patterns (shared by both URL and token modes)
     let extra_patterns = if let Some(ref patterns_file) = args.patterns {
-        match load_extra_patterns(patterns_file) {
+        match streamer::load_patterns_from_file(patterns_file) {
             Ok(patterns) => patterns,
             Err(e) => {
                 eprintln!(
@@ -4767,51 +4786,6 @@ pub async fn create_forge_client_from_url(
 /// ```
 pub fn detect_platform(url: &str) -> Option<forge::Platform> {
     forge::Platform::from_url(url)
-}
-
-fn load_extra_patterns(
-    file_path: &str,
-) -> Result<Vec<streamer::DynPattern>, Box<dyn std::error::Error>> {
-    // SEC-006: Validate path to prevent path traversal attacks
-    let validated_path = validation::validate_patterns_path(file_path)?;
-    let content = std::fs::read_to_string(validated_path)?;
-
-    // SEC-005: Validate patterns JSON structure and regex patterns
-    if let Err(e) = validation::validate_patterns_json(&content) {
-        return Err(format!("Patterns file validation failed: {}", e).into());
-    }
-
-    let json: serde_json::Value = serde_json::from_str(&content)?;
-
-    let patterns = json["patterns"]
-        .as_array()
-        .ok_or("Missing 'patterns' array in JSON")?;
-
-    let mut result = Vec::new();
-    for p in patterns {
-        let id = p["id"].as_str().ok_or("Missing 'id' field")?.to_string();
-        let sev = p["severity"]
-            .as_str()
-            .ok_or("Missing 'severity' field")?
-            .to_string();
-        let desc = p["description"]
-            .as_str()
-            .ok_or("Missing 'description' field")?
-            .to_string();
-        let regex_str = p["regex"].as_str().ok_or("Missing 'regex' field")?;
-
-        // SEC-005: Additional regex validation (already done in validate_patterns_json, but compile anyway)
-        let regex = regex::Regex::new(regex_str)?;
-
-        result.push(streamer::DynPattern {
-            id,
-            sev,
-            desc,
-            regex,
-        });
-    }
-
-    Ok(result)
 }
 
 #[cfg(test)]
