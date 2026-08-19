@@ -157,12 +157,12 @@ Reports are written below the selected output directory. The default JSON report
 
 | Domain | Modules | Responsibility |
 |---|---|---|
-| Orchestration | `main.rs`, `target_utils.rs`, `outcome.rs` | CLI routing, target concurrency, deterministic outcomes, and error classification |
-| Forge clients | `forge.rs`, `forge_factory.rs`, `*_api.rs` | Provider authentication, pagination, repository enumeration, and object retrieval |
-| Git pipeline | `detect.rs`, `mapper.rs`, `git_parser.rs`, `pack_reader.rs` | Exposure detection, object mapping, index parsing, pack parsing, and delta resolution |
-| Scanner | `streamer.rs`, `binary_scanner.rs`, `binary_adapter.rs` | Pattern, entropy, multiline, database, AI-path, text, binary, and archive analysis |
+| Orchestration | `main.rs`, `config.rs`, `targets.rs`, `target_utils.rs`, `outcome.rs` | CLI routing, runtime scan policy, target planning, bounded concurrency, deterministic outcomes, and error classification |
+| URL and local pipelines | `url_pipeline.rs`, `dir_pipeline.rs`, `detect.rs`, `mapper.rs`, `git_parser.rs`, `pack_reader.rs` | URL exposure-to-stream execution, local recursive file scanning, binary/text policy, Git object mapping, pack parsing, and delta resolution |
+| Forge clients | `forge.rs`, `forge_factory.rs`, `forge_scan.rs`, `*_api.rs` | Provider authentication, repository enumeration, provider-neutral workspace lifecycle, bounded blob reconstruction, and object retrieval |
+| Scanner | `streamer.rs`, `scanner_factory.rs`, `scanner_policy.rs`, `binary_scanner.rs`, `binary_adapter.rs` | Policy-driven pattern, entropy, multiline, database, AI-path, text, binary, and archive analysis |
 | Reliability | `http_client.rs`, `cache.rs`, `checkpoint.rs`, `rate_limiter.rs`, `temp_cleanup.rs` | HTTP resilience, caching, checkpoint integrity, rate control, and cleanup |
-| Reporting | `reporter.rs`, `validation.rs`, `layout.rs`, `ui/theme.rs` | Report formats, input validation, terminal presentation, and optional themes |
+| Reporting | `reporter.rs`, `validation.rs`, `layout.rs`, `ui/theme.rs` | Report formats, aggregate and per-target persistence, input validation, terminal presentation, and optional themes |
 
 ## Quality Gates
 
@@ -175,7 +175,7 @@ cargo test --all-targets
 cargo build --release
 ```
 
-The repository includes unit tests and binary-level integration tests using temporary fixtures. Tests do not require live credentials or external network access.
+The repository includes unit tests, forge identity contract tests using local TCP response servers, and binary-level integration tests using temporary fixtures. Tests do not require live credentials or external network access.
 
 See [DEVELOPMENT.md](DEVELOPMENT.md) for production defaults, maintenance rules, architecture details, and the release checklist.
 

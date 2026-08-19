@@ -14,12 +14,12 @@ The project intentionally favors **offensive discovery effectiveness**. Normal s
 
 | Domain | Primary modules | Responsibility |
 |---|---|---|
-| Orchestration | `src/main.rs`, `src/config.rs`, `src/target_utils.rs`, `src/targets.rs`, `src/outcome.rs` | CLI parsing, runtime scan configuration, target planning, shared repository selection, target dispatch, bounded concurrency, deterministic aggregate outcomes, and error classification |
-| Forge integrations | `src/forge.rs`, `src/forge_factory.rs`, `src/*_api.rs` | Common forge contract, provider construction, authentication, pagination, repository and object access; provider-neutral lifecycle tests and Gitea mock-server response contracts now protect the boundary |
-| Exposure pipeline | `src/detect.rs`, `src/mapper.rs`, `src/git_parser.rs`, `src/pack_reader.rs` | Detect exposed Git metadata, map object graphs, parse loose and packed objects, and resolve deltas |
-| Scanning | `src/streamer.rs`, `src/scanner_policy.rs`, `src/binary_scanner.rs`, `src/binary_adapter.rs` | Policy-driven pattern, entropy, multiline, database, AI-path, text, binary, and archive detection; custom pattern loading is centralized in `streamer::load_patterns_from_file` |
+| Orchestration | `src/main.rs`, `src/config.rs`, `src/targets.rs`, `src/target_utils.rs`, `src/outcome.rs` | CLI parsing, runtime scan configuration, target planning, shared repository selection, target dispatch, bounded concurrency, deterministic aggregate outcomes, and error classification |
+| URL and local pipelines | `src/url_pipeline.rs`, `src/dir_pipeline.rs`, `src/detect.rs`, `src/mapper.rs`, `src/git_parser.rs`, `src/pack_reader.rs` | URL exposure-to-stream execution, local recursive file scanning, binary/text policy, Git object mapping, loose and packed object parsing, and delta resolution |
+| Forge integrations | `src/forge.rs`, `src/forge_factory.rs`, `src/forge_scan.rs`, `src/*_api.rs` | Common forge contract, provider construction, authentication, enumeration, provider-neutral workspace lifecycle, bounded blob reconstruction, and object access; local TCP identity contracts cover all five providers |
+| Scanning | `src/streamer.rs`, `src/scanner_factory.rs`, `src/scanner_policy.rs`, `src/binary_scanner.rs`, `src/binary_adapter.rs` | Policy-driven pattern, entropy, multiline, database, AI-path, text, binary, and archive detection; scanner construction and custom pattern loading are centralized |
 | Reliability | `src/http_client.rs`, `src/cache.rs`, `src/checkpoint.rs`, `src/rate_limiter.rs`, `src/temp_cleanup.rs` | Timeouts, retries, rate limits, cache isolation, HMAC checkpoints, and temporary-resource cleanup |
-| Reporting and validation | `src/reporter.rs`, `src/validation.rs`, `src/layout.rs` | JSON, SARIF, CSV, NDJSON, Markdown, HTML, terminal output, input validation, and layout helpers |
+| Reporting and validation | `src/reporter.rs`, `src/validation.rs`, `src/layout.rs` | JSON, SARIF, CSV, NDJSON, Markdown, HTML, aggregate and per-target persistence, terminal output, input validation, and layout helpers |
 | Theme | `src/ui/theme.rs` | Optional TOML-backed terminal theme configuration |
 
 ## Development Workflow
@@ -33,7 +33,7 @@ cargo test --all-targets
 cargo build --release
 ```
 
-Integration tests execute the compiled binary against temporary local fixtures. They cover local-directory reports, binary placeholder policy, mixed target aggregation, deterministic result ordering, and clean handling of invalid targets. Avoid tests that require live external forge credentials or network availability.
+Integration tests execute the compiled binary against temporary local fixtures. They cover local-directory reports, binary placeholder policy, mixed target aggregation, deterministic result ordering, and clean handling of invalid targets. Adapter unit suites also use local TCP response servers to contract-test identity success and provider-specific HTTP-401 behavior without live credentials. Avoid tests that require external forge credentials or network availability.
 
 When changing scanner policy, add both a normal-mode assertion and an exhaustive-mode assertion. When changing orchestration or forge errors, add a contract test that verifies the resulting `TargetOutcome` status and `TargetErrorCode`.
 
@@ -67,6 +67,6 @@ Release artifacts should contain source, `Cargo.toml`, `Cargo.lock`, `README.md`
 
 ## Maintenance Principles
 
-Keep detector behavior policy-driven rather than duplicating normal and exhaustive implementations. Prefer small domain modules over adding new orchestration branches to `main.rs`. Do not silence Clippy globally. A narrowly scoped allowance is acceptable only when a public data model, compatibility API, or intentionally broad test helper requires it; otherwise remove the unused symbol or refactor the call site.
+Keep detector behavior policy-driven rather than duplicating normal and exhaustive implementations. Prefer small domain modules over adding new orchestration branches to `main.rs`. Keep URL execution in `url_pipeline.rs`, local file policy in `dir_pipeline.rs`, provider-neutral forge lifecycle code in `forge_scan.rs`, scanner construction in `scanner_factory.rs`, and common report finalization in the orchestration boundary. Do not silence Clippy globally. A narrowly scoped allowance is acceptable only when a public data model, compatibility API, or intentionally broad test helper requires it; otherwise remove the unused symbol or refactor the call site.
 
 Document architectural decisions in code comments close to the implementation. Avoid maintaining numerical line-count claims in documentation; use the source tree and automated quality gates as the source of truth.
