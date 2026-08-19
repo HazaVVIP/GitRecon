@@ -378,23 +378,14 @@ async fn run_url_target(context: UrlRunContext<'_>, url: String, fuzz: bool) -> 
         error: None,
     };
     // O-4: Webhook delivery
-    if let Some(ref webhook_url) = args.webhook {
-        if let Ok(json_body) = std::fs::read_to_string(&report_path) {
-            match try_deliver_webhook(rep, args, webhook_url, &json_body).await {
-                Ok(true) => {
-                    if verbose {
-                        println!("  ✔   Webhook delivered to {}", webhook_url);
-                    }
-                }
-                Ok(false) => {
-                    if verbose {
-                        eprintln!("  ⚠   Webhook delivery failed (non-2xx response)");
-                    }
-                }
-                Err(e) => eprintln!("  ✗   Webhook refused: {}", e),
-            }
-        }
-    }
+    deliver_report_webhook_if_configured(
+        rep,
+        args,
+        &report_path,
+        verbose,
+        WebhookSuccessStyle::Standard,
+    )
+    .await;
 
     // A-6: --pipe mode summary
     if args.pipe {
@@ -1255,23 +1246,14 @@ async fn run_token_scan(
     }
 
     // ── 8. Webhook delivery ──────────────────────
-    if let Some(ref webhook_url) = args.webhook {
-        if let Ok(json_body) = std::fs::read_to_string(&report_path) {
-            match try_deliver_webhook(rep, args, webhook_url, &json_body).await {
-                Ok(true) => {
-                    if verbose {
-                        println!("  ✔   Webhook delivered to {}", webhook_url);
-                    }
-                }
-                Ok(false) => {
-                    if verbose {
-                        eprintln!("  ⚠   Webhook delivery failed (non-2xx response)");
-                    }
-                }
-                Err(e) => eprintln!("  ✗   Webhook refused: {}", e),
-            }
-        }
-    }
+    deliver_report_webhook_if_configured(
+        rep,
+        args,
+        &report_path,
+        verbose,
+        WebhookSuccessStyle::Standard,
+    )
+    .await;
 
     // ── 9. Pipe mode summary ─────────────────────
     if args.pipe {
@@ -1476,23 +1458,14 @@ async fn run_gitlab_token_scan(
     }
 
     // ── 8. Webhook delivery ──────────────────────
-    if let Some(ref webhook_url) = args.webhook {
-        if let Ok(json_body) = std::fs::read_to_string(&report_path) {
-            match try_deliver_webhook(rep, args, webhook_url, &json_body).await {
-                Ok(true) => {
-                    if verbose {
-                        println!("  ✔   Webhook delivered to {}", webhook_url);
-                    }
-                }
-                Ok(false) => {
-                    if verbose {
-                        eprintln!("  ⚠   Webhook delivery failed (non-2xx response)");
-                    }
-                }
-                Err(e) => eprintln!("  ✗   Webhook refused: {}", e),
-            }
-        }
-    }
+    deliver_report_webhook_if_configured(
+        rep,
+        args,
+        &report_path,
+        verbose,
+        WebhookSuccessStyle::Standard,
+    )
+    .await;
 
     // ── 9. Pipe mode summary ─────────────────────
     if args.pipe {
@@ -1758,23 +1731,14 @@ async fn run_bitbucket_token_scan(
     }
 
     // ── 8. Webhook delivery ──────────────────────
-    if let Some(ref webhook_url) = args.webhook {
-        if let Ok(json_body) = std::fs::read_to_string(&report_path) {
-            match try_deliver_webhook(rep, args, webhook_url, &json_body).await {
-                Ok(true) => {
-                    if verbose {
-                        println!("  ✔   Webhook delivered to {}", webhook_url);
-                    }
-                }
-                Ok(false) => {
-                    if verbose {
-                        eprintln!("  ⚠   Webhook delivery failed (non-2xx response)");
-                    }
-                }
-                Err(e) => eprintln!("  ✗   Webhook refused: {}", e),
-            }
-        }
-    }
+    deliver_report_webhook_if_configured(
+        rep,
+        args,
+        &report_path,
+        verbose,
+        WebhookSuccessStyle::Standard,
+    )
+    .await;
 
     // ── 9. Pipe mode summary ─────────────────────
     if args.pipe {
@@ -2003,23 +1967,14 @@ async fn run_gitea_token_scan(
     }
 
     // ── 8. Webhook delivery ──────────────────────
-    if let Some(ref webhook_url) = args.webhook {
-        if let Ok(json_body) = std::fs::read_to_string(&report_path) {
-            match try_deliver_webhook(rep, args, webhook_url, &json_body).await {
-                Ok(true) => {
-                    if verbose {
-                        println!("  ✔   Webhook delivered to {}", webhook_url);
-                    }
-                }
-                Ok(false) => {
-                    if verbose {
-                        eprintln!("  ⚠   Webhook delivery failed (non-2xx response)");
-                    }
-                }
-                Err(e) => eprintln!("  ✗   Webhook refused: {}", e),
-            }
-        }
-    }
+    deliver_report_webhook_if_configured(
+        rep,
+        args,
+        &report_path,
+        verbose,
+        WebhookSuccessStyle::Standard,
+    )
+    .await;
 
     // ── 9. Pipe mode summary ─────────────────────
     if args.pipe {
@@ -2233,24 +2188,14 @@ async fn run_azure_token_scan(
     }
 
     // ── 8. Webhook ───────────────────────────────
-    // Sprint 2 (S2.5): Azure previously POSTed via `az_client` (which carries the
-    // operator's Azure PAT in Authorization headers) AND used its own webhook body
-    // format that diverged from the other 4 forges. Both fixed by routing through
-    // try_deliver_webhook — same validation, same plain HTTP client, same schema
-    // (the persisted report body) as GitHub/GitLab/Bitbucket/Gitea.
-    if let Some(ref webhook_url) = args.webhook {
-        if let Ok(json_body) = std::fs::read_to_string(&report_path) {
-            match try_deliver_webhook(rep, args, webhook_url, &json_body).await {
-                Ok(true) => {
-                    if !args.quiet {
-                        println!("  📡  Webhook sent\n");
-                    }
-                }
-                Ok(false) => eprintln!("  ⚠   Webhook delivery failed (non-2xx response)"),
-                Err(e) => eprintln!("  ✗   Webhook refused: {}", e),
-            }
-        }
-    }
+    deliver_report_webhook_if_configured(
+        rep,
+        args,
+        &report_path,
+        !args.quiet,
+        WebhookSuccessStyle::Azure,
+    )
+    .await;
 
     // ── 9. Pipe mode: emit final JSON summary ─────
     if args.pipe {
@@ -2549,23 +2494,14 @@ async fn run_dir_scan(
     if verbose && !args.pipe {
         rep.print_summary(&display_root, &stream_r, &report_path);
     }
-    if let Some(ref webhook_url) = args.webhook {
-        if let Ok(json_body) = std::fs::read_to_string(&report_path) {
-            match try_deliver_webhook(rep, args, webhook_url, &json_body).await {
-                Ok(true) => {
-                    if verbose {
-                        println!("  ✔   Webhook delivered to {}", webhook_url);
-                    }
-                }
-                Ok(false) => {
-                    if verbose {
-                        eprintln!("  ⚠   Webhook delivery failed (non-2xx response)");
-                    }
-                }
-                Err(e) => eprintln!("  ✗   Webhook refused: {}", e),
-            }
-        }
-    }
+    deliver_report_webhook_if_configured(
+        rep,
+        args,
+        &report_path,
+        verbose,
+        WebhookSuccessStyle::Standard,
+    )
+    .await;
 
     if args.pipe {
         let summary = serde_json::json!({
@@ -2690,6 +2626,45 @@ async fn try_deliver_webhook(
             &plain_client,
         )
         .await)
+}
+
+#[derive(Clone, Copy)]
+enum WebhookSuccessStyle {
+    Standard,
+    Azure,
+}
+
+async fn deliver_report_webhook_if_configured(
+    reporter: &Reporter,
+    args: &Cli,
+    report_path: &str,
+    verbose: bool,
+    style: WebhookSuccessStyle,
+) {
+    let Some(webhook_url) = args.webhook.as_deref() else {
+        return;
+    };
+    let Ok(json_body) = std::fs::read_to_string(report_path) else {
+        return;
+    };
+    match try_deliver_webhook(reporter, args, webhook_url, &json_body).await {
+        Ok(true) => {
+            if verbose {
+                match style {
+                    WebhookSuccessStyle::Standard => {
+                        println!("  ✔   Webhook delivered to {}", webhook_url);
+                    }
+                    WebhookSuccessStyle::Azure => println!("  📡  Webhook sent\n"),
+                }
+            }
+        }
+        Ok(false) => {
+            if verbose {
+                eprintln!("  ⚠   Webhook delivery failed (non-2xx response)");
+            }
+        }
+        Err(error) => eprintln!("  ✗   Webhook refused: {}", error),
+    }
 }
 
 // ════════════════════════════════════════════════
