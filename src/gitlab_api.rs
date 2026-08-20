@@ -691,4 +691,37 @@ mod tests {
             .unwrap();
         assert_eq!(content, b"fixture-value");
     }
+    #[tokio::test]
+    async fn mock_server_contract_follows_gitlab_group_pagination() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let base_url = format!("http://{address}");
+        let first_body = r#"[{"full_path":"fixture/first-group"}]"#;
+        let second_body = r#"[{"full_path":"fixture/second-group"}]"#;
+        let next_header = format!("<{base_url}/page-2>; rel=\"next\"");
+        tokio::spawn(async move {
+            for (body, link) in [(first_body, Some(next_header)), (second_body, None)] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0u8; 1024];
+                let _ = socket.read(&mut request).await;
+                let link_header = link
+                    .map(|value| format!("Link: {value}\r\n"))
+                    .unwrap_or_default();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n{link_header}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+
+        let (client, api_base) =
+            build_gitlab_client(HttpConfig::default(), "synthetic-token", Some(&base_url)).unwrap();
+        let groups = list_user_groups(&client, &api_base).await.unwrap();
+        assert_eq!(groups, vec!["fixture/first-group", "fixture/second-group"]);
+    }
 }
