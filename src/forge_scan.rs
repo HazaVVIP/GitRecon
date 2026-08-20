@@ -19,7 +19,6 @@ use tokio::sync::Mutex;
 pub(crate) trait BlobEntry: Clone + Send {
     fn is_blob(&self) -> bool;
     fn path(&self) -> &str;
-    fn sha(&self) -> &str;
     fn size(&self) -> Option<u64>;
 }
 
@@ -32,10 +31,6 @@ macro_rules! impl_blob_entry {
 
             fn path(&self) -> &str {
                 &self.path
-            }
-
-            fn sha(&self) -> &str {
-                &self.sha
             }
 
             fn size(&self) -> Option<u64> {

@@ -215,6 +215,18 @@ pub trait Forge: Send + Sync {
     /// * `Err` on failure
     async fn get_blob(&self, repo: &Repository, sha: &str) -> anyhow::Result<Vec<u8>>;
 
+    /// Fetch a tree entry's content using its path-aware metadata when required.
+    ///
+    /// Providers with SHA-addressable blob endpoints inherit the default behavior;
+    /// providers whose source API requires a file path may override this method.
+    async fn get_blob_entry(
+        &self,
+        repo: &Repository,
+        entry: &TreeEntry,
+    ) -> anyhow::Result<Vec<u8>> {
+        self.get_blob(repo, &entry.sha).await
+    }
+
     /// Get current rate limit status.
     ///
     /// # Returns

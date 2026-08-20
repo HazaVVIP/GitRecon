@@ -337,6 +337,22 @@ impl Forge for BitbucketForgeClient {
         get_blob_content(&self.client, &self.api_base, &repo.owner, &repo.name, sha).await
     }
 
+    async fn get_blob_entry(
+        &self,
+        repo: &Repository,
+        entry: &TreeEntry,
+    ) -> anyhow::Result<Vec<u8>> {
+        get_file_by_path(
+            &self.client,
+            &self.api_base,
+            &repo.owner,
+            &repo.name,
+            &entry.sha,
+            &entry.path,
+        )
+        .await
+    }
+
     fn rate_limit_remaining(&self) -> Option<(u32, Duration)> {
         self.rate_limit_remaining.lock().ok().and_then(|guard| {
             guard.as_ref().map(|(remaining, reset)| {
@@ -902,6 +918,37 @@ mod tests {
             .unwrap();
         assert_eq!(content, b"fixture-value");
     }
+    #[tokio::test]
+    async fn mock_server_contract_uses_path_aware_forge_blob_retrieval() {
+        let base_url = spawn_contract_server(200, "fixture-value").await;
+        let (client, api_base) =
+            build_bitbucket_client(HttpConfig::default(), "synthetic-token", Some(&base_url))
+                .unwrap();
+        let forge = BitbucketForgeClient::new(client, api_base);
+        let repo = Repository {
+            full_name: "fixture/repo".to_string(),
+            owner: "fixture".to_string(),
+            name: "repo".to_string(),
+            private: true,
+            default_branch: "main".to_string(),
+            clone_url: String::new(),
+            platform: Platform::Bitbucket,
+            stars: None,
+            forks: None,
+            description: None,
+            updated_at: None,
+        };
+        let entry = TreeEntry {
+            path: "config.txt".to_string(),
+            obj_type: "blob".to_string(),
+            sha: "sha".to_string(),
+            size: Some(13),
+            mode: None,
+        };
+        let content = forge.get_blob_entry(&repo, &entry).await.unwrap();
+        assert_eq!(content, b"fixture-value");
+    }
+
     #[tokio::test]
     async fn mock_server_contract_follows_bitbucket_workspace_pagination() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};

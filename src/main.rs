@@ -60,7 +60,6 @@ use std::time::{Duration, Instant};
 use clap::Parser;
 use forge::Forge;
 use forge_factory::create_forge_client;
-use forge_scan::BlobEntry;
 use futures::StreamExt;
 use outcome::{classify_error, ScanSummary, TargetErrorCode, TargetOutcome, TargetStatus};
 use scanner_factory::build_streamer;
@@ -1057,6 +1056,48 @@ fn build_forge_file_scan_config(
     (started_at, scan_config)
 }
 
+struct SelectedForgeScan<'a> {
+    args: &'a Cli,
+    verbose: bool,
+    extra_patterns: Vec<streamer::DynPattern>,
+    forge: Arc<dyn Forge>,
+    selected_repos: &'a [forge::Repository],
+    report_name: &'a str,
+    persist_source: bool,
+    temp_prefix: &'a str,
+}
+
+async fn scan_selected_forge_repositories(
+    request: SelectedForgeScan<'_>,
+) -> streamer::StreamResult {
+    let SelectedForgeScan {
+        args,
+        verbose,
+        extra_patterns,
+        forge,
+        selected_repos,
+        report_name,
+        persist_source,
+        temp_prefix,
+    } = request;
+    let (started_at, scan_config) = build_forge_file_scan_config(args, verbose, extra_patterns);
+    let workspace_lifecycle = forge_scan::WorkspaceLifecycle::new(
+        Path::new(&args.output),
+        report_name,
+        persist_source,
+        temp_prefix,
+    );
+    forge_scan::run_repository_scan_loop(
+        forge,
+        selected_repos,
+        &workspace_lifecycle,
+        scan_config,
+        |forge, repo, entry, _head_sha| async move { forge.get_blob_entry(&repo, &entry).await },
+        started_at,
+    )
+    .await
+}
+
 // ════════════════════════════════════════════════
 // TOKEN SCAN PIPELINE
 // ════════════════════════════════════════════════
@@ -1210,22 +1251,16 @@ async fn run_token_scan(
     }
 
     // ── 4. Acquire source workspace and scan selected repositories ─────
-    let (t0, scan_config) = build_forge_file_scan_config(args, verbose, extra_patterns);
-    let workspace_lifecycle = forge_scan::WorkspaceLifecycle::new(
-        Path::new(&args.output),
-        &format!("token_{}", login),
+    let stream_r = scan_selected_forge_repositories(SelectedForgeScan {
+        args,
+        verbose,
+        extra_patterns,
+        forge: Arc::new(gh_forge),
+        selected_repos: &selected_repos,
+        report_name: &format!("token_{}", login),
         persist_source,
-        "gitrecon_token_scan",
-    );
-
-    let stream_r = forge_scan::run_repository_scan_loop(
-        Arc::new(gh_forge),
-        &selected_repos,
-        &workspace_lifecycle,
-        scan_config,
-        |forge, repo, entry, _head_sha| async move { forge.get_blob(&repo, entry.sha()).await },
-        t0,
-    )
+        temp_prefix: "gitrecon_token_scan",
+    })
     .await;
 
     // ── 6. Terminal summary ──────────────────────
@@ -1367,22 +1402,16 @@ async fn run_gitlab_token_scan(
     }
 
     // ── 4. Acquire source workspace and scan selected repositories ─────
-    let (t0, scan_config) = build_forge_file_scan_config(args, verbose, extra_patterns);
-    let workspace_lifecycle = forge_scan::WorkspaceLifecycle::new(
-        Path::new(&args.output),
-        &format!("gitlab_{}", login),
+    let stream_r = scan_selected_forge_repositories(SelectedForgeScan {
+        args,
+        verbose,
+        extra_patterns,
+        forge: gl_forge,
+        selected_repos: &selected_repos,
+        report_name: &format!("gitlab_{}", login),
         persist_source,
-        "gitrecon_gitlab_scan",
-    );
-
-    let stream_r = forge_scan::run_repository_scan_loop(
-        gl_forge,
-        &selected_repos,
-        &workspace_lifecycle,
-        scan_config,
-        |forge, repo, entry, _head_sha| async move { forge.get_blob(&repo, entry.sha()).await },
-        t0,
-    )
+        temp_prefix: "gitrecon_gitlab_scan",
+    })
     .await;
 
     // ── 6. Terminal summary ──────────────────────
@@ -1528,36 +1557,16 @@ async fn run_bitbucket_token_scan(
     }
 
     // ── 4. Acquire source workspace and scan selected repositories ─────
-    let (t0, scan_config) = build_forge_file_scan_config(args, verbose, extra_patterns);
-    let workspace_lifecycle = forge_scan::WorkspaceLifecycle::new(
-        Path::new(&args.output),
-        &format!("bitbucket_{}", login),
+    let stream_r = scan_selected_forge_repositories(SelectedForgeScan {
+        args,
+        verbose,
+        extra_patterns,
+        forge: bb_forge,
+        selected_repos: &selected_repos,
+        report_name: &format!("bitbucket_{}", login),
         persist_source,
-        "gitrecon_bitbucket_scan",
-    );
-
-    let stream_r = forge_scan::run_repository_scan_loop(
-        bb_forge,
-        &selected_repos,
-        &workspace_lifecycle,
-        scan_config,
-        move |_forge, repo, entry, head_sha| {
-            let client = bb_client.clone();
-            let api_base = api_base.clone();
-            async move {
-                bitbucket_api::get_file_by_path(
-                    &client,
-                    &api_base,
-                    &repo.owner,
-                    &repo.name,
-                    &head_sha,
-                    &entry.path,
-                )
-                .await
-            }
-        },
-        t0,
-    )
+        temp_prefix: "gitrecon_bitbucket_scan",
+    })
     .await;
 
     // ── 6. Terminal summary ──────────────────────
@@ -1703,22 +1712,16 @@ async fn run_gitea_token_scan(
     }
 
     // ── 4. Acquire source workspace and scan selected repositories ─────
-    let (t0, scan_config) = build_forge_file_scan_config(args, verbose, extra_patterns);
-    let workspace_lifecycle = forge_scan::WorkspaceLifecycle::new(
-        Path::new(&args.output),
-        &format!("gitea_{}", login),
+    let stream_r = scan_selected_forge_repositories(SelectedForgeScan {
+        args,
+        verbose,
+        extra_patterns,
+        forge: gt_forge,
+        selected_repos: &selected_repos,
+        report_name: &format!("gitea_{}", login),
         persist_source,
-        "gitrecon_gitea_scan",
-    );
-
-    let stream_r = forge_scan::run_repository_scan_loop(
-        gt_forge,
-        &selected_repos,
-        &workspace_lifecycle,
-        scan_config,
-        |forge, repo, entry, _head_sha| async move { forge.get_blob(&repo, entry.sha()).await },
-        t0,
-    )
+        temp_prefix: "gitrecon_gitea_scan",
+    })
     .await;
 
     // ── 6. Terminal summary ──────────────────────
@@ -1870,28 +1873,16 @@ async fn run_azure_token_scan(
     }
 
     // ── 4. Acquire source workspace and scan selected repositories ─────
-    let (t0, scan_config) = build_forge_file_scan_config(args, verbose, extra_patterns);
-    let workspace_lifecycle = forge_scan::WorkspaceLifecycle::new(
-        Path::new(&args.output),
-        &format!("azure_{}", login),
+    let stream_r = scan_selected_forge_repositories(SelectedForgeScan {
+        args,
+        verbose,
+        extra_patterns,
+        forge: az_forge,
+        selected_repos: &selected_repos,
+        report_name: &format!("azure_{}", login),
         persist_source,
-        "gitrecon_azure_scan",
-    );
-
-    let stream_r = forge_scan::run_repository_scan_loop(
-        az_forge,
-        &selected_repos,
-        &workspace_lifecycle,
-        scan_config,
-        move |_forge, repo, entry, _head_sha| {
-            let client = az_client.clone();
-            let api_base = api_base.clone();
-            async move {
-                azure_api::get_blob_content(&client, &api_base, &repo.full_name, entry.sha()).await
-            }
-        },
-        t0,
-    )
+        temp_prefix: "gitrecon_azure_scan",
+    })
     .await;
 
     // ── 6. Terminal summary ──────────────────────
