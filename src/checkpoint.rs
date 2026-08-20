@@ -10,14 +10,16 @@
 //! - Configuration fingerprint (hash of args)
 //! - SHA1 identifiers (hex strings of git objects)
 //! - Progress counters (counts, indices)
+//! - Finding metadata and matched values needed to preserve report continuity on resume
 //!
 //! **What is NOT stored:**
-//! - Actual secret findings (API keys, tokens, passwords, etc.)
 //! - Decrypted blob contents
-//! - Any sensitive plaintext data
+//! - Unrelated source files or full repository snapshots
+//! - Any data beyond the serialized finding/checkpoint fields
 //!
-//! This design means resuming a checkpoint won't restore previously found secret values—only
-//! scan progress. This is an intentional security trade-off acceptable for pentesting.
+//! Resuming restores processed-object state and serialized findings so a resumed report does not
+//! lose findings collected before interruption. Checkpoint files therefore remain sensitive and
+//! are protected with restrictive permissions, integrity validation, and HMAC verification.
 //!
 //! **File Permissions:** All checkpoint files are created with mode 0600 (owner read/write only).
 //!
@@ -1507,6 +1509,34 @@ mod tests {
         assert_ne!(fp1, fp3);
         assert_ne!(normal_policy, exhaustive_policy);
         assert_eq!(exhaustive_policy, exhaustive_policy_again);
+    }
+
+    #[test]
+    fn finding_checkpoint_roundtrip_preserves_resume_metadata() {
+        let finding = crate::streamer::Finding {
+            filename: "fixture.txt".to_string(),
+            line: 7,
+            pattern_id: "fixture_pattern".to_string(),
+            description: "Fixture finding".to_string(),
+            severity: "HIGH".to_string(),
+            match_str: "fixture-value".to_string(),
+            context: "fixture context".to_string(),
+            is_deleted: false,
+            commit_sha1: Some("fixture-sha".to_string()),
+            confidence_adjustment: Some("fixture adjustment".to_string()),
+        };
+        let checkpoint = FindingCheckpoint::from(finding.clone());
+        let restored = crate::streamer::Finding::from(checkpoint);
+        assert_eq!(restored.filename, finding.filename);
+        assert_eq!(restored.line, finding.line);
+        assert_eq!(restored.pattern_id, finding.pattern_id);
+        assert_eq!(restored.match_str, finding.match_str);
+        assert_eq!(restored.context, finding.context);
+        assert_eq!(restored.commit_sha1, finding.commit_sha1);
+        assert_eq!(
+            restored.confidence_adjustment,
+            finding.confidence_adjustment
+        );
     }
 
     #[test]
