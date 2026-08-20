@@ -2343,6 +2343,17 @@ async fn deliver_report_webhook_if_configured(
     }
 }
 
+fn validate_parallel_targets(value: usize) -> Result<(), String> {
+    if value == 0 || value > 1000 {
+        Err(format!(
+            "--parallel-targets must be in [1, 1000], got {}",
+            value
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 // ════════════════════════════════════════════════
 // MAIN PIPELINE
 // ════════════════════════════════════════════════
@@ -2405,6 +2416,10 @@ async fn main() {
     // Sprint 4 (S4.1): explicit numeric range checks. Clap's value_parser!.range()
     // only supports the fixed-width numeric types (u8..u64/i8..i64), not `usize`,
     // so the usize fields validate here at start-up instead.
+    if let Err(error) = validate_parallel_targets(args.parallel_targets) {
+        eprintln!("  ✘  {}", error);
+        std::process::exit(2);
+    }
     if args.workers == 0 || args.workers > 1000 {
         eprintln!("  ✘  --workers must be in [1, 1000], got {}", args.workers);
         std::process::exit(2);
@@ -3063,6 +3078,14 @@ pub fn detect_platform(url: &str) -> Option<forge::Platform> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parallel_target_bounds_reject_zero_and_excessive_values() {
+        assert!(validate_parallel_targets(0).is_err());
+        assert!(validate_parallel_targets(1001).is_err());
+        assert!(validate_parallel_targets(1).is_ok());
+        assert!(validate_parallel_targets(1000).is_ok());
+    }
 
     #[test]
     fn cli_offensive_defaults_and_opt_outs() {
