@@ -60,6 +60,17 @@ The following defaults are deliberate and should not be changed casually:
 | TLS verification | Enabled | `--insecure` only for controlled investigations |
 | Parallel target concurrency | Maximum 1000 | `--parallel-targets N` within the validated range |
 
+## Scanner Benchmarking
+
+The repository includes a black-box local-directory benchmark at `tools/benchmark_local_scan.py`. Run it against the optimized release binary with:
+
+```bash
+cargo build --release
+python3 tools/benchmark_local_scan.py --repetitions 5
+```
+
+The benchmark creates temporary, non-sensitive fixtures and reports normal versus exhaustive scan timings. Use it to compare commits on the same machine and build profile; do not treat the output as a cross-machine performance claim. A baseline run on the development sandbox with 40 files and 250 lines per file, using five repetitions, produced median times of approximately `0.3200s` in normal mode and `0.3193s` in exhaustive mode.
+
 ## Release Checklist
 
 Before publishing a release, confirm that the version in `Cargo.toml`, the crate-level CLI description, and README metadata agree. Run formatting, Clippy, all tests, and a release build. Review `git status --short` for generated files, temporary scripts, credentials, and unexpected binaries. Confirm that reports handle operational metadata according to the selected output mode, webhook validation remains enabled by default, and no test depends on an external account or service.
