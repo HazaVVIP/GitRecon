@@ -2479,9 +2479,8 @@ fn scan_content_with_policy(
     }
     // S-1: SCAN-001 Enhanced context-aware confidence adjustment with custom keywords
     for f in findings.iter_mut() {
-        let lines_ref: Vec<&str> = content.lines().collect();
         if let Some(reason) = analyze_context(
-            &lines_ref,
+            &lines,
             f.line.saturating_sub(1),
             policy.false_positive_keywords,
         ) {
