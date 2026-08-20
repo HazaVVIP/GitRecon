@@ -1098,9 +1098,105 @@ async fn scan_selected_forge_repositories(
     .await
 }
 
+struct PreparedForgeSelection {
+    repositories: Vec<forge::Repository>,
+    persist_source: bool,
+}
+
+fn prepare_forge_selection(
+    args: &Cli,
+    verbose: bool,
+    interactive: bool,
+    repositories: &[forge::Repository],
+    selected_indexes: Vec<usize>,
+) -> Option<PreparedForgeSelection> {
+    let selected_repos = select_by_indexes(repositories, selected_indexes);
+    if selected_repos.is_empty() {
+        return None;
+    }
+    if verbose {
+        println!(
+            "  ✔  Selected {} repositories for scanning",
+            selected_repos.len()
+        );
+    }
+    let persist_source = if interactive {
+        prompt_save_choice(args.save)
+    } else {
+        args.save
+    };
+    if verbose {
+        println!(
+            "  ◈  Source persistence: {}\\n",
+            if persist_source {
+                "enabled (--save behavior)"
+            } else {
+                "disabled (temporary workspace)"
+            }
+        );
+    }
+    Some(PreparedForgeSelection {
+        repositories: selected_repos,
+        persist_source,
+    })
+}
+
 // ════════════════════════════════════════════════
 // TOKEN SCAN PIPELINE
 // ════════════════════════════════════════════════
+
+async fn collect_github_repositories(
+    client: &HttpClient,
+    verbose: bool,
+    repo_allowlist: Option<&[String]>,
+) -> anyhow::Result<Vec<forge::Repository>> {
+    if verbose {
+        println!("  ◈  Enumerating repositories...");
+    }
+    let mut all_repos = github_api::list_repos(client)
+        .await
+        .map_err(|error| anyhow::anyhow!("Failed to list repositories: {}", error))?;
+    match github_api::list_user_orgs(client).await {
+        Ok(orgs) => {
+            for org in orgs {
+                match github_api::list_org_repos(client, &org).await {
+                    Ok(org_repos) => all_repos.extend(org_repos),
+                    Err(error) => {
+                        if verbose {
+                            eprintln!("  ⚠   Skipping org '{}': {}", org, error);
+                        }
+                    }
+                }
+            }
+        }
+        Err(error) => {
+            if verbose {
+                eprintln!("  ⚠   Could not list orgs: {}", error);
+            }
+        }
+    }
+    let mut seen_names = std::collections::HashSet::new();
+    all_repos.retain(|repo| seen_names.insert(repo.full_name.clone()));
+    if let Some(allowlist) = repo_allowlist {
+        let requested: std::collections::HashSet<String> = allowlist
+            .iter()
+            .map(|name| name.trim().trim_matches('/').to_ascii_lowercase())
+            .filter(|name| !name.is_empty())
+            .collect();
+        if requested.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Token target repository allowlist is empty."
+            ));
+        }
+        all_repos.retain(|repo| requested.contains(&repo.full_name.to_ascii_lowercase()));
+        if all_repos.is_empty() {
+            return Err(anyhow::anyhow!(
+                "None of the requested repositories are accessible."
+            ));
+        }
+    }
+    Ok(all_repos.iter().map(github_repo_to_repository).collect())
+}
 
 #[allow(clippy::too_many_lines)]
 async fn run_token_scan(
@@ -1145,58 +1241,8 @@ async fn run_token_scan(
     }
 
     // ── 3. Enumerate repositories ────────────────
-    if verbose {
-        println!("  ◈  Enumerating repositories...");
-    }
-
-    let mut all_repos = match github_api::list_repos(&gh_client).await {
-        Ok(r) => r,
-        Err(e) => return Err(anyhow::anyhow!("Failed to list repositories: {}", e)),
-    };
-
-    // Include repos from organisations the user belongs to
-    match github_api::list_user_orgs(&gh_client).await {
-        Ok(orgs) => {
-            for org in orgs {
-                match github_api::list_org_repos(&gh_client, &org).await {
-                    Ok(org_repos) => all_repos.extend(org_repos),
-                    Err(e) => {
-                        if verbose {
-                            eprintln!("  ⚠   Skipping org '{}': {}", org, e);
-                        }
-                    }
-                }
-            }
-        }
-        Err(e) => {
-            if verbose {
-                eprintln!("  ⚠   Could not list orgs: {}", e);
-            }
-        }
-    }
-
-    // Deduplicate by full_name (user repos and org repos can overlap)
-    let mut seen_names = std::collections::HashSet::new();
-    all_repos.retain(|r| seen_names.insert(r.full_name.clone()));
-    if let Some(allowlist) = repo_allowlist {
-        let requested: std::collections::HashSet<String> = allowlist
-            .iter()
-            .map(|name| name.trim().trim_matches('/').to_ascii_lowercase())
-            .filter(|name| !name.is_empty())
-            .collect();
-        if requested.is_empty() {
-            return Err(anyhow::anyhow!(
-                "Token target repository allowlist is empty."
-            ));
-        }
-        all_repos.retain(|repo| requested.contains(&repo.full_name.to_ascii_lowercase()));
-        if all_repos.is_empty() {
-            return Err(anyhow::anyhow!(
-                "None of the requested repositories are accessible."
-            ));
-        }
-    }
-    let total_repos = all_repos.len();
+    let unified_repos = collect_github_repositories(&gh_client, verbose, repo_allowlist).await?;
+    let total_repos = unified_repos.len();
     if total_repos == 0 {
         if verbose {
             println!("  ⚠   Tidak ada repository yang bisa di-scan.\n");
@@ -1207,49 +1253,23 @@ async fn run_token_scan(
             risk_score: 0,
         });
     }
-
     if verbose {
         println!("  ✔  Found {} repositories\n", total_repos);
     }
-
-    let unified_repos: Vec<forge::Repository> =
-        all_repos.iter().map(github_repo_to_repository).collect();
     let interactive = !args.quiet && !args.pipe;
     let selected_indexes = if interactive {
         prompt_repo_selection(&unified_repos)
     } else {
         (0..unified_repos.len()).collect()
     };
-    let selected_repos: Vec<forge::Repository> =
-        select_by_indexes(&unified_repos, selected_indexes);
-    let selected_repo_count = selected_repos.len();
-    if selected_repo_count == 0 {
+    let Some(selection) =
+        prepare_forge_selection(args, verbose, interactive, &unified_repos, selected_indexes)
+    else {
         return Err(anyhow::anyhow!("Tidak ada repository valid yang dipilih."));
-    }
-
-    if verbose {
-        println!(
-            "  ✔  Selected {} repositories for scanning",
-            selected_repo_count
-        );
-    }
-
-    let persist_source = if interactive {
-        prompt_save_choice(args.save)
-    } else {
-        args.save
     };
-    if verbose {
-        println!(
-            "  ◈  Source persistence: {}\n",
-            if persist_source {
-                "enabled (--save behavior)"
-            } else {
-                "disabled (temporary workspace)"
-            }
-        );
-    }
-
+    let selected_repos = selection.repositories;
+    let selected_repo_count = selected_repos.len();
+    let persist_source = selection.persist_source;
     // ── 4. Acquire source workspace and scan selected repositories ─────
     let stream_r = scan_selected_forge_repositories(SelectedForgeScan {
         args,
@@ -1268,31 +1288,16 @@ async fn run_token_scan(
         rep.print_findings_summary(&stream_r.findings);
     }
 
-    let report_name = format!("token_{}", login);
-    let summary = finalize_provider_report(
+    let summary = finalize_standard_token_report(StandardTokenReport {
         args,
         rep,
-        ProviderReport {
-            report_name: &report_name,
-            stream_r: &stream_r,
-            report_context: ReportContext::Token {
-                login: &login,
-                repo_count: selected_repo_count,
-            },
-            verbose,
-            webhook_style: WebhookSuccessStyle::Standard,
-            pipe_summary: serde_json::json!({
-                "type": "summary",
-                "mode": "token",
-                "user": login,
-                "repos": selected_repo_count,
-                "findings": stream_r.findings.len(),
-                "risk_score": stream_r.risk_score(),
-            }),
-            token_report: Some((&login, selected_repo_count)),
-            print_saved_notice: false,
-        },
-    )
+        login: &login,
+        repo_count: selected_repo_count,
+        mode: "token",
+        report_prefix: "token",
+        stream_r: &stream_r,
+        verbose,
+    })
     .await;
     Ok(summary)
 }
@@ -1366,41 +1371,17 @@ async fn run_gitlab_token_scan(
     let selected_indexes = if interactive {
         prompt_gitlab_repo_selection(&gl_projects)
     } else {
-        (0..gl_projects.len()).collect()
+        (0..all_repos.len()).collect()
     };
-
-    let selected_repos: Vec<forge::Repository> = select_by_indexes(&all_repos, selected_indexes);
-
-    let selected_repo_count = selected_repos.len();
-    if selected_repo_count == 0 {
+    let Some(selection) =
+        prepare_forge_selection(args, verbose, interactive, &all_repos, selected_indexes)
+    else {
         eprintln!("  ✘  Tidak ada repository valid yang dipilih.");
         return Ok(());
-    }
-
-    if verbose {
-        println!(
-            "  ✔  Selected {} repositories for scanning",
-            selected_repo_count
-        );
-    }
-
-    let persist_source = if interactive {
-        prompt_save_choice(args.save)
-    } else {
-        args.save
     };
-
-    if verbose {
-        println!(
-            "  ◈  Source persistence: {}\n",
-            if persist_source {
-                "enabled (--save behavior)"
-            } else {
-                "disabled (temporary workspace)"
-            }
-        );
-    }
-
+    let selected_repos = selection.repositories;
+    let selected_repo_count = selected_repos.len();
+    let persist_source = selection.persist_source;
     // ── 4. Acquire source workspace and scan selected repositories ─────
     let stream_r = scan_selected_forge_repositories(SelectedForgeScan {
         args,
@@ -1418,31 +1399,16 @@ async fn run_gitlab_token_scan(
     if verbose && !args.pipe {
         rep.print_findings_summary(&stream_r.findings);
     }
-    let report_name = format!("gitlab_{}", login);
-    let _ = finalize_provider_report(
+    let _ = finalize_standard_token_report(StandardTokenReport {
         args,
         rep,
-        ProviderReport {
-            report_name: &report_name,
-            stream_r: &stream_r,
-            report_context: ReportContext::Token {
-                login: &login,
-                repo_count: selected_repo_count,
-            },
-            verbose,
-            webhook_style: WebhookSuccessStyle::Standard,
-            pipe_summary: serde_json::json!({
-                "type": "summary",
-                "mode": "gitlab_token",
-                "user": login,
-                "repos": selected_repo_count,
-                "findings": stream_r.findings.len(),
-                "risk_score": stream_r.risk_score(),
-            }),
-            token_report: Some((&login, selected_repo_count)),
-            print_saved_notice: false,
-        },
-    )
+        login: &login,
+        repo_count: selected_repo_count,
+        mode: "gitlab_token",
+        report_prefix: "gitlab",
+        stream_r: &stream_r,
+        verbose,
+    })
     .await;
     Ok(())
 }
@@ -1521,41 +1487,17 @@ async fn run_bitbucket_token_scan(
     let selected_indexes = if interactive {
         prompt_bitbucket_repo_selection(&bb_repos)
     } else {
-        (0..bb_repos.len()).collect()
+        (0..all_repos.len()).collect()
     };
-
-    let selected_repos: Vec<forge::Repository> = select_by_indexes(&all_repos, selected_indexes);
-
-    let selected_repo_count = selected_repos.len();
-    if selected_repo_count == 0 {
+    let Some(selection) =
+        prepare_forge_selection(args, verbose, interactive, &all_repos, selected_indexes)
+    else {
         eprintln!("  ✘  Tidak ada repository valid yang dipilih.");
         return Ok(());
-    }
-
-    if verbose {
-        println!(
-            "  ✔  Selected {} repositories for scanning",
-            selected_repo_count
-        );
-    }
-
-    let persist_source = if interactive {
-        prompt_save_choice(args.save)
-    } else {
-        args.save
     };
-
-    if verbose {
-        println!(
-            "  ◈  Source persistence: {}\n",
-            if persist_source {
-                "enabled (--save behavior)"
-            } else {
-                "disabled (temporary workspace)"
-            }
-        );
-    }
-
+    let selected_repos = selection.repositories;
+    let selected_repo_count = selected_repos.len();
+    let persist_source = selection.persist_source;
     // ── 4. Acquire source workspace and scan selected repositories ─────
     let stream_r = scan_selected_forge_repositories(SelectedForgeScan {
         args,
@@ -1574,31 +1516,16 @@ async fn run_bitbucket_token_scan(
         rep.print_findings_summary(&stream_r.findings);
     }
 
-    let report_name = format!("bitbucket_{}", login);
-    let _ = finalize_provider_report(
+    let _ = finalize_standard_token_report(StandardTokenReport {
         args,
         rep,
-        ProviderReport {
-            report_name: &report_name,
-            stream_r: &stream_r,
-            report_context: ReportContext::Token {
-                login: &login,
-                repo_count: selected_repo_count,
-            },
-            verbose,
-            webhook_style: WebhookSuccessStyle::Standard,
-            pipe_summary: serde_json::json!({
-                "type": "summary",
-                "mode": "bitbucket_token",
-                "user": login,
-                "repos": selected_repo_count,
-                "findings": stream_r.findings.len(),
-                "risk_score": stream_r.risk_score(),
-            }),
-            token_report: Some((&login, selected_repo_count)),
-            print_saved_notice: false,
-        },
-    )
+        login: &login,
+        repo_count: selected_repo_count,
+        mode: "bitbucket_token",
+        report_prefix: "bitbucket",
+        stream_r: &stream_r,
+        verbose,
+    })
     .await;
     Ok(())
 }
@@ -1676,41 +1603,17 @@ async fn run_gitea_token_scan(
     let selected_indexes = if interactive {
         prompt_gitea_repo_selection(&gt_repos)
     } else {
-        (0..gt_repos.len()).collect()
+        (0..all_repos.len()).collect()
     };
-
-    let selected_repos: Vec<forge::Repository> = select_by_indexes(&all_repos, selected_indexes);
-
-    let selected_repo_count = selected_repos.len();
-    if selected_repo_count == 0 {
+    let Some(selection) =
+        prepare_forge_selection(args, verbose, interactive, &all_repos, selected_indexes)
+    else {
         eprintln!("  ✘  Tidak ada repository valid yang dipilih.");
         return Ok(());
-    }
-
-    if verbose {
-        println!(
-            "  ✔  Selected {} repositories for scanning",
-            selected_repo_count
-        );
-    }
-
-    let persist_source = if interactive {
-        prompt_save_choice(args.save)
-    } else {
-        args.save
     };
-
-    if verbose {
-        println!(
-            "  ◈  Source persistence: {}\n",
-            if persist_source {
-                "enabled (--save behavior)"
-            } else {
-                "disabled (temporary workspace)"
-            }
-        );
-    }
-
+    let selected_repos = selection.repositories;
+    let selected_repo_count = selected_repos.len();
+    let persist_source = selection.persist_source;
     // ── 4. Acquire source workspace and scan selected repositories ─────
     let stream_r = scan_selected_forge_repositories(SelectedForgeScan {
         args,
@@ -1729,31 +1632,16 @@ async fn run_gitea_token_scan(
         rep.print_findings_summary(&stream_r.findings);
     }
 
-    let report_name = format!("gitea_{}", login);
-    let _ = finalize_provider_report(
+    let _ = finalize_standard_token_report(StandardTokenReport {
         args,
         rep,
-        ProviderReport {
-            report_name: &report_name,
-            stream_r: &stream_r,
-            report_context: ReportContext::Token {
-                login: &login,
-                repo_count: selected_repo_count,
-            },
-            verbose,
-            webhook_style: WebhookSuccessStyle::Standard,
-            pipe_summary: serde_json::json!({
-                "type": "summary",
-                "mode": "gitea_token",
-                "user": login,
-                "repos": selected_repo_count,
-                "findings": stream_r.findings.len(),
-                "risk_score": stream_r.risk_score(),
-            }),
-            token_report: Some((&login, selected_repo_count)),
-            print_saved_notice: false,
-        },
-    )
+        login: &login,
+        repo_count: selected_repo_count,
+        mode: "gitea_token",
+        report_prefix: "gitea",
+        stream_r: &stream_r,
+        verbose,
+    })
     .await;
     Ok(())
 }
@@ -1837,41 +1725,16 @@ async fn run_azure_token_scan(
     let selected_indexes = if interactive {
         prompt_azure_repo_selection(&az_repos)
     } else {
-        (0..az_repos.len()).collect()
+        (0..all_repos.len()).collect()
     };
-
-    let selected_repos: Vec<forge::Repository> = select_by_indexes(&all_repos, selected_indexes);
-
-    let selected_repo_count = selected_repos.len();
-    if selected_repo_count == 0 {
+    let Some(selection) =
+        prepare_forge_selection(args, verbose, interactive, &all_repos, selected_indexes)
+    else {
         eprintln!("  ✘  No valid repositories selected.");
         return Ok(());
-    }
-
-    if verbose {
-        println!(
-            "  ✔  Selected {} repositories for scanning",
-            selected_repo_count
-        );
-    }
-
-    let persist_source = if interactive {
-        prompt_save_choice(args.save)
-    } else {
-        args.save
     };
-
-    if verbose {
-        println!(
-            "  ◈  Source persistence: {}\n",
-            if persist_source {
-                "enabled (--save behavior)"
-            } else {
-                "disabled (temporary workspace)"
-            }
-        );
-    }
-
+    let selected_repos = selection.repositories;
+    let persist_source = selection.persist_source;
     // ── 4. Acquire source workspace and scan selected repositories ─────
     let stream_r = scan_selected_forge_repositories(SelectedForgeScan {
         args,
@@ -2010,6 +1873,53 @@ async fn finalize_provider_report(
         findings_count: stream_r.findings.len(),
         risk_score: stream_r.risk_score(),
     }
+}
+
+struct StandardTokenReport<'a> {
+    args: &'a Cli,
+    rep: &'a Reporter,
+    login: &'a str,
+    repo_count: usize,
+    mode: &'a str,
+    report_prefix: &'a str,
+    stream_r: &'a streamer::StreamResult,
+    verbose: bool,
+}
+
+async fn finalize_standard_token_report(request: StandardTokenReport<'_>) -> ScanSummary {
+    let StandardTokenReport {
+        args,
+        rep,
+        login,
+        repo_count,
+        mode,
+        report_prefix,
+        stream_r,
+        verbose,
+    } = request;
+    let report_name = format!("{}_{}", report_prefix, login);
+    finalize_provider_report(
+        args,
+        rep,
+        ProviderReport {
+            report_name: &report_name,
+            stream_r,
+            report_context: ReportContext::Token { login, repo_count },
+            verbose,
+            webhook_style: WebhookSuccessStyle::Standard,
+            pipe_summary: serde_json::json!({
+                "type": "summary",
+                "mode": mode,
+                "user": login,
+                "repos": repo_count,
+                "findings": stream_r.findings.len(),
+                "risk_score": stream_r.risk_score(),
+            }),
+            token_report: Some((login, repo_count)),
+            print_saved_notice: false,
+        },
+    )
+    .await
 }
 
 async fn finalize_dir_report(
