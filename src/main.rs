@@ -1026,6 +1026,37 @@ fn should_stop_scan(
                 .any(|f| f.severity == "CRITICAL"))
 }
 
+fn build_forge_file_scan_config(
+    args: &Cli,
+    verbose: bool,
+    extra_patterns: Vec<streamer::DynPattern>,
+) -> (Instant, forge_scan::FileScanConfig) {
+    let started_at = Instant::now();
+    let scan_config = forge_scan::FileScanConfig {
+        workspace: PathBuf::new(),
+        repository_name: String::new(),
+        max_blob_bytes: args.max_blob_size * 1024 * 1024,
+        workers: args.workers,
+        exhaustive: args.exhaustive,
+        entropy_threshold: args.entropy_threshold,
+        live: args.live,
+        pipe: args.pipe,
+        verbose,
+        max_findings: args.max_findings,
+        stop_on_critical: args.stop_on_critical,
+        extra_patterns: Arc::new(extra_patterns),
+        stop_flag: Arc::new(AtomicBool::new(false)),
+        all_findings: Arc::new(tokio::sync::Mutex::new(Vec::<streamer::Finding>::new())),
+        tech_stack_set: Arc::new(tokio::sync::Mutex::new(
+            std::collections::HashSet::<String>::new(),
+        )),
+        blobs_scanned: Arc::new(AtomicUsize::new(0)),
+        blobs_failed: Arc::new(AtomicUsize::new(0)),
+        bytes_scanned: Arc::new(AtomicUsize::new(0)),
+    };
+    (started_at, scan_config)
+}
+
 // ════════════════════════════════════════════════
 // TOKEN SCAN PIPELINE
 // ════════════════════════════════════════════════
@@ -1179,18 +1210,7 @@ async fn run_token_scan(
     }
 
     // ── 4. Acquire source workspace and scan selected repositories ─────
-    let t0 = Instant::now();
-    let all_findings = Arc::new(tokio::sync::Mutex::new(Vec::<streamer::Finding>::new()));
-    let tech_stack_set = Arc::new(tokio::sync::Mutex::new(
-        std::collections::HashSet::<String>::new(),
-    ));
-    let blobs_scanned = Arc::new(AtomicUsize::new(0));
-    let blobs_failed = Arc::new(AtomicUsize::new(0));
-    let bytes_scanned = Arc::new(AtomicUsize::new(0));
-    let stop_flag = Arc::new(AtomicBool::new(false));
-
-    let max_blob_bytes = args.max_blob_size * 1024 * 1024;
-    let extra_pat_arc = Arc::new(extra_patterns);
+    let (t0, scan_config) = build_forge_file_scan_config(args, verbose, extra_patterns);
     let workspace_lifecycle = forge_scan::WorkspaceLifecycle::new(
         Path::new(&args.output),
         &format!("token_{}", login),
@@ -1202,26 +1222,7 @@ async fn run_token_scan(
         Arc::new(gh_forge),
         &selected_repos,
         &workspace_lifecycle,
-        forge_scan::FileScanConfig {
-            workspace: PathBuf::new(),
-            repository_name: String::new(),
-            max_blob_bytes,
-            workers: args.workers,
-            exhaustive: args.exhaustive,
-            entropy_threshold: args.entropy_threshold,
-            live: args.live,
-            pipe: args.pipe,
-            verbose,
-            max_findings: args.max_findings,
-            stop_on_critical: args.stop_on_critical,
-            extra_patterns: extra_pat_arc,
-            stop_flag,
-            all_findings,
-            tech_stack_set,
-            blobs_scanned,
-            blobs_failed,
-            bytes_scanned,
-        },
+        scan_config,
         |forge, repo, entry, _head_sha| async move { forge.get_blob(&repo, entry.sha()).await },
         t0,
     )
@@ -1366,18 +1367,7 @@ async fn run_gitlab_token_scan(
     }
 
     // ── 4. Acquire source workspace and scan selected repositories ─────
-    let t0 = Instant::now();
-    let all_findings = Arc::new(tokio::sync::Mutex::new(Vec::<streamer::Finding>::new()));
-    let tech_stack_set = Arc::new(tokio::sync::Mutex::new(
-        std::collections::HashSet::<String>::new(),
-    ));
-    let blobs_scanned = Arc::new(AtomicUsize::new(0));
-    let blobs_failed = Arc::new(AtomicUsize::new(0));
-    let bytes_scanned = Arc::new(AtomicUsize::new(0));
-    let stop_flag = Arc::new(AtomicBool::new(false));
-
-    let max_blob_bytes = args.max_blob_size * 1024 * 1024;
-    let extra_pat_arc = Arc::new(extra_patterns);
+    let (t0, scan_config) = build_forge_file_scan_config(args, verbose, extra_patterns);
     let workspace_lifecycle = forge_scan::WorkspaceLifecycle::new(
         Path::new(&args.output),
         &format!("gitlab_{}", login),
@@ -1389,26 +1379,7 @@ async fn run_gitlab_token_scan(
         gl_forge,
         &selected_repos,
         &workspace_lifecycle,
-        forge_scan::FileScanConfig {
-            workspace: PathBuf::new(),
-            repository_name: String::new(),
-            max_blob_bytes,
-            workers: args.workers,
-            exhaustive: args.exhaustive,
-            entropy_threshold: args.entropy_threshold,
-            live: args.live,
-            pipe: args.pipe,
-            verbose,
-            max_findings: args.max_findings,
-            stop_on_critical: args.stop_on_critical,
-            extra_patterns: extra_pat_arc,
-            stop_flag,
-            all_findings,
-            tech_stack_set,
-            blobs_scanned,
-            blobs_failed,
-            bytes_scanned,
-        },
+        scan_config,
         |forge, repo, entry, _head_sha| async move { forge.get_blob(&repo, entry.sha()).await },
         t0,
     )
@@ -1557,18 +1528,7 @@ async fn run_bitbucket_token_scan(
     }
 
     // ── 4. Acquire source workspace and scan selected repositories ─────
-    let t0 = Instant::now();
-    let all_findings = Arc::new(tokio::sync::Mutex::new(Vec::<streamer::Finding>::new()));
-    let tech_stack_set = Arc::new(tokio::sync::Mutex::new(
-        std::collections::HashSet::<String>::new(),
-    ));
-    let blobs_scanned = Arc::new(AtomicUsize::new(0));
-    let blobs_failed = Arc::new(AtomicUsize::new(0));
-    let bytes_scanned = Arc::new(AtomicUsize::new(0));
-    let stop_flag = Arc::new(AtomicBool::new(false));
-
-    let max_blob_bytes = args.max_blob_size * 1024 * 1024;
-    let extra_pat_arc = Arc::new(extra_patterns);
+    let (t0, scan_config) = build_forge_file_scan_config(args, verbose, extra_patterns);
     let workspace_lifecycle = forge_scan::WorkspaceLifecycle::new(
         Path::new(&args.output),
         &format!("bitbucket_{}", login),
@@ -1580,26 +1540,7 @@ async fn run_bitbucket_token_scan(
         bb_forge,
         &selected_repos,
         &workspace_lifecycle,
-        forge_scan::FileScanConfig {
-            workspace: PathBuf::new(),
-            repository_name: String::new(),
-            max_blob_bytes,
-            workers: args.workers,
-            exhaustive: args.exhaustive,
-            entropy_threshold: args.entropy_threshold,
-            live: args.live,
-            pipe: args.pipe,
-            verbose,
-            max_findings: args.max_findings,
-            stop_on_critical: args.stop_on_critical,
-            extra_patterns: extra_pat_arc,
-            stop_flag,
-            all_findings,
-            tech_stack_set,
-            blobs_scanned,
-            blobs_failed,
-            bytes_scanned,
-        },
+        scan_config,
         move |_forge, repo, entry, head_sha| {
             let client = bb_client.clone();
             let api_base = api_base.clone();
@@ -1762,18 +1703,7 @@ async fn run_gitea_token_scan(
     }
 
     // ── 4. Acquire source workspace and scan selected repositories ─────
-    let t0 = Instant::now();
-    let all_findings = Arc::new(tokio::sync::Mutex::new(Vec::<streamer::Finding>::new()));
-    let tech_stack_set = Arc::new(tokio::sync::Mutex::new(
-        std::collections::HashSet::<String>::new(),
-    ));
-    let blobs_scanned = Arc::new(AtomicUsize::new(0));
-    let blobs_failed = Arc::new(AtomicUsize::new(0));
-    let bytes_scanned = Arc::new(AtomicUsize::new(0));
-    let stop_flag = Arc::new(AtomicBool::new(false));
-
-    let max_blob_bytes = args.max_blob_size * 1024 * 1024;
-    let extra_pat_arc = Arc::new(extra_patterns);
+    let (t0, scan_config) = build_forge_file_scan_config(args, verbose, extra_patterns);
     let workspace_lifecycle = forge_scan::WorkspaceLifecycle::new(
         Path::new(&args.output),
         &format!("gitea_{}", login),
@@ -1785,26 +1715,7 @@ async fn run_gitea_token_scan(
         gt_forge,
         &selected_repos,
         &workspace_lifecycle,
-        forge_scan::FileScanConfig {
-            workspace: PathBuf::new(),
-            repository_name: String::new(),
-            max_blob_bytes,
-            workers: args.workers,
-            exhaustive: args.exhaustive,
-            entropy_threshold: args.entropy_threshold,
-            live: args.live,
-            pipe: args.pipe,
-            verbose,
-            max_findings: args.max_findings,
-            stop_on_critical: args.stop_on_critical,
-            extra_patterns: extra_pat_arc,
-            stop_flag,
-            all_findings,
-            tech_stack_set,
-            blobs_scanned,
-            blobs_failed,
-            bytes_scanned,
-        },
+        scan_config,
         |forge, repo, entry, _head_sha| async move { forge.get_blob(&repo, entry.sha()).await },
         t0,
     )
@@ -1959,18 +1870,7 @@ async fn run_azure_token_scan(
     }
 
     // ── 4. Acquire source workspace and scan selected repositories ─────
-    let t0 = Instant::now();
-    let all_findings = Arc::new(tokio::sync::Mutex::new(Vec::<streamer::Finding>::new()));
-    let tech_stack_set = Arc::new(tokio::sync::Mutex::new(
-        std::collections::HashSet::<String>::new(),
-    ));
-    let blobs_scanned = Arc::new(AtomicUsize::new(0));
-    let blobs_failed = Arc::new(AtomicUsize::new(0));
-    let bytes_scanned = Arc::new(AtomicUsize::new(0));
-    let stop_flag = Arc::new(AtomicBool::new(false));
-
-    let max_blob_bytes = args.max_blob_size * 1024 * 1024;
-    let extra_pat_arc = Arc::new(extra_patterns);
+    let (t0, scan_config) = build_forge_file_scan_config(args, verbose, extra_patterns);
     let workspace_lifecycle = forge_scan::WorkspaceLifecycle::new(
         Path::new(&args.output),
         &format!("azure_{}", login),
@@ -1982,26 +1882,7 @@ async fn run_azure_token_scan(
         az_forge,
         &selected_repos,
         &workspace_lifecycle,
-        forge_scan::FileScanConfig {
-            workspace: PathBuf::new(),
-            repository_name: String::new(),
-            max_blob_bytes,
-            workers: args.workers,
-            exhaustive: args.exhaustive,
-            entropy_threshold: args.entropy_threshold,
-            live: args.live,
-            pipe: args.pipe,
-            verbose,
-            max_findings: args.max_findings,
-            stop_on_critical: args.stop_on_critical,
-            extra_patterns: extra_pat_arc,
-            stop_flag,
-            all_findings,
-            tech_stack_set,
-            blobs_scanned,
-            blobs_failed,
-            bytes_scanned,
-        },
+        scan_config,
         move |_forge, repo, entry, _head_sha| {
             let client = az_client.clone();
             let api_base = api_base.clone();
