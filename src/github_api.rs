@@ -435,8 +435,12 @@ async fn whoami_at(client: &HttpClient, api_base: &str) -> anyhow::Result<(Strin
 /// Uses `GET /user/repos?type=all` which returns repos the user owns, has
 /// collaborator access to, or has organisation membership for.
 pub async fn list_repos(client: &HttpClient) -> anyhow::Result<Vec<GhRepo>> {
+    list_repos_at(client, GH_API).await
+}
+
+async fn list_repos_at(client: &HttpClient, api_base: &str) -> anyhow::Result<Vec<GhRepo>> {
     let mut repos = Vec::new();
-    let mut url = format!("{}/user/repos?per_page=100&type=all&sort=updated", GH_API);
+    let mut url = format!("{}/user/repos?per_page=100&type=all&sort=updated", api_base);
     loop {
         let resp = client.get(&url).await;
         if !resp.ok() {
@@ -866,5 +870,39 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(content, b"fixture-value");
+    }
+    #[tokio::test]
+    async fn mock_server_contract_follows_github_repository_pagination() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let base_url = format!("http://{address}");
+        let first_body = r#"[{"full_name":"fixture/first","owner":{"login":"fixture"},"name":"first","private":false,"default_branch":"main","clone_url":"https://example.invalid/fixture/first.git"}]"#;
+        let second_body = r#"[{"full_name":"fixture/second","owner":{"login":"fixture"},"name":"second","private":true,"default_branch":"main","clone_url":"https://example.invalid/fixture/second.git"}]"#;
+        let next_header = format!("<{base_url}/page-2>; rel=\"next\"");
+        tokio::spawn(async move {
+            for (body, link) in [(first_body, Some(next_header)), (second_body, None)] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0u8; 1024];
+                let _ = socket.read(&mut request).await;
+                let link_header = link
+                    .map(|value| format!("Link: {value}\r\n"))
+                    .unwrap_or_default();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n{link_header}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+
+        let client = build_github_client(HttpConfig::default(), "synthetic-token").unwrap();
+        let repos = list_repos_at(&client, &base_url).await.unwrap();
+        assert_eq!(repos.len(), 2);
+        assert_eq!(repos[0].full_name, "fixture/first");
+        assert_eq!(repos[1].full_name, "fixture/second");
     }
 }
