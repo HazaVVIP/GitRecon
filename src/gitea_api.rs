@@ -676,6 +676,14 @@ mod tests {
         assert!(error.contains("HTTP 401"));
     }
     #[tokio::test]
+    async fn mock_server_contract_maps_403_to_identity_error() {
+        let base_url = spawn_response_server(403, "{}").await;
+        let (client, api_base) =
+            build_gitea_client(HttpConfig::default(), "synthetic-token", Some(&base_url)).unwrap();
+        let error = whoami(&client, &api_base).await.unwrap_err().to_string();
+        assert!(error.contains("HTTP 403") || error.contains("Access denied"));
+    }
+    #[tokio::test]
     async fn mock_server_contract_decodes_gitea_blob_content() {
         let base_url = spawn_response_server(
             200,

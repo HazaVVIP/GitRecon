@@ -800,6 +800,17 @@ mod tests {
         );
     }
     #[tokio::test]
+    async fn mock_server_contract_documents_azure_identity_fallback_on_403() {
+        let base_url = spawn_contract_server(403, "{}").await;
+        let (client, api_base) =
+            build_azure_client(HttpConfig::default(), "synthetic-token", Some(&base_url)).unwrap();
+        let identity = whoami(&client, &api_base).await.unwrap();
+        assert_eq!(
+            identity,
+            ("azure-user".to_string(), "Azure DevOps User".to_string())
+        );
+    }
+    #[tokio::test]
     async fn mock_server_contract_fetches_azure_blob_content() {
         let base_url = spawn_contract_server(200, "fixture-value").await;
         let (client, api_base) =

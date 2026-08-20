@@ -859,6 +859,13 @@ mod tests {
         assert!(error.contains("HTTP 401"));
     }
     #[tokio::test]
+    async fn mock_server_contract_maps_403_to_identity_error() {
+        let base_url = spawn_contract_server(403, "{}").await;
+        let client = build_github_client(HttpConfig::default(), "synthetic-token").unwrap();
+        let error = whoami_at(&client, &base_url).await.unwrap_err().to_string();
+        assert!(error.contains("HTTP 403") || error.contains("Access denied"));
+    }
+    #[tokio::test]
     async fn mock_server_contract_decodes_github_blob_content() {
         let base_url = spawn_contract_server(
             200,
