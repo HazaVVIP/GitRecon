@@ -1540,6 +1540,35 @@ mod tests {
     }
 
     #[test]
+    fn stream_checkpoint_json_roundtrip_preserves_findings() {
+        let progress = StreamCheckpoint {
+            total_sha1s: 2,
+            processed_sha1s: vec!["fixture-sha".to_string()],
+            findings_count: 1,
+            findings: vec![FindingCheckpoint {
+                filename: "fixture.txt".to_string(),
+                line: 3,
+                pattern_id: "fixture_pattern".to_string(),
+                description: "Fixture finding".to_string(),
+                severity: "MEDIUM".to_string(),
+                match_str: "fixture-value".to_string(),
+                context: "fixture context".to_string(),
+                is_deleted: false,
+                commit_sha1: Some("fixture-sha".to_string()),
+                confidence_adjustment: None,
+            }],
+            last_checkpoint_index: 1,
+            adaptive_state: None,
+        };
+        let encoded = serde_json::to_string(&progress).unwrap();
+        let restored: StreamCheckpoint = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(restored.findings_count, 1);
+        assert_eq!(restored.findings.len(), 1);
+        assert_eq!(restored.findings[0].match_str, "fixture-value");
+        assert_eq!(restored.processed_sha1s, vec!["fixture-sha"]);
+    }
+
+    #[test]
     fn test_checkpoint_path() {
         let _lock = TEST_MUTEX.lock().unwrap();
         let path = checkpoint_path("https://example.com");
