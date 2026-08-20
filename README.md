@@ -159,10 +159,10 @@ Reports are written below the selected output directory. The default JSON report
 |---|---|---|
 | Orchestration | `main.rs`, `config.rs`, `targets.rs`, `target_utils.rs`, `outcome.rs` | CLI routing, runtime scan policy, target planning, bounded concurrency, deterministic outcomes, and error classification |
 | URL and local pipelines | `url_pipeline.rs`, `dir_pipeline.rs`, `detect.rs`, `mapper.rs`, `git_parser.rs`, `pack_reader.rs` | URL exposure-to-stream execution, local recursive file scanning, binary/text policy, Git object mapping, pack parsing, and delta resolution |
-| Forge clients | `forge.rs`, `forge_factory.rs`, `forge_scan.rs`, `*_api.rs` | Provider authentication, repository enumeration, provider-neutral workspace lifecycle, bounded blob reconstruction, and object retrieval |
+| Forge clients | `forge.rs`, `forge_factory.rs`, `forge_scan.rs`, `*_api.rs` | Provider authentication, repository enumeration, provider-neutral workspace lifecycle, path-aware Bitbucket retrieval, bounded blob reconstruction, and object retrieval |
 | Scanner | `streamer.rs`, `scanner_factory.rs`, `scanner_policy.rs`, `binary_scanner.rs`, `binary_adapter.rs` | Policy-driven pattern, entropy, multiline, database, AI-path, text, binary, and archive analysis |
 | Reliability | `http_client.rs`, `cache.rs`, `checkpoint.rs`, `rate_limiter.rs`, `temp_cleanup.rs` | HTTP resilience, caching, checkpoint integrity, rate control, and cleanup |
-| Reporting | `reporter.rs`, `validation.rs`, `layout.rs`, `ui/theme.rs` | Report formats, aggregate and per-target persistence, input validation, terminal presentation, and optional themes |
+| Reporting | `reporter.rs`, `validation.rs`, `layout.rs`, `ui/theme.rs` | Report formats, aggregate and per-target persistence, input validation, terminal presentation, and optional themes; `tools/benchmark_local_scan.py` provides reproducible release benchmarking |
 
 ## Quality Gates
 
@@ -175,7 +175,7 @@ cargo test --all-targets
 cargo build --release
 ```
 
-The repository includes unit tests, forge identity and blob/file retrieval contract tests using local TCP response servers, pagination regression tests for GitHub, GitLab, and Bitbucket, and binary-level integration tests using temporary fixtures. Tests do not require live credentials or external network access.
+The repository includes unit tests, forge identity, retrieval, forbidden/error, and path-aware Bitbucket contracts using local TCP response servers, pagination regression tests for GitHub, GitLab, and Bitbucket, checkpoint-directory resume coverage, CLI help coverage, and binary-level integration tests using temporary fixtures. Tests do not require live credentials or external network access.
 
 See [DEVELOPMENT.md](DEVELOPMENT.md) for production defaults, maintenance rules, architecture details, and the release checklist.
 

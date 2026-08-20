@@ -16,7 +16,7 @@ The project intentionally favors **offensive discovery effectiveness**. Normal s
 |---|---|---|
 | Orchestration | `src/main.rs`, `src/config.rs`, `src/targets.rs`, `src/target_utils.rs`, `src/outcome.rs` | CLI parsing, runtime scan configuration, target planning, shared repository selection, target dispatch, bounded concurrency, deterministic aggregate outcomes, and error classification |
 | URL and local pipelines | `src/url_pipeline.rs`, `src/dir_pipeline.rs`, `src/detect.rs`, `src/mapper.rs`, `src/git_parser.rs`, `src/pack_reader.rs` | URL exposure-to-stream execution, local recursive file scanning, binary/text policy, Git object mapping, loose and packed object parsing, and delta resolution |
-| Forge integrations | `src/forge.rs`, `src/forge_factory.rs`, `src/forge_scan.rs`, `src/*_api.rs` | Common forge contract, provider construction, authentication, enumeration, provider-neutral workspace lifecycle, bounded blob reconstruction, and object access; local TCP identity contracts cover all five providers |
+| Forge integrations | `src/forge.rs`, `src/forge_factory.rs`, `src/forge_scan.rs`, `src/*_api.rs` | Common forge contract, provider construction, authentication, enumeration, provider-neutral workspace lifecycle, path-aware blob retrieval, bounded blob reconstruction, and object access; local TCP contracts cover identity, retrieval, pagination, and forbidden/error paths |
 | Scanning | `src/streamer.rs`, `src/scanner_factory.rs`, `src/scanner_policy.rs`, `src/binary_scanner.rs`, `src/binary_adapter.rs` | Policy-driven pattern, entropy, multiline, database, AI-path, text, binary, and archive detection; scanner construction and custom pattern loading are centralized |
 | Reliability | `src/http_client.rs`, `src/cache.rs`, `src/checkpoint.rs`, `src/rate_limiter.rs`, `src/temp_cleanup.rs` | Timeouts, retries, rate limits, cache isolation, HMAC checkpoints, and temporary-resource cleanup |
 | Reporting and validation | `src/reporter.rs`, `src/validation.rs`, `src/layout.rs` | JSON, SARIF, CSV, NDJSON, Markdown, HTML, aggregate and per-target persistence, terminal output, input validation, and layout helpers |
@@ -33,7 +33,7 @@ cargo test --all-targets
 cargo build --release
 ```
 
-Integration tests execute the compiled binary against temporary local fixtures. They cover local-directory reports, binary placeholder policy, mixed target aggregation, deterministic result ordering, and clean handling of invalid targets. Adapter unit suites also use local TCP response servers to contract-test identity success, blob/file retrieval, provider-specific HTTP-401 behavior, and pagination for GitHub, GitLab, and Bitbucket without live credentials. Avoid tests that require external forge credentials or network availability.
+Integration tests execute the compiled binary against temporary local fixtures. They cover local-directory reports, binary placeholder policy, mixed target aggregation, deterministic result ordering, custom checkpoint-directory resume discovery, CLI help coverage, and clean handling of invalid targets. Adapter unit suites also use local TCP response servers to contract-test identity success, blob/file retrieval, path-aware Bitbucket retrieval, provider-specific HTTP-401/403 behavior, Azure identity fallback, and pagination for GitHub, GitLab, and Bitbucket without live credentials. Avoid tests that require external forge credentials or network availability.
 
 When changing scanner policy, add both a normal-mode assertion and an exhaustive-mode assertion. When changing orchestration or forge errors, add a contract test that verifies the resulting `TargetOutcome` status and `TargetErrorCode`.
 
@@ -75,7 +75,7 @@ The benchmark creates temporary, non-sensitive fixtures and reports normal versu
 
 Before publishing a release, confirm that the version in `Cargo.toml`, the crate-level CLI description, and README metadata agree. Run formatting, Clippy, all tests, and a release build. Review `git status --short` for generated files, temporary scripts, credentials, and unexpected binaries. Confirm that reports handle operational metadata according to the selected output mode, webhook validation remains enabled by default, and no test depends on an external account or service.
 
-Release artifacts should contain source, `Cargo.toml`, `Cargo.lock`, `README.md`, `DEVELOPMENT.md`, `LICENSE`, `src/`, and `tests/`. Build output under `target/` is local and must not be committed.
+Release artifacts should contain source, `Cargo.toml`, `Cargo.lock`, `README.md`, `DEVELOPMENT.md`, `LICENSE`, `src/`, `tests/`, and the reproducible benchmark under `tools/`. Build output under `target/` is local and must not be committed.
 
 ## Maintenance Principles
 
