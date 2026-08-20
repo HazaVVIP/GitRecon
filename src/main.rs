@@ -2403,6 +2403,9 @@ async fn main() {
     }
 
     let args = Cli::parse();
+    if let Some(checkpoint_dir) = args.checkpoint_dir.as_deref() {
+        std::env::set_var(checkpoint::CHECKPOINT_DIR_ENV, checkpoint_dir);
+    }
 
     // Sprint 4 (S4.1): explicit numeric range checks. Clap's value_parser!.range()
     // only supports the fixed-width numeric types (u8..u64/i8..i64), not `usize`,

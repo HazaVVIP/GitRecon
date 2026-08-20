@@ -56,7 +56,7 @@ use subtle::ConstantTimeEq;
 const CHECKPOINT_DIR: &str = ".gitrecon/checkpoints";
 
 /// Environment variable for custom checkpoint directory (for pentesting)
-const CHECKPOINT_DIR_ENV: &str = "GITRECON_CHECKPOINT_DIR";
+pub(crate) const CHECKPOINT_DIR_ENV: &str = "GITRECON_CHECKPOINT_DIR";
 
 /// Maximum age for checkpoints (7 days in seconds)
 const MAX_CHECKPOINT_AGE_SECS: u64 = 7 * 24 * 60 * 60;
