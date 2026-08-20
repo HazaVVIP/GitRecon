@@ -33,7 +33,7 @@ cargo test --all-targets
 cargo build --release
 ```
 
-Integration tests execute the compiled binary against temporary local fixtures. They cover local-directory reports, binary placeholder policy, mixed target aggregation, deterministic result ordering, and clean handling of invalid targets. Adapter unit suites also use local TCP response servers to contract-test identity success and provider-specific HTTP-401 behavior without live credentials. Avoid tests that require external forge credentials or network availability.
+Integration tests execute the compiled binary against temporary local fixtures. They cover local-directory reports, binary placeholder policy, mixed target aggregation, deterministic result ordering, and clean handling of invalid targets. Adapter unit suites also use local TCP response servers to contract-test identity success, blob/file retrieval, provider-specific HTTP-401 behavior, and pagination for GitHub, GitLab, and Bitbucket without live credentials. Avoid tests that require external forge credentials or network availability.
 
 When changing scanner policy, add both a normal-mode assertion and an exhaustive-mode assertion. When changing orchestration or forge errors, add a contract test that verifies the resulting `TargetOutcome` status and `TargetErrorCode`.
 
@@ -41,7 +41,7 @@ When changing scanner policy, add both a normal-mode assertion and an exhaustive
 
 The `--help` output is a supported operator interface, not an implementation detail. Every public option must have a concise description, defaults must match the parser and runtime behavior, and the examples must be executable against the documented input formats. Keep `README.md`, this guide, and the Clap metadata in `src/main.rs` synchronized. When adding a target mode, output format, or safety-sensitive opt-out, update all three locations and add a CLI-level regression when practical.
 
-The `--targets` input accepts one target per line: plain URLs remain supported, while JSON lines may describe URL, directory, or token targets. The `--patterns-help` output is the source of truth for the custom pattern JSON schema.
+The `--targets` input accepts one target per line: plain URLs remain supported, while JSON lines may describe URL, directory, or token targets. `--parallel-targets` is validated to the range 1–1000 so a malformed or accidental value cannot create unbounded task fan-out. The `--patterns-help` output is the source of truth for the custom pattern JSON schema.
 
 ## Production Defaults
 
@@ -58,6 +58,7 @@ The following defaults are deliberate and should not be changed casually:
 | Memory limit | 256 MB | `--mem-limit` |
 | Cache TTL | 7 days | `--cache-ttl`, `--no-cache` |
 | TLS verification | Enabled | `--insecure` only for controlled investigations |
+| Parallel target concurrency | Maximum 1000 | `--parallel-targets N` within the validated range |
 
 ## Release Checklist
 

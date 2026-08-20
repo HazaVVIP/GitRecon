@@ -112,7 +112,7 @@ Replace the example quantifier with a valid regular-expression bound appropriate
 |---|---:|---|
 | `--dir PATH` | — | Recursively scan a local directory |
 | `--targets FILE` | — | Read plain URLs or typed JSON targets, one per line |
-| `--parallel-targets N` | `1` | Bound concurrent target orchestration |
+| `--parallel-targets N` | `1` (maximum `1000`) | Bound concurrent target orchestration |
 | `--workers N` | `50` | Bound concurrent object or file scanning work |
 | `--timeout SEC` | `10` | Per-request timeout |
 | `--retries N` | `3` | Retry count |
@@ -175,7 +175,7 @@ cargo test --all-targets
 cargo build --release
 ```
 
-The repository includes unit tests, forge identity contract tests using local TCP response servers, and binary-level integration tests using temporary fixtures. Tests do not require live credentials or external network access.
+The repository includes unit tests, forge identity and blob/file retrieval contract tests using local TCP response servers, pagination regression tests for GitHub, GitLab, and Bitbucket, and binary-level integration tests using temporary fixtures. Tests do not require live credentials or external network access.
 
 See [DEVELOPMENT.md](DEVELOPMENT.md) for production defaults, maintenance rules, architecture details, and the release checklist.
 
