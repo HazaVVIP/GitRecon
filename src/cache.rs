@@ -289,7 +289,7 @@ impl ObjectCache {
             return Ok(0);
         }
 
-        let conn = match self.pool.get().ok() {
+        let mut conn = match self.pool.get().ok() {
             Some(c) => c,
             None => return Ok(0), // Failed to get connection
         };
@@ -297,11 +297,7 @@ impl ObjectCache {
         let now = now_seconds();
         let cutoff = now.saturating_sub(self.ttl_seconds);
 
-        let deleted = conn
-            .execute("DELETE FROM cache WHERE created_at < ?1", params![cutoff])
-            .context("Failed to delete expired entries")?;
-
-        Ok(deleted)
+        cleanup_expired_entries(&mut conn, cutoff).context("Failed to delete expired entries")
     }
 
     /// Get cache statistics
@@ -427,6 +423,33 @@ impl CacheStats {
     }
 }
 
+fn cleanup_expired_entries(
+    conn: &mut rusqlite::Connection,
+    cutoff: i64,
+) -> rusqlite::Result<usize> {
+    let tx = conn.transaction()?;
+    let expired_bytes: i64 = tx.query_row(
+        "SELECT COALESCE(SUM(LENGTH(content)), 0) FROM cache WHERE created_at < ?1",
+        params![cutoff],
+        |row| row.get(0),
+    )?;
+    let deleted = tx.execute("DELETE FROM cache WHERE created_at < ?1", params![cutoff])?;
+    if deleted > 0 {
+        let current_total: i64 = tx.query_row(
+            "SELECT value FROM cache_meta WHERE key = 'total_bytes'",
+            [],
+            |row| row.get(0),
+        )?;
+        let next_total = current_total.saturating_sub(expired_bytes.max(0));
+        tx.execute(
+            "UPDATE cache_meta SET value = ?1 WHERE key = 'total_bytes'",
+            params![next_total],
+        )?;
+    }
+    tx.commit()?;
+    Ok(deleted)
+}
+
 /// Get current time as seconds since UNIX_EPOCH
 fn now_seconds() -> i64 {
     SystemTime::now()
@@ -473,6 +496,42 @@ mod tests {
         assert_eq!(CacheStats::hit_rate(0, 100), 0.0);
         assert_eq!(CacheStats::hit_rate(50, 100), 50.0);
         assert_eq!(CacheStats::hit_rate(100, 100), 100.0);
+    }
+
+    #[test]
+    fn cleanup_expired_updates_size_metadata() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        init_db(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO cache (sha1, content, created_at, source_url) VALUES (?1, ?2, ?3, ?4)",
+            params!["old-entry", b"old", 10_i64, "fixture"],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO cache (sha1, content, created_at, source_url) VALUES (?1, ?2, ?3, ?4)",
+            params!["fresh-entry", b"fresh", 100_i64, "fixture"],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE cache_meta SET value = ?1 WHERE key = 'total_bytes'",
+            params![8_i64],
+        )
+        .unwrap();
+
+        let deleted = cleanup_expired_entries(&mut conn, 50).unwrap();
+        assert_eq!(deleted, 1);
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM cache", [], |row| row.get(0))
+            .unwrap();
+        let total_bytes: i64 = conn
+            .query_row(
+                "SELECT value FROM cache_meta WHERE key = 'total_bytes'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 1);
+        assert_eq!(total_bytes, 5);
     }
 
     // ── Sprint 3 (S3.5) — TTL underflow guard ────────────────────────────────
