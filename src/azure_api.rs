@@ -799,4 +799,14 @@ mod tests {
             ("azure-user".to_string(), "Azure DevOps User".to_string())
         );
     }
+    #[tokio::test]
+    async fn mock_server_contract_fetches_azure_blob_content() {
+        let base_url = spawn_contract_server(200, "fixture-value").await;
+        let (client, api_base) =
+            build_azure_client(HttpConfig::default(), "synthetic-token", Some(&base_url)).unwrap();
+        let content = get_blob_content(&client, &api_base, "fixture-repo", "sha")
+            .await
+            .unwrap();
+        assert_eq!(content, b"fixture-value");
+    }
 }

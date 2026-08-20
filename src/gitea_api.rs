@@ -675,4 +675,18 @@ mod tests {
         let error = whoami(&client, &api_base).await.unwrap_err().to_string();
         assert!(error.contains("HTTP 401"));
     }
+    #[tokio::test]
+    async fn mock_server_contract_decodes_gitea_blob_content() {
+        let base_url = spawn_response_server(
+            200,
+            r#"{"encoding":"base64","content":"Zml4dHVyZS12YWx1ZQ=="}"#,
+        )
+        .await;
+        let (client, api_base) =
+            build_gitea_client(HttpConfig::default(), "synthetic-token", Some(&base_url)).unwrap();
+        let content = get_blob_content(&client, &api_base, "fixture", "repo", "sha")
+            .await
+            .unwrap();
+        assert_eq!(content, b"fixture-value");
+    }
 }

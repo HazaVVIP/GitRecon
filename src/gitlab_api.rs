@@ -681,4 +681,14 @@ mod tests {
         let error = whoami(&client, &api_base).await.unwrap_err().to_string();
         assert!(error.contains("HTTP 401"));
     }
+    #[tokio::test]
+    async fn mock_server_contract_fetches_gitlab_blob_content() {
+        let base_url = spawn_contract_server(200, "fixture-value").await;
+        let (client, api_base) =
+            build_gitlab_client(HttpConfig::default(), "synthetic-token", Some(&base_url)).unwrap();
+        let content = get_blob_content(&client, &api_base, "fixture", "repo", "sha")
+            .await
+            .unwrap();
+        assert_eq!(content, b"fixture-value");
+    }
 }

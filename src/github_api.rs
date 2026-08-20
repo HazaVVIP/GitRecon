@@ -662,7 +662,17 @@ pub async fn get_blob_content(
     repo: &str,
     sha: &str,
 ) -> anyhow::Result<Vec<u8>> {
-    let url = format!("{}/repos/{}/{}/git/blobs/{}", GH_API, owner, repo, sha);
+    get_blob_content_at(client, GH_API, owner, repo, sha).await
+}
+
+async fn get_blob_content_at(
+    client: &HttpClient,
+    api_base: &str,
+    owner: &str,
+    repo: &str,
+    sha: &str,
+) -> anyhow::Result<Vec<u8>> {
+    let url = format!("{}/repos/{}/{}/git/blobs/{}", api_base, owner, repo, sha);
     let resp = client.get(&url).await;
     if !resp.ok() {
         anyhow::bail!(
@@ -843,5 +853,18 @@ mod tests {
         let client = build_github_client(HttpConfig::default(), "synthetic-token").unwrap();
         let error = whoami_at(&client, &base_url).await.unwrap_err().to_string();
         assert!(error.contains("HTTP 401"));
+    }
+    #[tokio::test]
+    async fn mock_server_contract_decodes_github_blob_content() {
+        let base_url = spawn_contract_server(
+            200,
+            r#"{"encoding":"base64","content":"Zml4dHVyZS12YWx1ZQ=="}"#,
+        )
+        .await;
+        let client = build_github_client(HttpConfig::default(), "synthetic-token").unwrap();
+        let content = get_blob_content_at(&client, &base_url, "fixture", "repo", "sha")
+            .await
+            .unwrap();
+        assert_eq!(content, b"fixture-value");
     }
 }
