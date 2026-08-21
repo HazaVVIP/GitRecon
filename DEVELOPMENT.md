@@ -41,7 +41,7 @@ When changing scanner policy, add both a normal-mode assertion and an exhaustive
 
 The `--help` output is a supported operator interface, not an implementation detail. Every public option must have a concise description, defaults must match the parser and runtime behavior, and the examples must be executable against the documented input formats. Keep `README.md`, this guide, and the Clap metadata in `src/main.rs` synchronized. When adding a target mode, output format, or safety-sensitive opt-out, update all three locations and add a CLI-level regression when practical.
 
-The `--targets` input accepts one target per line: plain URLs remain supported, while JSON lines may describe URL, directory, or token targets. `--parallel-targets` is validated to the range 1–1000 so a malformed or accidental value cannot create unbounded task fan-out. The `--patterns-help` output is the source of truth for the custom pattern JSON schema.
+The `--targets` input accepts one target per line: plain URLs remain supported, while JSON lines may describe URL, directory, or token targets. `--parallel-targets` is validated to the range 1–1000 so a malformed or accidental value cannot create unbounded task fan-out. Metadata-only Git exposure is not reported as `PARTIAL` by default; operators can opt in with `--partial-exposure`. The `--patterns-help` output is the source of truth for the custom pattern JSON schema.
 
 ## Production Defaults
 
@@ -52,6 +52,7 @@ The following defaults are deliberate and should not be changed casually:
 | Object accessibility verification | Enabled | `--no-verify-objects` |
 | Local binary/archive scanning | Enabled | `--no-scan-binaries` |
 | Placeholder filtering | Enabled in normal mode | `--exhaustive` to retain candidates |
+| Partial exposure reporting | Disabled | `--partial-exposure` to report metadata-only exposure as `PARTIAL` |
 | Request timeout | 10 seconds | `--timeout` |
 | Retries | 3 | `--retries` |
 | Stream workers | 50 | `--workers` |

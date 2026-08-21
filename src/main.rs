@@ -199,9 +199,10 @@ async fn run_url_target(context: UrlRunContext<'_>, url: String, fuzz: bool) -> 
         println!("  ✔  Repository mapped: {} objects", total);
     }
 
-    // VERIFICATION: Check if git objects are actually accessible
-    // This catches partial exposure cases where only metadata is exposed
-    if !map_r.objects_accessible {
+    // VERIFICATION: Check if git objects are actually accessible.
+    // Metadata-only exposure reporting is intentionally opt-in because it can
+    // create noisy partial statuses during broad default scans.
+    if !map_r.objects_accessible && args.partial_exposure {
         if verbose {
             println!("  ⚠  PARTIAL EXPOSURE DETECTED: Git metadata files (HEAD, index, config) are accessible, but git objects cannot be fetched (blocked, 404, or non-git response)");
             println!("  → Skipping analysis (no accessible objects to scan)");
@@ -255,6 +256,20 @@ async fn run_url_target(context: UrlRunContext<'_>, url: String, fuzz: bool) -> 
             risk_score: 0,
             error_code: Some(TargetErrorCode::PartialExposure),
             error: Some("Git metadata is accessible but git objects are unavailable".to_string()),
+        };
+    }
+    if !map_r.objects_accessible {
+        return TargetOutcome {
+            target: url.clone(),
+            target_type: "URL".to_string(),
+            status: TargetStatus::Failed,
+            report_path: None,
+            findings_count: 0,
+            risk_score: 0,
+            error_code: Some(TargetErrorCode::NoGitExposure),
+            error: Some(
+                "Git objects are unavailable; partial exposure reporting is disabled".to_string(),
+            ),
         };
     }
     // ── Analysis ─────────────────────────────────────────────────
@@ -816,9 +831,13 @@ struct Cli {
     cache_ttl: u64,
 
     /// Skip object accessibility verification before scanning.
-    /// Verification is enabled by default because offensive scans should classify partial exposure.
+    /// Verification is enabled by default for offensive object discovery.
     #[arg(long = "no-verify-objects")]
     no_verify_objects: bool,
+
+    /// Report metadata-only Git exposure as PARTIAL; disabled by default.
+    #[arg(long = "partial-exposure")]
+    partial_exposure: bool,
 
     // Theme system
     /// Theme configuration file path (default: ~/.config/gitrecon/theme.toml)
@@ -2997,6 +3016,7 @@ mod tests {
         assert!(!defaults.exhaustive);
         assert!(!defaults.no_scan_binaries);
         assert!(!defaults.no_verify_objects);
+        assert!(!defaults.partial_exposure);
 
         let opt_outs = Cli::try_parse_from([
             "gitrecon",
@@ -3005,11 +3025,13 @@ mod tests {
             "--exhaustive",
             "--no-scan-binaries",
             "--no-verify-objects",
+            "--partial-exposure",
         ])
         .unwrap();
         assert!(opt_outs.exhaustive);
         assert!(opt_outs.no_scan_binaries);
         assert!(opt_outs.no_verify_objects);
+        assert!(opt_outs.partial_exposure);
     }
 
     fn mk_find(severity: &str) -> streamer::Finding {

@@ -122,6 +122,7 @@ Replace the example quantifier with a valid regular-expression bound appropriate
 | `--exhaustive` | disabled | Retain placeholder-like candidates |
 | `--no-scan-binaries` | disabled | Opt out of local binary/archive scanning |
 | `--no-verify-objects` | disabled | Skip object accessibility verification |
+| `--partial-exposure` | disabled | Report metadata-only Git exposure as `PARTIAL` |
 | `--save` | disabled | Reconstruct recovered source to disk |
 | `--resume` | disabled | Resume from a verified checkpoint |
 | `--no-cache` | disabled | Bypass the SQLite object cache |
@@ -147,7 +148,7 @@ Replace the example quantifier with a valid regular-expression bound appropriate
 | `--no-unicode` | disabled | Use ASCII-compatible terminal symbols |
 | `--insecure` | disabled | Disable TLS verification; use only in controlled environments |
 
-Run `gitrecon --help` for the complete option list, including forge-specific URLs, proxy rotation, user-agent pools, rate limiting, checkpoint intervals, themes, and webhook controls.
+Run `gitrecon --help` for the complete option list, including forge-specific URLs, proxy rotation, user-agent pools, rate limiting, checkpoint intervals, partial-exposure reporting, themes, and webhook controls.
 
 ## Outputs
 

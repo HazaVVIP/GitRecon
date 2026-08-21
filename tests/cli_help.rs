@@ -13,6 +13,7 @@ fn help_documents_core_operator_controls() {
         "--no-scan-binaries",
         "--checkpoint-dir",
         "--checkpoint-interval",
+        "--partial-exposure",
         "--parallel-targets",
         "--pipe",
         "--format",
