@@ -746,6 +746,8 @@ pub struct StreamResult {
     pub cache_hits: usize,
     pub cache_misses: usize,
     pub cache_stats: Option<CacheReportStats>,
+    /// Object acquisition source metrics for processed blobs.
+    pub object_source_stats: ObjectSourceStats,
     /// PERF-004: Rate limit metrics
     #[allow(dead_code)]
     pub rate_limit_allowed: usize,
@@ -753,6 +755,14 @@ pub struct StreamResult {
     pub rate_limit_dropped: usize,
     #[allow(dead_code)]
     pub rate_limit_wait_ms: u64,
+}
+
+/// Object acquisition source metrics for processed blobs.
+#[derive(Debug, Default, Clone, Copy, serde::Serialize)]
+pub struct ObjectSourceStats {
+    pub pack: usize,
+    pub cache: usize,
+    pub loose_http: usize,
 }
 
 /// Cache statistics for reporting
@@ -802,10 +812,7 @@ impl StreamResult {
         let mut seen = HashSet::new();
         self.findings
             .iter()
-            .filter(|f| {
-                let key = (f.pattern_id.as_str(), truncate_utf8(&f.match_str, 80));
-                seen.insert(key)
-            })
+            .filter(|finding| seen.insert(finding_dedup_key(finding)))
             .collect()
     }
 
@@ -813,12 +820,16 @@ impl StreamResult {
     /// secret appears in multiple blobs).
     #[allow(dead_code)]
     pub fn unique_count(&self) -> usize {
-        let mut seen = HashSet::new();
-        for f in &self.findings {
-            seen.insert((f.pattern_id.as_str(), truncate_utf8(&f.match_str, 80)));
-        }
-        seen.len()
+        self.findings
+            .iter()
+            .map(finding_dedup_key)
+            .collect::<HashSet<_>>()
+            .len()
     }
+}
+
+fn finding_dedup_key(finding: &Finding) -> (&str, &str) {
+    (finding.pattern_id.as_str(), finding.match_str.as_str())
 }
 
 // ════════════════════════════════════════════════
@@ -1856,6 +1867,20 @@ impl Streamer {
             cache_hits: cache_hits_final,
             cache_misses: cache_misses_final,
             cache_stats: cache_stats_final,
+            object_source_stats: ObjectSourceStats {
+                pack: *state
+                    .objects_by_source
+                    .get(&ObjectSourceKind::Pack)
+                    .unwrap_or(&0),
+                cache: *state
+                    .objects_by_source
+                    .get(&ObjectSourceKind::Cache)
+                    .unwrap_or(&0),
+                loose_http: *state
+                    .objects_by_source
+                    .get(&ObjectSourceKind::LooseHttp)
+                    .unwrap_or(&0),
+            },
             // PERF-004: Rate limit metrics
             rate_limit_allowed: rate_limit_allowed_final,
             rate_limit_dropped: rate_limit_dropped_final,
@@ -5796,6 +5821,39 @@ mod tests {
 
     // unique_findings / unique_count
     #[test]
+    fn unique_findings_do_not_truncate_distinct_matches() {
+        let prefix = "A".repeat(80);
+        let mut first = StreamResult::default();
+        first.findings.push(Finding {
+            filename: "one.txt".to_string(),
+            line: 1,
+            pattern_id: "custom".to_string(),
+            description: "Custom finding".to_string(),
+            severity: "HIGH".to_string(),
+            match_str: format!("{prefix}x"),
+            context: String::new(),
+            is_deleted: false,
+            commit_sha1: None,
+            confidence_adjustment: None,
+        });
+        first.findings.push(Finding {
+            filename: "two.txt".to_string(),
+            line: 1,
+            pattern_id: "custom".to_string(),
+            description: "Custom finding".to_string(),
+            severity: "HIGH".to_string(),
+            match_str: format!("{prefix}y"),
+            context: String::new(),
+            is_deleted: false,
+            commit_sha1: None,
+            confidence_adjustment: None,
+        });
+
+        assert_eq!(first.unique_count(), 2);
+        assert_eq!(first.unique_findings().len(), 2);
+    }
+
+    #[test]
     fn test_unique_findings_deduplicates() {
         let sha = "a".repeat(40);
         let content = "AKIAZ9XYZMNOP1234567\nAKIAZ9XYZMNOP1234567";
@@ -5818,6 +5876,7 @@ mod tests {
             cache_hits: 0,
             cache_misses: 0,
             cache_stats: None,
+            object_source_stats: ObjectSourceStats::default(),
         };
         // Both lines have the same match, so unique should be 1
         assert_eq!(
@@ -6575,6 +6634,7 @@ mod tests {
             cache_hits: 0,
             cache_misses: 0,
             cache_stats: None,
+            object_source_stats: ObjectSourceStats::default(),
         };
         assert_eq!(stream.unique_count(), 1);
         assert_eq!(stream.unique_findings().len(), 1);

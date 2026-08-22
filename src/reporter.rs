@@ -513,6 +513,18 @@ impl Reporter {
             );
         }
         println!("│  {:<16}: {:.1}s", "Elapsed", r.elapsed_s);
+        let source_total = r.object_source_stats.pack
+            + r.object_source_stats.cache
+            + r.object_source_stats.loose_http;
+        if source_total > 0 {
+            println!(
+                "│  {:<16}: pack={} cache={} HTTP={}",
+                "Object sources",
+                r.object_source_stats.pack,
+                r.object_source_stats.cache,
+                r.object_source_stats.loose_http
+            );
+        }
         // PERF-005: Display cache stats
         if r.cache_hits > 0 || r.cache_misses > 0 {
             let total_requests = r.cache_hits + r.cache_misses;
@@ -804,6 +816,7 @@ impl Reporter {
                 "blobs_scanned":   s.blobs_scanned,
                 "bytes_scanned":   s.bytes_scanned,
                 "elapsed_s":       (s.elapsed_s * 100.0).round() / 100.0,
+                "object_sources":  s.object_source_stats,
                 "findings":        s.findings.iter().map(|f| f.to_dict()).collect::<Vec<_>>(),
             });
         }
@@ -845,6 +858,7 @@ impl Reporter {
                 "blobs_scanned":   stream_r.blobs_scanned,
                 "bytes_scanned":   stream_r.bytes_scanned,
                 "elapsed_s":       (stream_r.elapsed_s * 100.0).round() / 100.0,
+                "object_sources":  stream_r.object_source_stats,
                 "findings":        stream_r.findings.iter().map(|f| f.to_dict()).collect::<Vec<_>>(),
             }
         });
@@ -1391,6 +1405,7 @@ mod tests {
             cache_hits: 0,
             cache_misses: 0,
             cache_stats: None,
+            object_source_stats: crate::streamer::ObjectSourceStats::default(),
         }
     }
 

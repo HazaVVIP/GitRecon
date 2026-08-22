@@ -169,6 +169,7 @@ pub(crate) async fn scan_local_files(config: LocalScanConfig) -> StreamResult {
         cache_hits: 0,
         cache_misses: 0,
         cache_stats: None,
+        object_source_stats: crate::streamer::ObjectSourceStats::default(),
         rate_limit_allowed: 0,
         rate_limit_dropped: 0,
         rate_limit_wait_ms: 0,
