@@ -17,15 +17,12 @@ use crate::binary_scanner;
 use crate::checkpoint::{
     self, AdaptiveConcurrencyState, Checkpoint, CheckpointPhase, StreamCheckpoint,
 };
-use crate::git_parser::{obj_path, ObjectParser};
+use crate::git_parser::ObjectParser;
 use crate::http_client::HttpClient;
 use crate::mapper::MapResult;
+use crate::object_source::ObjectSourceKind;
 use crate::scanner_policy::ScanPolicy;
 use crate::text_utils::truncate_utf8;
-
-// ── parse-failure throttle: only print the first 3 \"did not parse\" errors
-// per run; the blobs_failed counter in the final summary reports the total.
-static UNPARSEABLE: AtomicUsize = AtomicUsize::new(0);
 
 // ════════════════════════════════════════════════
 // SECRET PATTERNS
@@ -841,6 +838,7 @@ struct State {
     files_save_failed: usize,
     skipped_by_reason: HashMap<SkipReason, usize>,
     failed_by_kind: HashMap<FailureKind, usize>,
+    objects_by_source: HashMap<ObjectSourceKind, usize>,
 }
 
 impl State {
@@ -850,6 +848,10 @@ impl State {
 
     fn record_failure(&mut self, kind: FailureKind) {
         *self.failed_by_kind.entry(kind).or_default() += 1;
+    }
+
+    fn record_source(&mut self, source: ObjectSourceKind) {
+        *self.objects_by_source.entry(source).or_default() += 1;
     }
 }
 
@@ -873,6 +875,7 @@ enum WorkerResult {
         tech: Vec<String>,
         bytes: usize,
         save_result: Option<bool>, // None = not attempted, Some(true) = saved, Some(false) = failed
+        source: ObjectSourceKind,
     },
     BlobFailed {
         kind: FailureKind,
@@ -1562,8 +1565,10 @@ impl Streamer {
                     tech,
                     bytes,
                     save_result,
+                    source,
                 } => {
                     state.blobs_scanned += 1;
+                    state.record_source(source);
                     state.bytes_scanned += bytes;
                     // O-1: Live output
                     if self.live {
@@ -2007,6 +2012,7 @@ fn process_blob_content(
                             tech: vec![],
                             bytes: raw_bytes,
                             save_result,
+                            source: ObjectSourceKind::LooseHttp,
                         };
                     }
                 }
@@ -2043,6 +2049,7 @@ fn process_blob_content(
                             tech: vec![],
                             bytes: raw_bytes,
                             save_result,
+                            source: ObjectSourceKind::LooseHttp,
                         };
                     }
                 }
@@ -2079,6 +2086,7 @@ fn process_blob_content(
                             tech: vec![],
                             bytes: raw_bytes,
                             save_result,
+                            source: ObjectSourceKind::LooseHttp,
                         };
                     }
                 }
@@ -2089,6 +2097,7 @@ fn process_blob_content(
                     tech: vec![],
                     bytes: raw_bytes,
                     save_result,
+                    source: ObjectSourceKind::LooseHttp,
                 };
             }
 
@@ -2115,6 +2124,7 @@ fn process_blob_content(
                     tech: vec![],
                     bytes: raw_bytes,
                     save_result,
+                    source: ObjectSourceKind::LooseHttp,
                 };
             }
 
@@ -2130,6 +2140,7 @@ fn process_blob_content(
                             tech: vec![],
                             bytes: raw_bytes,
                             save_result,
+                            source: ObjectSourceKind::LooseHttp,
                         };
                     }
                 };
@@ -2195,6 +2206,7 @@ fn process_blob_content(
                 tech,
                 bytes: raw_bytes,
                 save_result,
+                source: ObjectSourceKind::LooseHttp,
             }
         }
         "commit" => {
@@ -2265,19 +2277,59 @@ async fn fetch_and_process(
     false_positive_keywords: Arc<Vec<String>>,
     exhaustive: bool,
 ) -> WorkerResult {
-    // Bail immediately if a stop condition was already triggered
     if stop_flag.load(Ordering::Relaxed) {
         return WorkerResult::Skipped {
             reason: SkipReason::StopRequested,
         };
     }
 
-    // Sprint 5 (S5.1): serve pack-resolved objects first — no HTTP round trip
-    // for pack-only repos. These bytes are already loose-object encoded so
-    // process_blob_content handles them identically.
-    if let Some(pack_bytes) = pack_objects.get(sha1) {
-        return process_blob_content(
-            pack_bytes,
+    let source =
+        crate::object_source::ObjectSource::new(crate::object_source::ObjectSourceConfig {
+            client,
+            git_url,
+            pack_objects,
+            cache: cache.as_deref(),
+            max_blob_size: max_scan_bytes,
+            save_enabled: save_dir.is_some(),
+            cache_hits: &cache_hits,
+            cache_misses: &cache_misses,
+        });
+    let envelope = match source.acquire(sha1).await {
+        Ok(envelope) => envelope,
+        Err(crate::object_source::AcquisitionOutcome::NotFound) => {
+            return WorkerResult::Skipped {
+                reason: SkipReason::NotFound,
+            };
+        }
+        Err(crate::object_source::AcquisitionOutcome::Oversized) => {
+            if verbose {
+                eprintln!(
+                    "  [!] Blob {} exceeds --max-blob-size limit, skipping",
+                    &sha1[..sha1.len().min(8)]
+                );
+            }
+            return WorkerResult::Skipped {
+                reason: SkipReason::Oversized,
+            };
+        }
+        Err(crate::object_source::AcquisitionOutcome::HttpStatus(status)) => {
+            return WorkerResult::BlobFailed {
+                kind: FailureKind::HttpStatus(status),
+            };
+        }
+    };
+
+    if save_dir.is_some() && verbose && envelope.bytes.len() > max_scan_bytes {
+        eprintln!(
+            "  [!] Blob {} ({} bytes) exceeds --max-blob-size but --save is on: saving without scan",
+            &sha1[..sha1.len().min(8)],
+            envelope.bytes.len()
+        );
+    }
+
+    attach_source(
+        process_blob_content(
+            &envelope.bytes,
             sha1,
             sha1_to_file,
             sha1_extras,
@@ -2291,133 +2343,28 @@ async fn fetch_and_process(
             verbose,
             false_positive_keywords,
             exhaustive,
-        );
-    }
-
-    // PERF-005: Check cache before fetching (BUG-ERR-009: now async).
-    // Exhaustive scans use a separate namespace because their findings policy is
-    // intentionally broader than normal mode and must never reuse a normal result.
-    let cache_key = if exhaustive {
-        format!("{}:exhaustive", sha1)
-    } else {
-        sha1.to_string()
-    };
-    if let Some(ref cache_obj) = cache {
-        if let Some(cached_content) = cache_obj.get(&cache_key).await {
-            cache_hits.fetch_add(1, Ordering::Relaxed);
-            // Process cached content
-            let result = process_blob_content(
-                &cached_content,
-                sha1,
-                sha1_to_file,
-                sha1_extras,
-                current_blobs,
-                save_dir,
-                extra_patterns,
-                mem_limit,
-                bytes_in_flight,
-                max_scan_bytes,
-                entropy_threshold,
-                verbose,
-                false_positive_keywords.clone(),
-                exhaustive,
-            );
-            // Return result (may be Skipped if blob couldn't be processed)
-            return result;
-        } else {
-            cache_misses.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-
-    let url = format!("{}/{}", git_url, obj_path(sha1));
-    let resp = client.get(&url).await;
-
-    if !resp.ok() {
-        // 404 → loose object simply not present (expected for pack-only repos); not a failure
-        if resp.status == 404 {
-            return WorkerResult::Skipped {
-                reason: SkipReason::NotFound,
-            };
-        }
-        return WorkerResult::BlobFailed {
-            kind: FailureKind::HttpStatus(resp.status),
-        };
-    }
-
-    // SEC-005: Check Content-Length before processing
-    let content_length: Option<u64> = resp
-        .headers
-        .get("content-length")
-        .and_then(|v| v.parse().ok());
-
-    // Enforce max_scan_bytes limit before processing — but ONLY when the user is not
-    // reconstructing to disk. `--save` reconstruction must be lossless: an oversized
-    // blob should still be written; only the scan pass is skipped (handled inside
-    // process_blob_content via the per_blob_limit guard).
-    if save_dir.is_none() {
-        if let Err(_e) = crate::validation::validate_content_length(content_length, max_scan_bytes)
-        {
-            if verbose {
-                eprintln!(
-                    "  [!] Blob {} exceeds --max-blob-size limit (Content-Length: {:?}), skipping",
-                    &sha1[..sha1.len().min(8)],
-                    content_length
-                );
-            }
-            return WorkerResult::Skipped {
-                reason: SkipReason::Oversized,
-            };
-        }
-    } else if verbose {
-        if let Some(len) = content_length {
-            if len as usize > max_scan_bytes {
-                eprintln!("  [!] Blob {} ({} bytes) exceeds --max-blob-size but --save is on: saving without scan",
-                    &sha1[..sha1.len().min(8)], len);
-            }
-        }
-    }
-
-    // Sprint 3 (S3.7): only cache the response body if it actually parses as a git
-    // object. Previously we cached the raw bytes before validation, so a 200-status
-    // error page (HTML from a WAF, a captive-portal login, etc.) got persisted and
-    // was replayed on every subsequent run — poisoning the cache indefinitely.
-    let parses_ok = ObjectParser.parse(&resp.body, sha1).is_some();
-    if parses_ok {
-        if let Some(ref cache_obj) = cache {
-            cache_obj.put(&cache_key, &resp.body, Some(&url)).await;
-        }
-    } else if verbose {
-        // Only print the first 3 failures to stderr — beyond that the blobs_failed
-        // counter in the final summary is sufficient. This prevents 1600+ lines of
-        // spam when the server returns HTML 200 for missing loose objects.
-        let n = UNPARSEABLE.fetch_add(1, Ordering::Relaxed) + 1;
-        if n <= 3 {
-            eprintln!(
-                "  [!] Fetched blob {} did not parse as a valid git object — skipping cache write",
-                &sha1[..sha1.len().min(8)]
-            );
-        } else if n == 4 {
-            eprintln!("  [!] Suppressing further blob-parse errors (see final summary) ...");
-        }
-    }
-
-    // Process the fetched content using the helper function
-    process_blob_content(
-        &resp.body,
-        sha1,
-        sha1_to_file,
-        sha1_extras,
-        current_blobs,
-        save_dir,
-        extra_patterns,
-        mem_limit,
-        bytes_in_flight,
-        max_scan_bytes,
-        entropy_threshold,
-        verbose,
-        false_positive_keywords,
-        exhaustive,
+        ),
+        envelope.source,
     )
+}
+
+fn attach_source(result: WorkerResult, source: ObjectSourceKind) -> WorkerResult {
+    match result {
+        WorkerResult::BlobScanned {
+            findings,
+            tech,
+            bytes,
+            save_result,
+            ..
+        } => WorkerResult::BlobScanned {
+            findings,
+            tech,
+            bytes,
+            save_result,
+            source,
+        },
+        other => other,
+    }
 }
 
 fn scan_content(

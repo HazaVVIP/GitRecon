@@ -36,6 +36,7 @@ mod gitlab_api;
 mod http_client;
 mod layout;
 mod mapper;
+mod object_source;
 mod outcome;
 mod pack_reader; // Sprint 5 (S5.1): pack file parser + delta resolver
 mod rate_limiter; // PERF-004: Token bucket rate limiter
