@@ -12,6 +12,25 @@ The scanner is intentionally discovery-oriented. Normal mode filters common temp
 
 ## Installation
 
+### Quick install (recommended)
+
+Install the latest published release binary with one command:
+
+```bash
+curl -sSf https://raw.githubusercontent.com/HazaVVIP/GitRecon/main/install.sh | bash
+```
+
+The installer detects the operating system and CPU architecture, downloads the matching archive from [GitHub Releases](https://github.com/HazaVVIP/GitRecon/releases), verifies its SHA-256 checksum when a checksum utility is available, and installs `gitrecon` to `/usr/local/bin`. The published binary is currently available for Linux `x86_64`; when a compatible release asset is unavailable, the installer falls back to a source build and may install Rust and system build dependencies.
+
+After installation, verify the command and view the available options:
+
+```bash
+gitrecon --version
+gitrecon --help
+```
+
+For a pinned release or a manual checksum-verified download, use the assets listed on the [v3.2.5 release page](https://github.com/HazaVVIP/GitRecon/releases/tag/v3.2.5).
+
 ### Build from source
 
 Install [Rust](https://rustup.rs/) and run:
@@ -21,12 +40,6 @@ git clone https://github.com/HazaVVIP/GitRecon.git
 cd GitRecon
 cargo build --release
 ./target/release/gitrecon --help
-```
-
-A release installer is also available when published binaries exist:
-
-```bash
-curl -sSf https://raw.githubusercontent.com/HazaVVIP/GitRecon/main/install.sh | bash
 ```
 
 ## Usage

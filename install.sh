@@ -128,52 +128,108 @@ fi
 # BINARY INSTALLATION (PREFERRED)
 # ════════════════════════════════════════════════
 
-RELEASE_URL="https://github.com/${REPO}/releases/latest/download/${BIN_NAME}-${OS_TAG}-${ARCH_TAG}"
+# Releases use versioned archive names, so resolve the latest tag first.
+RELEASE_API_URL="https://api.github.com/repos/${REPO}/releases/latest"
+RELEASE_TAG="$(curl -fsSL "$RELEASE_API_URL" 2>/dev/null \
+    | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+    | head -n 1 || true)"
 
-info "Checking for pre-built binary..."
-if curl -fsSL --head "$RELEASE_URL" >/dev/null 2>&1; then
-    info "Downloading pre-built binary from GitHub Releases..."
-    TMP="$(mktemp)"
+if [ -n "$RELEASE_TAG" ]; then
+    RELEASE_VERSION="${RELEASE_TAG#v}"
+    ARCHIVE_NAME="${BIN_NAME}-${RELEASE_VERSION}-${OS_TAG}-${ARCH_TAG}.tar.gz"
+    RELEASE_URL="https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${ARCHIVE_NAME}"
+    CHECKSUM_URL="https://github.com/${REPO}/releases/download/${RELEASE_TAG}/SHA256SUMS"
 
-    if ! curl -fsSL "$RELEASE_URL" -o "$TMP"; then
-        error "Failed to download binary. Please check your internet connection."
-        exit 1
-    fi
+    info "Checking for pre-built binary (${RELEASE_TAG})..."
+    if curl -fsSL --head "$RELEASE_URL" >/dev/null 2>&1; then
+        info "Downloading pre-built binary from GitHub Releases..."
+        DOWNLOAD_DIR="$(mktemp -d)"
+        ARCHIVE_PATH="${DOWNLOAD_DIR}/${ARCHIVE_NAME}"
+        CHECKSUM_PATH="${DOWNLOAD_DIR}/SHA256SUMS"
 
-    chmod +x "$TMP"
-
-    # Verify binary is not empty
-    if [ ! -s "$TMP" ]; then
-        error "Downloaded binary is empty. Please try again or report this issue."
-        rm -f "$TMP"
-        exit 1
-    fi
-
-    if [ -w "$INSTALL_DIR" ]; then
-        mv "$TMP" "${INSTALL_DIR}/${BIN_NAME}"
-    else
-        if ! sudo mv "$TMP" "${INSTALL_DIR}/${BIN_NAME}" 2>/dev/null; then
-            error "Failed to install to $INSTALL_DIR. Try running with sudo."
-            rm -f "$TMP"
+        if ! curl -fsSL "$RELEASE_URL" -o "$ARCHIVE_PATH"; then
+            error "Failed to download binary. Please check your internet connection."
+            rm -rf "$DOWNLOAD_DIR"
             exit 1
         fi
-    fi
 
-    success "Installed ${BIN_NAME} to ${INSTALL_DIR}/${BIN_NAME}"
-    echo ""
-    echo "  Run: gitrecon --help"
-    echo ""
-    echo "  Quick start:"
-    echo "    gitrecon https://example.com"
-    echo "    gitrecon --token ghp_xxxxxxxxxxxxxxxxxxxx"
-    exit 0
+        if [ ! -s "$ARCHIVE_PATH" ]; then
+            error "Downloaded archive is empty. Please try again or report this issue."
+            rm -rf "$DOWNLOAD_DIR"
+            exit 1
+        fi
+
+        # Verify the release archive when a checksum utility and checksum asset exist.
+        if curl -fsSL "$CHECKSUM_URL" -o "$CHECKSUM_PATH" 2>/dev/null; then
+            if command_exists sha256sum; then
+                if ! (cd "$DOWNLOAD_DIR" && sha256sum -c SHA256SUMS >/dev/null); then
+                    error "SHA-256 verification failed for the downloaded release."
+                    rm -rf "$DOWNLOAD_DIR"
+                    exit 1
+                fi
+                success "SHA-256 verification passed"
+            elif command_exists shasum; then
+                EXPECTED_SHA="$(sed -n "s/^\\([a-fA-F0-9]*\\)[[:space:]]\\+${ARCHIVE_NAME}$/\\1/p" "$CHECKSUM_PATH")"
+                ACTUAL_SHA="$(shasum -a 256 "$ARCHIVE_PATH" | awk '{print $1}')"
+                if [ -z "$EXPECTED_SHA" ] || [ "$EXPECTED_SHA" != "$ACTUAL_SHA" ]; then
+                    error "SHA-256 verification failed for the downloaded release."
+                    rm -rf "$DOWNLOAD_DIR"
+                    exit 1
+                fi
+                success "SHA-256 verification passed"
+            else
+                warn "No SHA-256 utility found; continuing without local checksum verification."
+            fi
+        else
+            warn "Checksum asset unavailable; continuing after archive validation."
+        fi
+
+        EXTRACT_DIR="${DOWNLOAD_DIR}/extract"
+        mkdir -p "$EXTRACT_DIR"
+        if ! tar -xzf "$ARCHIVE_PATH" -C "$EXTRACT_DIR"; then
+            error "Failed to extract the downloaded release archive."
+            rm -rf "$DOWNLOAD_DIR"
+            exit 1
+        fi
+        BINARY_SOURCE="$(find "$EXTRACT_DIR" -type f -name "$BIN_NAME" | head -n 1)"
+        if [ -z "$BINARY_SOURCE" ] || [ ! -s "$BINARY_SOURCE" ]; then
+            error "Release archive does not contain a usable ${BIN_NAME} binary."
+            rm -rf "$DOWNLOAD_DIR"
+            exit 1
+        fi
+        chmod +x "$BINARY_SOURCE"
+
+        if [ -w "$INSTALL_DIR" ]; then
+            install -m 0755 "$BINARY_SOURCE" "${INSTALL_DIR}/${BIN_NAME}"
+        else
+            if ! sudo install -m 0755 "$BINARY_SOURCE" "${INSTALL_DIR}/${BIN_NAME}" 2>/dev/null; then
+                error "Failed to install to $INSTALL_DIR. Try running with sudo."
+                rm -rf "$DOWNLOAD_DIR"
+                exit 1
+            fi
+        fi
+        rm -rf "$DOWNLOAD_DIR"
+
+        success "Installed ${BIN_NAME} to ${INSTALL_DIR}/${BIN_NAME}"
+        echo ""
+        echo "  Run: gitrecon --help"
+        echo ""
+        echo "  Quick start:"
+        echo "    gitrecon https://example.com"
+        echo "    gitrecon --token \"\$GITHUB_TOKEN\""
+        exit 0
+    fi
+fi
+
+if [ -z "$RELEASE_TAG" ]; then
+    warn "Unable to resolve the latest GitHub Release."
+else
+    warn "No pre-built binary found for ${OS_TAG}/${ARCH_TAG} in ${RELEASE_TAG}."
 fi
 
 # ════════════════════════════════════════════════
 # SOURCE BUILD FALLBACK
 # ════════════════════════════════════════════════
-
-warn "No pre-built binary found for your platform."
 info "Building from source..."
 
 # Check for git
@@ -290,6 +346,6 @@ echo "  Run: gitrecon --help"
 echo ""
 echo "  Quick start:"
 echo "    gitrecon https://example.com"
-echo "    gitrecon --token ghp_xxxxxxxxxxxxxxxxxxxx"
+echo "    gitrecon --token \"\$GITHUB_TOKEN\""
 echo ""
 echo "  Documentation: https://github.com/${REPO}"
