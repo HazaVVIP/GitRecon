@@ -35,7 +35,7 @@ cargo build --release
 
 Integration tests execute the compiled binary against temporary local fixtures. They cover local-directory reports, binary placeholder policy, mixed target aggregation, deterministic result ordering, custom checkpoint-directory resume discovery, CLI help coverage, and clean handling of invalid targets. Adapter unit suites also use local TCP response servers to contract-test identity success, blob/file retrieval, path-aware Bitbucket retrieval, provider-specific HTTP-401/403 behavior, Azure identity fallback, and pagination for GitHub, GitLab, and Bitbucket without live credentials. Avoid tests that require external forge credentials or network availability.
 
-When changing scanner policy, add both a normal-mode assertion and an exhaustive-mode assertion. When changing orchestration or forge errors, add a contract test that verifies the resulting `TargetOutcome` status and `TargetErrorCode`.
+When changing scanner policy, add both a normal-mode assertion and an exhaustive-mode assertion. For custom detector changes, cover at least one text path and one printable binary/archive path, and verify configured severity, description, and provenance are preserved. When changing orchestration or forge errors, add a contract test that verifies the resulting `TargetOutcome` status and `TargetErrorCode`.
 
 ### CLI Documentation Contract
 
@@ -43,7 +43,7 @@ The `--help` output is a supported operator interface, not an implementation det
 
 The numeric runtime options `--delay` and `--jitter` accept finite values from 0 through 3,600 seconds. `--entropy-threshold` must be finite and non-negative. `--rate` accepts finite values from 0 through 1,000,000 requests per second, where 0 means unlimited. `--retries 0` performs the initial request but no retry.
 
-The `--targets` input accepts one target per line: plain URLs remain supported, while JSON lines may describe URL, directory, or token targets. `--parallel-targets` is validated to the range 1–1000 so a malformed or accidental value cannot create unbounded task fan-out. Metadata-only Git exposure is not reported as `PARTIAL` by default; operators can opt in with `--partial-exposure`. The `--patterns-help` output is the source of truth for the custom pattern JSON schema.
+The `--targets` input accepts one target per line: plain URLs remain supported, while JSON lines may describe URL, directory, or token targets. `--parallel-targets` is validated to the range 1–1000 so a malformed or accidental value cannot create unbounded task fan-out. Metadata-only Git exposure is not reported as `PARTIAL` by default; operators can opt in with `--partial-exposure`. The `--patterns-help` output is the source of truth for the custom pattern JSON schema. Custom patterns are evaluated consistently on text, printable binary strings, archive entries, decompressed GZIP content, SQLite strings, and ELF strings; binary adapter metadata must preserve the configured severity and description.
 
 `--dry-run` is a strict validation-only path for URL, directory, token, and `--targets` modes. It validates CLI configuration, target shape, directory existence, target-file parsing, and custom patterns, but does not perform URL detection, repository reconnaissance, provider authentication, repository enumeration, local content reads, detector execution, report writing, aggregate report writing, or webhook delivery. With `--pipe`, it emits one machine-readable `dry_run` object and still performs no scan side effects.
 

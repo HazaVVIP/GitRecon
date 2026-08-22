@@ -11,6 +11,8 @@ use once_cell::sync::Lazy;
 use std::collections::HashSet;
 use std::io::{Cursor, Read};
 
+use crate::streamer::DynPattern;
+
 /// Magic byte signatures for common binary formats
 pub mod magic {
     /// SQLite database signature
@@ -158,10 +160,25 @@ fn decompress_gzip(data: &[u8]) -> Option<Vec<u8>> {
 /// Scan binary blob for secrets with enhanced detection
 ///
 /// Returns findings (pattern_id, match_string, context, source)
+#[cfg(test)]
 pub fn scan_binary_blob(
     data: &[u8],
     filename: &str,
     max_blob_size: usize,
+) -> Vec<(String, String, String, String)> {
+    scan_binary_blob_with_patterns(data, filename, max_blob_size, &[])
+}
+
+/// Scan binary content with additive runtime patterns.
+///
+/// The built-in matcher remains unchanged and custom patterns are evaluated on
+/// every printable-string view, including recursively extracted archive and
+/// decompressed GZIP content.
+pub fn scan_binary_blob_with_patterns(
+    data: &[u8],
+    filename: &str,
+    max_blob_size: usize,
+    extra_patterns: &[DynPattern],
 ) -> Vec<(String, String, String, String)> {
     let mut findings = Vec::new();
 
@@ -177,7 +194,9 @@ pub fn scan_binary_blob(
             // Use enhanced SQLite scanning with table querying
             let strings = extract_sqlite_strings_enhanced(data);
             for s in strings {
-                if let Some((pattern_id, match_str)) = check_string_for_secrets(&s) {
+                for (pattern_id, match_str) in
+                    check_string_for_secrets_with_patterns(&s, extra_patterns)
+                {
                     findings.push((
                         pattern_id,
                         match_str,
@@ -196,19 +215,21 @@ pub fn scan_binary_blob(
                 match inner_type {
                     BinaryType::ZipJar => {
                         // Recursively scan nested ZIP/JAR files
-                        let inner_findings = scan_binary_blob(
+                        let inner_findings = scan_binary_blob_with_patterns(
                             &inner_data,
                             &format!("{}/{}", filename, inner_path),
                             max_blob_size,
+                            extra_patterns,
                         );
                         findings.extend(inner_findings);
                     }
                     BinaryType::SQLite => {
                         // Scan SQLite databases found in ZIP
-                        let inner_findings = scan_binary_blob(
+                        let inner_findings = scan_binary_blob_with_patterns(
                             &inner_data,
                             &format!("{}/{}", filename, inner_path),
                             max_blob_size,
+                            extra_patterns,
                         );
                         findings.extend(inner_findings);
                     }
@@ -217,7 +238,8 @@ pub fn scan_binary_blob(
                         if std::str::from_utf8(&inner_data).is_ok() {
                             // It's text - scan it directly
                             for s in extract_printable_strings(&inner_data, 4) {
-                                if let Some((pattern_id, match_str)) = check_string_for_secrets(&s)
+                                for (pattern_id, match_str) in
+                                    check_string_for_secrets_with_patterns(&s, extra_patterns)
                                 {
                                     findings.push((
                                         pattern_id,
@@ -231,7 +253,8 @@ pub fn scan_binary_blob(
                             // Binary file - extract strings and scan
                             let strings = extract_printable_strings(&inner_data, 4);
                             for s in strings {
-                                if let Some((pattern_id, match_str)) = check_string_for_secrets(&s)
+                                for (pattern_id, match_str) in
+                                    check_string_for_secrets_with_patterns(&s, extra_patterns)
                                 {
                                     findings.push((
                                         pattern_id,
@@ -250,7 +273,9 @@ pub fn scan_binary_blob(
             // Extract strings from ELF binaries
             let strings = extract_elf_strings(data);
             for s in strings {
-                if let Some((pattern_id, match_str)) = check_string_for_secrets(&s) {
+                for (pattern_id, match_str) in
+                    check_string_for_secrets_with_patterns(&s, extra_patterns)
+                {
                     findings.push((
                         pattern_id,
                         match_str,
@@ -264,7 +289,9 @@ pub fn scan_binary_blob(
             // Try to extract printable strings anyway
             let strings = extract_printable_strings(data, 4);
             for s in strings {
-                if let Some((pattern_id, match_str)) = check_string_for_secrets(&s) {
+                for (pattern_id, match_str) in
+                    check_string_for_secrets_with_patterns(&s, extra_patterns)
+                {
                     findings.push((
                         pattern_id,
                         match_str,
@@ -278,15 +305,18 @@ pub fn scan_binary_blob(
             // Scan decompressed content recursively, then retain the legacy raw
             // string fallback for malformed or unusual GZIP payloads.
             if let Some(decompressed) = decompress_gzip(data) {
-                findings.extend(scan_binary_blob(
+                findings.extend(scan_binary_blob_with_patterns(
                     &decompressed,
                     &format!("{}:gzip", filename),
                     max_blob_size,
+                    extra_patterns,
                 ));
             }
             let strings = extract_printable_strings(data, 4);
             for s in strings {
-                if let Some((pattern_id, match_str)) = check_string_for_secrets(&s) {
+                for (pattern_id, match_str) in
+                    check_string_for_secrets_with_patterns(&s, extra_patterns)
+                {
                     findings.push((
                         pattern_id,
                         match_str,
@@ -586,6 +616,22 @@ fn check_string_for_secrets(s: &str) -> Option<(String, String)> {
     None
 }
 
+fn check_string_for_secrets_with_patterns(
+    s: &str,
+    extra_patterns: &[DynPattern],
+) -> Vec<(String, String)> {
+    let mut matches = check_string_for_secrets(s).into_iter().collect::<Vec<_>>();
+    for pattern in extra_patterns {
+        matches.extend(
+            pattern
+                .regex
+                .find_iter(s)
+                .map(|matched| (pattern.id.clone(), matched.as_str().to_string())),
+        );
+    }
+    matches
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -735,6 +781,41 @@ mod tests {
             high_entropy > low_entropy,
             "High entropy data should have higher entropy than low entropy data"
         );
+    }
+
+    #[test]
+    fn custom_pattern_matches_unknown_binary_strings() {
+        let pattern = DynPattern {
+            id: "custom_binary".to_string(),
+            sev: "HIGH".to_string(),
+            desc: "Custom binary marker".to_string(),
+            regex: regex::Regex::new("CUSTOM_[A-Z0-9]{4}").unwrap(),
+        };
+        let data = b"\0\0CUSTOM_AB12\0";
+        let findings = scan_binary_blob_with_patterns(data, "fixture.bin", 1024, &[pattern]);
+        assert!(findings
+            .iter()
+            .any(|finding| finding.0 == "custom_binary" && finding.1 == "CUSTOM_AB12"));
+    }
+
+    #[test]
+    fn custom_pattern_matches_decompressed_gzip_content() {
+        use flate2::{write::GzEncoder, Compression};
+        use std::io::Write;
+
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(b"custom=ARCHIVE_AB12").unwrap();
+        let compressed = encoder.finish().unwrap();
+        let pattern = DynPattern {
+            id: "custom_archive".to_string(),
+            sev: "MEDIUM".to_string(),
+            desc: "Custom archive marker".to_string(),
+            regex: regex::Regex::new("ARCHIVE_[A-Z0-9]{4}").unwrap(),
+        };
+        let findings = scan_binary_blob_with_patterns(&compressed, "fixture.gz", 1024, &[pattern]);
+        assert!(findings
+            .iter()
+            .any(|finding| finding.0 == "custom_archive" && finding.1 == "ARCHIVE_AB12"));
     }
 
     #[test]

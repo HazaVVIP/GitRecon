@@ -2253,19 +2253,27 @@ fn process_blob_content(
                 // Handle different binary types
                 if matches!(bin_type, binary_scanner::BinaryType::SQLite) {
                     // Enhanced SQLite scanning with table querying
-                    let binary_findings =
-                        binary_scanner::scan_binary_blob(&obj.data, &filename, max_scan_bytes);
+                    let binary_findings = binary_scanner::scan_binary_blob_with_patterns(
+                        &obj.data,
+                        &filename,
+                        max_scan_bytes,
+                        &extra_patterns,
+                    );
 
                     if !binary_findings.is_empty() {
                         let fp_keywords: Vec<&str> =
                             false_positive_keywords.iter().map(|s| s.as_str()).collect();
                         let findings = normalize_binary_findings(
                             binary_findings,
-                            &filename,
-                            sha1,
-                            is_deleted,
-                            "Binary Secret",
-                            Some(&fp_keywords),
+                            BinaryFindingContext {
+                                filename: &filename,
+                                sha1,
+                                is_deleted,
+                                fallback_description: "Binary Secret",
+                                context_keywords: Some(&fp_keywords),
+                                include_placeholders: exhaustive,
+                                extra_patterns: &extra_patterns,
+                            },
                         );
 
                         return WorkerResult::BlobScanned {
@@ -2280,17 +2288,25 @@ fn process_blob_content(
 
                 // Handle ZIP/JAR archives
                 if matches!(bin_type, binary_scanner::BinaryType::ZipJar) {
-                    let binary_findings =
-                        binary_scanner::scan_binary_blob(&obj.data, &filename, max_scan_bytes);
+                    let binary_findings = binary_scanner::scan_binary_blob_with_patterns(
+                        &obj.data,
+                        &filename,
+                        max_scan_bytes,
+                        &extra_patterns,
+                    );
 
                     if !binary_findings.is_empty() {
                         let findings = normalize_binary_findings(
                             binary_findings,
-                            &filename,
-                            sha1,
-                            is_deleted,
-                            "ZIP Secret",
-                            None,
+                            BinaryFindingContext {
+                                filename: &filename,
+                                sha1,
+                                is_deleted,
+                                fallback_description: "ZIP Secret",
+                                context_keywords: None,
+                                include_placeholders: exhaustive,
+                                extra_patterns: &extra_patterns,
+                            },
                         );
                         return WorkerResult::BlobScanned {
                             findings,
@@ -2304,17 +2320,25 @@ fn process_blob_content(
 
                 // Handle ELF binaries
                 if matches!(bin_type, binary_scanner::BinaryType::Elf) {
-                    let binary_findings =
-                        binary_scanner::scan_binary_blob(&obj.data, &filename, max_scan_bytes);
+                    let binary_findings = binary_scanner::scan_binary_blob_with_patterns(
+                        &obj.data,
+                        &filename,
+                        max_scan_bytes,
+                        &extra_patterns,
+                    );
 
                     if !binary_findings.is_empty() {
                         let findings = normalize_binary_findings(
                             binary_findings,
-                            &filename,
-                            sha1,
-                            is_deleted,
-                            "ELF Secret",
-                            None,
+                            BinaryFindingContext {
+                                filename: &filename,
+                                sha1,
+                                is_deleted,
+                                fallback_description: "ELF Secret",
+                                context_keywords: None,
+                                include_placeholders: exhaustive,
+                                extra_patterns: &extra_patterns,
+                            },
                         );
                         return WorkerResult::BlobScanned {
                             findings,
@@ -2324,6 +2348,38 @@ fn process_blob_content(
                             source: ObjectSourceKind::LooseHttp,
                         };
                     }
+                }
+
+                // GZIP may contain text even when its compressed bytes do not have
+                // enough nulls to trigger the legacy binary branch above.
+                if matches!(bin_type, binary_scanner::BinaryType::Gzip) {
+                    let binary_findings = binary_scanner::scan_binary_blob_with_patterns(
+                        &obj.data,
+                        &filename,
+                        max_scan_bytes,
+                        &extra_patterns,
+                    );
+                    let fp_keywords: Vec<&str> =
+                        false_positive_keywords.iter().map(|s| s.as_str()).collect();
+                    let findings = normalize_binary_findings(
+                        binary_findings,
+                        BinaryFindingContext {
+                            filename: &filename,
+                            sha1,
+                            is_deleted,
+                            fallback_description: "GZIP Secret",
+                            context_keywords: Some(&fp_keywords),
+                            include_placeholders: exhaustive,
+                            extra_patterns: &extra_patterns,
+                        },
+                    );
+                    return WorkerResult::BlobScanned {
+                        findings,
+                        tech: vec![],
+                        bytes: raw_bytes,
+                        save_result,
+                        source: ObjectSourceKind::LooseHttp,
+                    };
                 }
 
                 // Skip other binary content
@@ -2593,38 +2649,52 @@ fn attach_source(result: WorkerResult, source: ObjectSourceKind) -> WorkerResult
     }
 }
 
+struct BinaryFindingContext<'a> {
+    filename: &'a str,
+    sha1: &'a str,
+    is_deleted: bool,
+    fallback_description: &'a str,
+    context_keywords: Option<&'a [&'a str]>,
+    include_placeholders: bool,
+    extra_patterns: &'a [DynPattern],
+}
+
 fn normalize_binary_findings(
     binary_findings: Vec<(String, String, String, String)>,
-    filename: &str,
-    sha1: &str,
-    is_deleted: bool,
-    fallback_description: &str,
-    context_keywords: Option<&[&str]>,
+    context: BinaryFindingContext<'_>,
 ) -> Vec<Finding> {
     let mut findings = binary_findings
         .into_iter()
-        .map(|(pattern_id, match_str, context, _source)| {
-            let (description, severity) = PATTERNS
+        .filter(|(_, match_str, _, _)| context.include_placeholders || !is_placeholder(match_str))
+        .map(|(pattern_id, match_str, context_text, _source)| {
+            let (description, severity) = context
+                .extra_patterns
                 .iter()
                 .find(|pattern| pattern.id == pattern_id)
-                .map(|pattern| (pattern.desc, pattern.sev))
-                .unwrap_or((fallback_description, "HIGH"));
+                .map(|pattern| (pattern.desc.clone(), pattern.sev.clone()))
+                .or_else(|| {
+                    PATTERNS
+                        .iter()
+                        .find(|pattern| pattern.id == pattern_id)
+                        .map(|pattern| (pattern.desc.to_string(), pattern.sev.to_string()))
+                })
+                .unwrap_or_else(|| (context.fallback_description.to_string(), "HIGH".to_string()));
             Finding {
-                filename: filename.to_string(),
+                filename: context.filename.to_string(),
                 line: 1,
                 pattern_id,
-                description: description.to_string(),
-                severity: severity.to_string(),
+                description,
+                severity,
                 match_str,
-                context,
-                is_deleted,
-                commit_sha1: Some(sha1.to_string()),
+                context: context_text,
+                is_deleted: context.is_deleted,
+                commit_sha1: Some(context.sha1.to_string()),
                 confidence_adjustment: None,
             }
         })
         .collect::<Vec<_>>();
 
-    if let Some(keywords) = context_keywords {
+    if let Some(keywords) = context.context_keywords {
         let contexts: Vec<String> = findings
             .iter()
             .map(|finding| finding.context.clone())
@@ -4614,6 +4684,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn binary_finding_normalizer_uses_custom_metadata() {
+        let custom = DynPattern {
+            id: "custom_binary".to_string(),
+            sev: "CRITICAL".to_string(),
+            desc: "Custom binary credential".to_string(),
+            regex: Regex::new("CUSTOM_[A-Z0-9]{4}").unwrap(),
+        };
+        let findings = normalize_binary_findings(
+            vec![(
+                "custom_binary".to_string(),
+                "CUSTOM_AB12".to_string(),
+                "Binary: fixture.bin".to_string(),
+                "binary".to_string(),
+            )],
+            BinaryFindingContext {
+                filename: "fixture.bin",
+                sha1: "0123456789012345678901234567890123456789",
+                is_deleted: false,
+                fallback_description: "Binary Secret",
+                context_keywords: None,
+                include_placeholders: false,
+                extra_patterns: &[custom],
+            },
+        );
+        assert_eq!(findings[0].severity, "CRITICAL");
+        assert_eq!(findings[0].description, "Custom binary credential");
+    }
+
+    #[test]
     fn binary_finding_normalizer_preserves_provenance() {
         let findings = normalize_binary_findings(
             vec![(
@@ -4622,11 +4721,15 @@ mod tests {
                 "SQLite: config.db".to_string(),
                 "binary".to_string(),
             )],
-            "config.db",
-            "0123456789012345678901234567890123456789",
-            true,
-            "Binary Secret",
-            None,
+            BinaryFindingContext {
+                filename: "config.db",
+                sha1: "0123456789012345678901234567890123456789",
+                is_deleted: true,
+                fallback_description: "Binary Secret",
+                context_keywords: None,
+                include_placeholders: false,
+                extra_patterns: &[],
+            },
         );
 
         assert_eq!(findings.len(), 1);

@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::binary_adapter::binary_findings_to_findings;
+use crate::binary_adapter::binary_findings_to_findings_with_patterns;
 use crate::streamer::{self, DynPattern, Finding, StreamResult};
 
 #[derive(Debug)]
@@ -116,11 +116,12 @@ impl ContentScanner {
                 };
             }
             return ContentScanOutcome {
-                findings: binary_findings_to_findings(
+                findings: binary_findings_to_findings_with_patterns(
                     data,
                     logical_path,
                     self.max_blob_bytes,
                     self.exhaustive,
+                    &self.extra_patterns,
                 ),
                 bytes: data.len(),
                 failed: false,
@@ -244,6 +245,22 @@ mod tests {
         assert!(findings
             .iter()
             .all(|finding| finding.commit_sha1.as_deref() == Some(sha1)));
+    }
+
+    #[test]
+    fn custom_binary_pattern_preserves_metadata_through_adapter() {
+        let pattern = DynPattern {
+            id: "custom_binary".to_string(),
+            sev: "CRITICAL".to_string(),
+            desc: "Custom binary marker".to_string(),
+            regex: Regex::new("CUSTOM_[A-Z0-9]{4}").unwrap(),
+        };
+        let scanner = ContentScanner::new(Arc::new(vec![pattern]), false, 4.5, 1024, true);
+        let outcome = scanner.scan(b"\0\0CUSTOM_AB12\0", "fixture.bin", true);
+        assert_eq!(outcome.findings.len(), 1);
+        assert_eq!(outcome.findings[0].pattern_id, "custom_binary");
+        assert_eq!(outcome.findings[0].severity, "CRITICAL");
+        assert_eq!(outcome.findings[0].description, "Custom binary marker");
     }
 
     #[test]

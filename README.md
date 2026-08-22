@@ -120,7 +120,7 @@ For custom detectors, `--patterns-help` prints the current schema. The file must
 }
 ```
 
-Replace the example quantifier with a valid regular-expression bound appropriate for the token format you are detecting. Custom patterns are validated before scanning.
+Replace the example quantifier with a valid regular-expression bound appropriate for the token format you are detecting. Custom patterns are validated before scanning and apply to text, printable binary strings, archive entries, decompressed GZIP content, SQLite strings, and ELF strings.
 
 ## Important Options
 

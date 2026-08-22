@@ -213,6 +213,56 @@ fn local_directory_scan_binary_placeholder_policy_is_exhaustive() {
 }
 
 #[test]
+fn local_directory_scan_applies_custom_pattern_to_binary_content() {
+    let root = tempfile::tempdir().expect("create fixture directory");
+    let output = tempfile::tempdir().expect("create output directory");
+    let pattern_file = std::env::current_dir()
+        .expect("read test working directory")
+        .join(format!(
+            ".gitrecon-custom-pattern-{}.json",
+            std::process::id()
+        ));
+    fs::write(
+        &pattern_file,
+        r#"{"patterns":[{"id":"custom_binary","severity":"CRITICAL","description":"Custom binary marker","regex":"CUSTOM_[A-Z0-9]{4}"}]}"#,
+    )
+    .expect("write pattern fixture");
+    let binary = root.path().join("fixture.bin");
+    let mut data = vec![0u8; 32];
+    data.extend_from_slice(b"CUSTOM_AB12");
+    fs::write(binary, data).expect("write binary fixture");
+
+    let status = Command::new(env!("CARGO_BIN_EXE_gitrecon"))
+        .args([
+            "--dir",
+            root.path().to_str().expect("fixture path is UTF-8"),
+            "--patterns",
+            pattern_file.to_str().expect("pattern path is UTF-8"),
+            "--output",
+            output.path().to_str().expect("output path is UTF-8"),
+            "--format",
+            "json",
+            "--no-color",
+            "--quiet",
+        ])
+        .status()
+        .expect("run gitrecon");
+    assert!(status.success(), "gitrecon exited with {status}");
+
+    let report = fs::read_dir(output.path())
+        .expect("read output directory")
+        .map(|entry| entry.expect("read report entry").path())
+        .find(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
+        .expect("JSON report was not generated");
+    let body = fs::read_to_string(report).expect("read JSON report");
+    assert!(body.contains("custom_binary"));
+    assert!(body.contains("Custom binary marker"));
+    assert!(body.contains("CUSTOM_AB12"));
+    assert!(body.contains("CRITICAL"));
+    fs::remove_file(pattern_file).expect("remove pattern fixture");
+}
+
+#[test]
 fn local_directory_scan_rejects_missing_directory() {
     let output = tempfile::tempdir().expect("create output directory");
     let missing = output.path().join("does-not-exist");

@@ -157,8 +157,8 @@ Modul `src/content_scanner.rs` sekarang menyediakan shared `ContentScanner`, `Co
 
 ## P1-02 — Satukan detector registry untuk text, binary, dan archive
 
-**Status:** `TODO`  
-**Dependensi:** P1-01  
+**Status:** `DONE`
+**Dependensi:** P1-01
 **Area:** `src/binary_scanner.rs`, `src/binary_adapter.rs`, `src/streamer.rs`, `src/scanner_policy.rs`
 
 Custom patterns saat ini hanya mengalir ke text detector. Pindahkan detector menjadi registry/pipeline bersama sehingga `DynPattern`, severity, description, false-positive context, placeholder policy, dan exhaustive behavior berlaku juga pada printable strings, archive entries, GZIP, SQLite, dan ELF sections.
@@ -170,6 +170,10 @@ Custom patterns saat ini hanya mengalir ke text detector. Pindahkan detector men
 - Normal mode memfilter placeholder sesuai policy; exhaustive mode mempertahankan candidate tersebut.
 - Finding menyimpan source view, logical path, object SHA bila tersedia, dan context yang jelas.
 - Ditambahkan parity tests untuk setiap content view.
+
+### Implementasi P1-02
+
+`scan_binary_blob_with_patterns` sekarang mempertahankan built-in detectors sambil mengevaluasi `DynPattern` pada printable strings dan seluruh view binary yang telah didukung: archive ZIP/JAR, GZIP payload, SQLite strings, ELF strings, dan unknown binary. Adapter binary serta URL normalizer mempertahankan severity, description, source context, object SHA, dan deleted-state; filtering placeholder tetap normal-mode dan `--exhaustive` tetap superset. Regression coverage mencakup metadata adapter, provenance, local CLI binary scan, dan normal-versus-exhaustive policy. P1-03 tetap diperlukan untuk mengganti null-byte gate dengan magic-byte plus extension fallback; sparse GZIP yang belum masuk binary dispatch bukan bagian dari P1-02.
 
 ## P1-03 — Ganti null-byte gate dengan magic-byte plus extension fallback
 
