@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::binary_scanner;
 use crate::content_scanner::{ContentScanOutcome, ContentScanner, ScanAccumulator};
 use crate::forge::{Forge, Repository};
 use crate::streamer::{DynPattern, Finding, StreamResult};
@@ -303,6 +304,7 @@ pub(crate) struct FileScanConfig {
     pub(crate) repository_name: String,
     pub(crate) max_blob_bytes: usize,
     pub(crate) workers: usize,
+    pub(crate) scan_binaries: bool,
     pub(crate) exhaustive: bool,
     pub(crate) entropy_threshold: f64,
     pub(crate) live: bool,
@@ -326,14 +328,11 @@ pub(crate) async fn scan_workspace_files(config: FileScanConfig) {
         config.exhaustive,
         config.entropy_threshold,
         config.max_blob_bytes,
-        false,
+        config.scan_binaries,
     ));
     let mut candidates: Vec<PathBuf> = crate::collect_local_files(&config.workspace)
         .into_iter()
-        .filter(|(path, size)| {
-            !crate::binary_adapter::is_binary_extension(&path.to_string_lossy())
-                && *size <= config.max_blob_bytes as u64
-        })
+        .filter(|(_, size)| *size <= config.max_blob_bytes as u64)
         .map(|(path, _)| path)
         .collect();
     candidates.sort_by_key(|path| {
@@ -366,19 +365,18 @@ pub(crate) async fn scan_workspace_files(config: FileScanConfig) {
                 if data.is_empty() {
                     return (ContentScanOutcome::empty(), Vec::new());
                 }
-                let probe = &data[..data.len().min(crate::BINARY_DETECTION_PROBE_SIZE)];
-                let null_count = probe.iter().filter(|&&byte| byte == 0).count();
-                if null_count > crate::NULL_BYTE_THRESHOLD {
-                    return (ContentScanOutcome::empty(), Vec::new());
-                }
                 let relative_path = path
                     .strip_prefix(&workspace)
                     .map(|relative| relative.to_string_lossy().replace('\\', "/"))
                     .unwrap_or_else(|_| path.to_string_lossy().replace('\\', "/"));
                 let source = format!("{}/{}", repository_name, relative_path);
-                let outcome = scanner.scan(&data, &source, false);
+                let dispatch = binary_scanner::classify_binary(&data, &source, 8192, 10);
+                let is_binary = dispatch.is_binary();
+                let outcome = scanner.scan(&data, &source, is_binary);
                 let mut technologies = Vec::new();
-                crate::detect_tech_from_path(&relative_path, &mut technologies);
+                if !is_binary {
+                    crate::detect_tech_from_path(&relative_path, &mut technologies);
+                }
                 (outcome, technologies)
             }
         })
@@ -545,6 +543,7 @@ where
 mod tests {
     use std::collections::HashSet;
     use std::fs;
+    use std::io::Write;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -558,6 +557,7 @@ mod tests {
     use crate::forge::{EnumScope, Forge, Platform, RateLimitInfo, Repository, TreeEntry};
     use crate::streamer::DynPattern;
     use tokio::sync::Mutex;
+    use zip::{write::SimpleFileOptions, ZipWriter};
 
     fn fixture_repository() -> Repository {
         Repository {
@@ -627,13 +627,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scan_workspace_files_filters_binary_files_and_collects_findings() {
+    async fn scan_workspace_files_scans_binary_files_and_collects_findings() {
         let workspace =
             std::env::temp_dir().join(format!("gitrecon-file-scan-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&workspace);
         fs::create_dir_all(&workspace).expect("test workspace should be creatable");
         fs::write(workspace.join("config.txt"), b"CUSTOM_ABCD1234").unwrap();
-        fs::write(workspace.join("image.png"), [0_u8, 1, 2, 3]).unwrap();
+        let mut archive_writer = ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        archive_writer
+            .start_file("nested/config.txt", SimpleFileOptions::default())
+            .unwrap();
+        archive_writer.write_all(b"CUSTOM_ABCD1234").unwrap();
+        let archive = archive_writer.finish().unwrap().into_inner();
+        let archive_bytes = archive.len();
+        fs::write(workspace.join("fixture.zip"), archive).unwrap();
 
         let all_findings = Arc::new(Mutex::new(Vec::new()));
         let tech_stack_set = Arc::new(Mutex::new(HashSet::new()));
@@ -645,6 +652,7 @@ mod tests {
             repository_name: "acme/example".to_string(),
             max_blob_bytes: 1024,
             workers: 2,
+            scan_binaries: true,
             exhaustive: true,
             entropy_threshold: 4.5,
             live: false,
@@ -668,11 +676,21 @@ mod tests {
         .await;
 
         let findings = all_findings.lock().await;
-        assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].filename, "acme/example/config.txt");
-        assert_eq!(blobs_scanned.load(Ordering::Relaxed), 1);
+        assert_eq!(findings.len(), 2);
+        assert!(findings
+            .iter()
+            .any(|finding| finding.filename == "acme/example/config.txt"));
+        let archive_finding = findings
+            .iter()
+            .find(|finding| finding.filename == "acme/example/fixture.zip")
+            .expect("archive finding should be present");
+        assert_eq!(archive_finding.pattern_id, "custom_token");
+        assert_eq!(archive_finding.severity, "HIGH");
+        assert_eq!(archive_finding.description, "Custom test token");
+        assert!(archive_finding.context.contains("nested/config.txt"));
+        assert_eq!(blobs_scanned.load(Ordering::Relaxed), 2);
         assert_eq!(blobs_failed.load(Ordering::Relaxed), 0);
-        assert_eq!(bytes_scanned.load(Ordering::Relaxed), 15);
+        assert_eq!(bytes_scanned.load(Ordering::Relaxed), 15 + archive_bytes);
         drop(findings);
         fs::remove_dir_all(workspace).expect("test workspace should be removable");
     }
@@ -780,6 +798,7 @@ mod tests {
                 repository_name: String::new(),
                 max_blob_bytes: 1024,
                 workers: 1,
+                scan_binaries: true,
                 exhaustive: true,
                 entropy_threshold: 4.5,
                 live: false,

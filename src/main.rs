@@ -910,9 +910,6 @@ struct Cli {
 // HELPERS
 // ════════════════════════════════════════════════
 
-const BINARY_DETECTION_PROBE_SIZE: usize = 8192;
-const NULL_BYTE_THRESHOLD: usize = 10;
-
 fn collect_local_files(root: &Path) -> Vec<(PathBuf, u64)> {
     let mut files = Vec::new();
     let mut stack = vec![root.to_path_buf()];
@@ -1092,6 +1089,7 @@ fn build_forge_file_scan_config(
         repository_name: String::new(),
         max_blob_bytes: args.max_blob_size * 1024 * 1024,
         workers: args.workers,
+        scan_binaries: !args.no_scan_binaries,
         exhaustive: args.exhaustive,
         entropy_threshold: args.entropy_threshold,
         live: args.live,

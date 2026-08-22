@@ -197,8 +197,8 @@ Null-byte heuristic tetap dapat dipakai sebagai signal, tetapi tidak boleh menja
 
 ## P1-04 — Pulihkan binary/archive parity pada forge mode
 
-**Status:** `TODO`  
-**Dependensi:** P1-01, P1-02, P1-03  
+**Status:** `IN PROGRESS`
+**Dependensi:** P1-01, P1-02, P1-03
 **Area:** `src/forge_scan.rs`, `src/forge.rs`, provider modules
 
 Forge mode tidak boleh memfilter binary sebelum scanner menerima data. Pertahankan workspace reconstruction untuk `--save`, tetapi gunakan scanner engine yang sama untuk content bytes dan file path. Source metrics, typed outcomes, cache semantics, dan report fields harus konsisten dengan URL/local mode.
@@ -210,6 +210,10 @@ Forge mode tidak boleh memfilter binary sebelum scanner menerima data. Pertahank
 - `object_source_stats`, `outcome_stats`, cache, and rate metrics tidak lagi selalu zero tanpa penjelasan.
 - Malformed, oversized, skipped, dan failed file memiliki outcome terstruktur.
 - Ditambahkan forge-vs-local parity integration test menggunakan provider mock.
+
+### Implementasi P1-04 (sub-bagian binary/archive parity)
+
+Forge workspace snapshots sekarang tidak lagi memfilter file binary berdasarkan ekstensi atau null-byte count sebelum scanner menerima bytes. `FileScanConfig` meneruskan `--no-scan-binaries`, dan shared `ContentScanner` memakai `BinaryDispatch` serta detector registry yang sama dengan local mode. Regression test membuktikan custom finding pada text dan ZIP archive, termasuk severity, description, archive provenance, byte count, dan opt-out wiring. Pekerjaan P1-04 yang tersisa adalah telemetry acquisition/cache/rate-limit, typed outcomes untuk malformed/oversized/skipped/failed files, dan provider-mock integration parity penuh.
 
 ## P1-05 — Tambahkan archive limits dan typed truncation outcomes
 
