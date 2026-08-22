@@ -13,7 +13,7 @@ use std::time::Instant;
 use crate::binary_scanner;
 use crate::content_scanner::{ContentScanOutcome, ContentScanner, ScanAccumulator};
 use crate::forge::{Forge, Repository};
-use crate::streamer::{DynPattern, Finding, StreamResult};
+use crate::streamer::{DynPattern, Finding, ScanOutcomeStats, StreamResult};
 use crate::temp_cleanup::TempDirGuard;
 use colored::Colorize;
 use tokio::sync::Mutex;
@@ -200,6 +200,7 @@ impl RepositoryScanOutcome {
 /// The forge-specific fetch operation is supplied by the caller because each
 /// provider uses a different endpoint and authentication shape. All shared
 /// safety and resource rules stay here.
+#[cfg(test)]
 pub(crate) async fn reconstruct_blobs<E, F, Fut>(
     tree: Vec<E>,
     workspace: PathBuf,
@@ -212,38 +213,84 @@ where
     F: Fn(E) -> Fut + Clone + Send + Sync,
     Fut: Future<Output = anyhow::Result<Vec<u8>>> + Send,
 {
-    let blobs: Vec<_> = tree
-        .into_iter()
-        .filter(BlobEntry::is_blob)
-        .filter(|entry| {
-            entry
-                .size()
-                .is_none_or(|size| size <= max_blob_bytes as u64)
-        })
-        .collect();
+    reconstruct_blobs_with_stats(tree, workspace, max_blob_bytes, workers, fetch_blob, None).await
+}
+
+async fn reconstruct_blobs_with_stats<E, F, Fut>(
+    tree: Vec<E>,
+    workspace: PathBuf,
+    max_blob_bytes: usize,
+    workers: usize,
+    fetch_blob: F,
+    outcome_stats: Option<Arc<Mutex<ScanOutcomeStats>>>,
+) -> usize
+where
+    E: BlobEntry,
+    F: Fn(E) -> Fut + Clone + Send + Sync,
+    Fut: Future<Output = anyhow::Result<Vec<u8>>> + Send,
+{
+    let blobs: Vec<_> = tree.into_iter().filter(BlobEntry::is_blob).collect();
 
     let reconstruct_stream = futures::stream::iter(blobs).map(|entry| {
         let fetch_blob = fetch_blob.clone();
         let workspace = workspace.clone();
+        let outcome_stats = outcome_stats.clone();
         async move {
+            if entry
+                .size()
+                .is_some_and(|size| size > max_blob_bytes as u64)
+            {
+                if let Some(stats) = outcome_stats.as_ref() {
+                    stats.lock().await.skipped_oversized += 1;
+                }
+                return false;
+            }
             let data = match fetch_blob(entry.clone()).await {
                 Ok(data) if data.len() <= max_blob_bytes => data,
-                _ => return false,
+                Ok(_) => {
+                    if let Some(stats) = outcome_stats.as_ref() {
+                        stats.lock().await.skipped_oversized += 1;
+                    }
+                    return false;
+                }
+                Err(_) => {
+                    if let Some(stats) = outcome_stats.as_ref() {
+                        stats.lock().await.failed_files += 1;
+                    }
+                    return false;
+                }
             };
             let relative_path = match crate::normalize_repo_relative_path(entry.path()) {
                 Some(path) => path,
-                None => return false,
+                None => {
+                    if let Some(stats) = outcome_stats.as_ref() {
+                        stats.lock().await.skipped_files += 1;
+                    }
+                    return false;
+                }
             };
             let local_path = workspace.join(relative_path);
             if !local_path.starts_with(&workspace) {
+                if let Some(stats) = outcome_stats.as_ref() {
+                    stats.lock().await.skipped_files += 1;
+                }
                 return false;
             }
             if let Some(parent) = local_path.parent() {
                 if std::fs::create_dir_all(parent).is_err() {
+                    if let Some(stats) = outcome_stats.as_ref() {
+                        stats.lock().await.failed_files += 1;
+                    }
                     return false;
                 }
             }
-            std::fs::write(local_path, data).is_ok()
+            if std::fs::write(local_path, data).is_err() {
+                if let Some(stats) = outcome_stats.as_ref() {
+                    stats.lock().await.failed_files += 1;
+                }
+                return false;
+            }
+            true
         }
     });
     let reconstruct_stream = reconstruct_stream.buffer_unordered(workers.max(1));
@@ -289,7 +336,10 @@ pub(crate) async fn build_stream_result(
         cache_hits: 0,
         cache_misses: 0,
         cache_stats: None,
-        object_source_stats: crate::streamer::ObjectSourceStats::default(),
+        object_source_stats: crate::streamer::ObjectSourceStats {
+            forge: outcome.blobs_recovered,
+            ..Default::default()
+        },
         outcome_stats: crate::streamer::ScanOutcomeStats::default(),
         rate_limit_allowed: 0,
         rate_limit_dropped: 0,
@@ -319,6 +369,7 @@ pub(crate) struct FileScanConfig {
     pub(crate) blobs_scanned: Arc<AtomicUsize>,
     pub(crate) blobs_failed: Arc<AtomicUsize>,
     pub(crate) bytes_scanned: Arc<AtomicUsize>,
+    pub(crate) outcome_stats: Arc<Mutex<ScanOutcomeStats>>,
 }
 
 /// Scan all eligible files in a reconstructed repository workspace.
@@ -330,7 +381,15 @@ pub(crate) async fn scan_workspace_files(config: FileScanConfig) {
         config.max_blob_bytes,
         config.scan_binaries,
     ));
-    let mut candidates: Vec<PathBuf> = crate::collect_local_files(&config.workspace)
+    let all_files = crate::collect_local_files(&config.workspace);
+    let oversized_files = all_files
+        .iter()
+        .filter(|(_, size)| *size > config.max_blob_bytes as u64)
+        .count();
+    if oversized_files > 0 {
+        config.outcome_stats.lock().await.skipped_oversized += oversized_files;
+    }
+    let mut candidates: Vec<PathBuf> = all_files
         .into_iter()
         .filter(|(_, size)| *size <= config.max_blob_bytes as u64)
         .map(|(path, _)| path)
@@ -351,18 +410,24 @@ pub(crate) async fn scan_workspace_files(config: FileScanConfig) {
     let file_stream = futures::stream::iter(candidates)
         .map(|path| {
             let stop_flag = config.stop_flag.clone();
+            let outcome_stats = config.outcome_stats.clone();
             let scanner = scanner.clone();
             let workspace = config.workspace.clone();
             let repository_name = config.repository_name.clone();
             async move {
                 if stop_flag.load(Ordering::Relaxed) {
+                    outcome_stats.lock().await.skipped_stop_requested += 1;
                     return (ContentScanOutcome::stopped(), Vec::new());
                 }
                 let data = match tokio::fs::read(&path).await {
                     Ok(data) => data,
-                    Err(_) => return (ContentScanOutcome::failed(), Vec::new()),
+                    Err(_) => {
+                        outcome_stats.lock().await.failed_files += 1;
+                        return (ContentScanOutcome::failed(), Vec::new());
+                    }
                 };
                 if data.is_empty() {
+                    outcome_stats.lock().await.skipped_files += 1;
                     return (ContentScanOutcome::empty(), Vec::new());
                 }
                 let relative_path = path
@@ -504,7 +569,7 @@ where
         let forge_ref = forge.clone();
         let repo_for_blob = repo.clone();
         let fetch_blob_for_repo = fetch_blob.clone();
-        let failed = reconstruct_blobs(
+        let failed = reconstruct_blobs_with_stats(
             tree,
             repo_workspace.clone(),
             scan_config.max_blob_bytes,
@@ -516,6 +581,7 @@ where
                 let head_sha = head_sha.clone();
                 async move { fetch_blob(forge, repo, entry, head_sha).await }
             },
+            Some(scan_config.outcome_stats.clone()),
         )
         .await;
         scan_config
@@ -528,7 +594,7 @@ where
         })
         .await;
     }
-    build_stream_result(
+    let mut result = build_stream_result(
         started_at,
         scan_config.all_findings.clone(),
         scan_config.tech_stack_set.clone(),
@@ -536,7 +602,9 @@ where
         scan_config.blobs_failed.clone(),
         scan_config.bytes_scanned.clone(),
     )
-    .await
+    .await;
+    result.outcome_stats = scan_config.outcome_stats.lock().await.clone();
+    result
 }
 
 #[cfg(test)]
@@ -555,7 +623,7 @@ mod tests {
         WorkspaceLifecycle,
     };
     use crate::forge::{EnumScope, Forge, Platform, RateLimitInfo, Repository, TreeEntry};
-    use crate::streamer::DynPattern;
+    use crate::streamer::{DynPattern, ScanOutcomeStats};
     use tokio::sync::Mutex;
     use zip::{write::SimpleFileOptions, ZipWriter};
 
@@ -641,12 +709,15 @@ mod tests {
         let archive = archive_writer.finish().unwrap().into_inner();
         let archive_bytes = archive.len();
         fs::write(workspace.join("fixture.zip"), archive).unwrap();
+        fs::write(workspace.join("empty.txt"), b"").unwrap();
+        fs::write(workspace.join("oversized.bin"), vec![b'x'; 1025]).unwrap();
 
         let all_findings = Arc::new(Mutex::new(Vec::new()));
         let tech_stack_set = Arc::new(Mutex::new(HashSet::new()));
         let blobs_scanned = Arc::new(AtomicUsize::new(0));
         let blobs_failed = Arc::new(AtomicUsize::new(0));
         let bytes_scanned = Arc::new(AtomicUsize::new(0));
+        let outcome_stats = Arc::new(Mutex::new(ScanOutcomeStats::default()));
         scan_workspace_files(FileScanConfig {
             workspace: workspace.clone(),
             repository_name: "acme/example".to_string(),
@@ -672,6 +743,7 @@ mod tests {
             blobs_scanned: blobs_scanned.clone(),
             blobs_failed: blobs_failed.clone(),
             bytes_scanned: bytes_scanned.clone(),
+            outcome_stats: outcome_stats.clone(),
         })
         .await;
 
@@ -691,6 +763,11 @@ mod tests {
         assert_eq!(blobs_scanned.load(Ordering::Relaxed), 2);
         assert_eq!(blobs_failed.load(Ordering::Relaxed), 0);
         assert_eq!(bytes_scanned.load(Ordering::Relaxed), 15 + archive_bytes);
+        let outcome_stats = outcome_stats.lock().await;
+        assert_eq!(outcome_stats.skipped_files, 1);
+        assert_eq!(outcome_stats.skipped_oversized, 1);
+        assert_eq!(outcome_stats.failed_files, 0);
+        drop(outcome_stats);
         drop(findings);
         fs::remove_dir_all(workspace).expect("test workspace should be removable");
     }
@@ -813,6 +890,7 @@ mod tests {
                 blobs_scanned: Arc::new(AtomicUsize::new(0)),
                 blobs_failed: Arc::new(AtomicUsize::new(0)),
                 bytes_scanned: Arc::new(AtomicUsize::new(0)),
+                outcome_stats: Arc::new(Mutex::new(ScanOutcomeStats::default())),
             },
             |_forge, _repo, _entry, _head_sha| async { Ok(Vec::new()) },
             Instant::now(),

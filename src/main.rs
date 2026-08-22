@@ -1106,6 +1106,9 @@ fn build_forge_file_scan_config(
         blobs_scanned: Arc::new(AtomicUsize::new(0)),
         blobs_failed: Arc::new(AtomicUsize::new(0)),
         bytes_scanned: Arc::new(AtomicUsize::new(0)),
+        outcome_stats: Arc::new(tokio::sync::Mutex::new(
+            streamer::ScanOutcomeStats::default(),
+        )),
     };
     (started_at, scan_config)
 }

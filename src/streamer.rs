@@ -766,6 +766,7 @@ pub struct ObjectSourceStats {
     pub pack: usize,
     pub cache: usize,
     pub loose_http: usize,
+    pub forge: usize,
 }
 
 /// Object processing outcome metrics.
@@ -775,6 +776,8 @@ pub struct ScanOutcomeStats {
     pub skipped_invalid_object: usize,
     pub skipped_not_found: usize,
     pub skipped_oversized: usize,
+    pub skipped_files: usize,
+    pub failed_files: usize,
     pub failed_http_statuses: BTreeMap<String, usize>,
 }
 
@@ -791,6 +794,8 @@ impl ScanOutcomeStats {
             skipped_invalid_object: count_skip(SkipReason::InvalidObject),
             skipped_not_found: count_skip(SkipReason::NotFound),
             skipped_oversized: count_skip(SkipReason::Oversized),
+            skipped_files: 0,
+            failed_files: 0,
             failed_http_statuses,
         }
     }
@@ -800,10 +805,11 @@ impl ScanOutcomeStats {
             + self.skipped_invalid_object
             + self.skipped_not_found
             + self.skipped_oversized
+            + self.skipped_files
     }
 
     pub fn failed_total(&self) -> usize {
-        self.failed_http_statuses.values().sum()
+        self.failed_files + self.failed_http_statuses.values().sum::<usize>()
     }
 }
 
@@ -2146,6 +2152,7 @@ impl Streamer {
                     .objects_by_source
                     .get(&ObjectSourceKind::LooseHttp)
                     .unwrap_or(&0),
+                forge: 0,
             },
             outcome_stats,
             // PERF-004: Rate limit metrics

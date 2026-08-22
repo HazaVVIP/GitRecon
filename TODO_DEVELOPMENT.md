@@ -213,7 +213,7 @@ Forge mode tidak boleh memfilter binary sebelum scanner menerima data. Pertahank
 
 ### Implementasi P1-04 (sub-bagian binary/archive parity)
 
-Forge workspace snapshots sekarang tidak lagi memfilter file binary berdasarkan ekstensi atau null-byte count sebelum scanner menerima bytes. `FileScanConfig` meneruskan `--no-scan-binaries`, dan shared `ContentScanner` memakai `BinaryDispatch` serta detector registry yang sama dengan local mode. Regression test membuktikan custom finding pada text dan ZIP archive, termasuk severity, description, archive provenance, byte count, dan opt-out wiring. Pekerjaan P1-04 yang tersisa adalah telemetry acquisition/cache/rate-limit, typed outcomes untuk malformed/oversized/skipped/failed files, dan provider-mock integration parity penuh.
+Forge workspace snapshots sekarang tidak lagi memfilter file binary berdasarkan ekstensi atau null-byte count sebelum scanner menerima bytes. `FileScanConfig` meneruskan `--no-scan-binaries`, dan shared `ContentScanner` memakai `BinaryDispatch` serta detector registry yang sama dengan local mode. `ObjectSourceStats.forge` menandai blob hasil rekonstruksi forge, sedangkan `ScanOutcomeStats` mencatat file kosong, oversized, invalid, stop-requested, dan failed. Regression test membuktikan custom finding pada text dan ZIP archive, termasuk severity, description, archive provenance, byte count, typed outcomes, dan opt-out wiring. Pekerjaan P1-04 yang tersisa adalah cache/rate-limit telemetry acquisition yang berasal dari provider, error/status classification yang lebih rinci, dan provider-mock integration parity penuh.
 
 ## P1-05 — Tambahkan archive limits dan typed truncation outcomes
 
