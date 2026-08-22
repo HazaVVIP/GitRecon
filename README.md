@@ -131,7 +131,7 @@ Replace the example quantifier with a valid regular-expression bound appropriate
 | `--parallel-targets N` | `1` (maximum `1000`) | Bound concurrent target orchestration |
 | `--workers N` | `50` | Bound concurrent object or file scanning work |
 | `--timeout SEC` | `10` | Per-request timeout |
-| `--retries N` | `3` | Retry count |
+| `--retries N` | `3` | Retry count after the initial request; `0` means no retry |
 | `--mem-limit MB` | `256` | Streaming memory limit |
 | `--max-findings N` | `0` | Stop after a limit; zero means unlimited |
 | `--fuzz` | disabled | Probe additional Git exposure paths |
@@ -153,7 +153,7 @@ Replace the example quantifier with a valid regular-expression bound appropriate
 | `--max-history COMMITS` | `500` | Commit traversal depth; `0` means unlimited |
 | `--entropy-threshold FLOAT` | `4.5` | High-entropy candidate threshold |
 | `--max-timeout SEC` | `60` | Maximum adaptive request timeout |
-| `--rate N` | — | Global request rate limit |
+| `--rate N` | — | Global request rate limit; `0` means unlimited and values must be finite |
 | `--proxy-list FILE` | — | Rotate proxies from a newline-delimited file |
 | `--ua-file FILE` | — | Load User-Agent values from a file |
 | `--retry-strategy STRATEGY` | `standard` | Select retry behavior |

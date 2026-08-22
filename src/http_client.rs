@@ -266,8 +266,9 @@ pub struct Response {
 }
 
 impl Response {
+    /// Return true for every successful HTTP response in the standard 2xx range.
     pub fn ok(&self) -> bool {
-        self.status == 200
+        (200..=299).contains(&self.status)
     }
 
     pub fn text(&self) -> &str {
@@ -430,7 +431,7 @@ impl HttpClient {
         // Sprint 3 (S3.8): user override wins — cfg.retries is a CEILING, not a floor.
         // Previously `.max()` meant --retries=1 with RetryStrategy::Aggressive still
         // did 10 retries, silently overriding user intent.
-        let max_retries = strategy.max_retries().min(self.cfg.retries.max(1));
+        let max_retries = strategy.max_retries().min(self.cfg.retries);
         let mut attempt = 0u32;
 
         loop {
@@ -822,7 +823,7 @@ impl HttpClient {
         // Sprint 3 (S3.8): user override wins — cfg.retries is a CEILING, not a floor.
         // Previously `.max()` meant --retries=1 with RetryStrategy::Aggressive still
         // did 10 retries, silently overriding user intent.
-        let max_retries = strategy.max_retries().min(self.cfg.retries.max(1));
+        let max_retries = strategy.max_retries().min(self.cfg.retries);
         let mut attempt = 0u32;
 
         loop {
@@ -1117,11 +1118,10 @@ mod tests {
     use super::*;
 
     /// Reproduces the `max_retries` clamp: user `cfg.retries` is the ceiling, capped
-    /// down by the strategy's ceiling as well. Previously the code used `.max()`
-    /// which meant a user setting `--retries 1` with `RetryStrategy::Aggressive`
-    /// still executed 10 retries — silently overriding the operator.
+    /// down by the strategy's ceiling as well. Zero means no retry after the initial
+    /// request; the initial request is always still attempted.
     fn clamp(strategy: RetryStrategy, user_retries: u32) -> u32 {
-        strategy.max_retries().min(user_retries.max(1))
+        strategy.max_retries().min(user_retries)
     }
 
     #[test]
@@ -1140,9 +1140,34 @@ mod tests {
     }
 
     #[test]
-    fn user_retries_zero_becomes_one() {
-        // Zero would mean "never even try" — floor at 1 so the first attempt runs.
-        assert_eq!(clamp(RetryStrategy::Aggressive, 0), 1);
+    fn user_retries_zero_means_no_retry() {
+        assert_eq!(clamp(RetryStrategy::Aggressive, 0), 0);
+    }
+
+    #[test]
+    fn response_ok_accepts_all_success_statuses_only() {
+        for status in 200..=299 {
+            let response = Response {
+                url: "https://example.test".to_string(),
+                status,
+                body: bytes::Bytes::new(),
+                headers: std::collections::HashMap::new(),
+                elapsed_ms: 0.0,
+                error: None,
+            };
+            assert!(response.ok(), "expected HTTP {status} to be successful");
+        }
+        for status in [199, 300, 404, 500] {
+            let response = Response {
+                url: "https://example.test".to_string(),
+                status,
+                body: bytes::Bytes::new(),
+                headers: std::collections::HashMap::new(),
+                elapsed_ms: 0.0,
+                error: None,
+            };
+            assert!(!response.ok(), "expected HTTP {status} to be unsuccessful");
+        }
     }
 
     #[test]

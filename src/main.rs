@@ -2318,6 +2318,35 @@ fn should_short_circuit_partial_exposure(objects_accessible: bool, report_partia
     !objects_accessible && report_partial
 }
 
+fn validate_runtime_numeric_options(args: &Cli) -> Result<(), String> {
+    const MAX_DELAY_SECONDS: f64 = 3_600.0;
+    const MAX_RATE_RPS: f64 = 1_000_000.0;
+
+    for (name, value) in [("--delay", args.delay), ("--jitter", args.jitter)] {
+        if !value.is_finite() || !(0.0..=MAX_DELAY_SECONDS).contains(&value) {
+            return Err(format!(
+                "{} must be finite and in [0, {}] seconds, got {}",
+                name, MAX_DELAY_SECONDS, value
+            ));
+        }
+    }
+    if !args.entropy_threshold.is_finite() || args.entropy_threshold < 0.0 {
+        return Err(format!(
+            "--entropy-threshold must be finite and non-negative, got {}",
+            args.entropy_threshold
+        ));
+    }
+    if let Some(rate) = args.rate {
+        if !rate.is_finite() || !(0.0..=MAX_RATE_RPS).contains(&rate) {
+            return Err(format!(
+                "--rate must be finite and in [0, {}] requests/second, got {}",
+                MAX_RATE_RPS, rate
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_parallel_targets(value: usize) -> Result<(), String> {
     if value == 0 || value > 1000 {
         Err(format!(
@@ -2421,6 +2450,10 @@ async fn main() {
             "  ✘  --checkpoint-interval must be in [1, 1_000_000], got {}",
             args.checkpoint_interval
         );
+        std::process::exit(2);
+    }
+    if let Err(error) = validate_runtime_numeric_options(&args) {
+        eprintln!("  ✘  {}", error);
         std::process::exit(2);
     }
 
@@ -3081,6 +3114,51 @@ mod tests {
         assert!(validate_parallel_targets(1001).is_err());
         assert!(validate_parallel_targets(1).is_ok());
         assert!(validate_parallel_targets(1000).is_ok());
+    }
+
+    #[test]
+    fn runtime_numeric_validation_rejects_non_finite_values() {
+        let mut args = Cli::try_parse_from(["gitrecon", "https://example.test"]).unwrap();
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            args.delay = value;
+            assert!(validate_runtime_numeric_options(&args).is_err());
+            args.jitter = value;
+            assert!(validate_runtime_numeric_options(&args).is_err());
+            args.entropy_threshold = value;
+            assert!(validate_runtime_numeric_options(&args).is_err());
+            args.rate = Some(value);
+            assert!(validate_runtime_numeric_options(&args).is_err());
+        }
+    }
+
+    #[test]
+    fn runtime_numeric_validation_rejects_negative_values() {
+        let mut args = Cli::try_parse_from(["gitrecon", "https://example.test"]).unwrap();
+        args.delay = -0.001;
+        assert!(validate_runtime_numeric_options(&args).is_err());
+        args.delay = 0.0;
+        args.jitter = -0.001;
+        assert!(validate_runtime_numeric_options(&args).is_err());
+        args.jitter = 0.0;
+        args.entropy_threshold = -0.001;
+        assert!(validate_runtime_numeric_options(&args).is_err());
+        args.entropy_threshold = 4.5;
+        args.rate = Some(-0.001);
+        assert!(validate_runtime_numeric_options(&args).is_err());
+    }
+
+    #[test]
+    fn runtime_numeric_validation_preserves_safe_boundaries() {
+        let mut args = Cli::try_parse_from(["gitrecon", "https://example.test"]).unwrap();
+        args.delay = 3_600.0;
+        args.jitter = 3_600.0;
+        args.entropy_threshold = 0.0;
+        args.rate = Some(0.0);
+        assert!(validate_runtime_numeric_options(&args).is_ok());
+        args.rate = Some(1_000_000.0);
+        assert!(validate_runtime_numeric_options(&args).is_ok());
+        args.delay = 3_600.001;
+        assert!(validate_runtime_numeric_options(&args).is_err());
     }
 
     #[test]

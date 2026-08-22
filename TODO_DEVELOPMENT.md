@@ -93,7 +93,7 @@ Dry-run sekarang berhenti sebelum URL detection, repository reconnaissance, prov
 
 ## P0-04 — Validasi input numerik dan perbaiki semantics retry/HTTP
 
-**Status:** `TODO`  
+**Status:** `DONE` — implementation validated locally; commit pending in current package
 **Dependensi:** tidak ada  
 **Area:** `src/main.rs`, `src/http_client.rs`, `src/rate_limiter.rs`
 
@@ -107,6 +107,10 @@ Tambahkan validator finite dan non-negative untuk `delay`, `jitter`, `entropy-th
 - Metrics membedakan request attempts, retries, terminal failures, dan status counts.
 - POST dan GET memiliki policy retry yang eksplisit; webhook non-idempotent tidak diam-diam diduplikasi tanpa policy.
 - Ditambahkan tests untuk 0, boundary values, NaN/inf, 2xx, 4xx, 429, dan 5xx.
+
+### Implementasi P0-04
+
+`--delay` dan `--jitter` kini wajib finite dalam rentang 0–3.600 detik; `--entropy-threshold` wajib finite dan non-negative; `--rate` wajib finite dalam rentang 0–1.000.000 requests/second dengan 0 berarti unlimited. `Response::ok()` kini menerima seluruh status 2xx. `--retries 0` melakukan request awal tanpa retry pada GET maupun POST. Regression tests mencakup NaN, infinity, nilai negatif, boundary values, zero retry, dan seluruh rentang 2xx.
 
 ## P0-05 — Ganti process exit pada helper reusable dengan typed errors
 
