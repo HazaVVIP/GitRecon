@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{fence, AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
-use tokio::sync::Mutex as TokioMutex;
+use tokio::sync::{Mutex as TokioMutex, Notify, OwnedSemaphorePermit, Semaphore};
 
 use crate::binary_scanner;
 use crate::checkpoint::{
@@ -1160,6 +1160,78 @@ impl AdaptiveConcurrency {
     }
 }
 
+#[derive(Clone)]
+struct AdaptiveConcurrencyGate {
+    inner: Arc<AdaptiveConcurrencyGateInner>,
+}
+
+struct AdaptiveConcurrencyGateInner {
+    semaphore: Arc<Semaphore>,
+    limit: AtomicUsize,
+    active: AtomicUsize,
+    notify: Notify,
+}
+
+struct AdaptiveConcurrencyPermit {
+    inner: Arc<AdaptiveConcurrencyGateInner>,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl AdaptiveConcurrencyGate {
+    fn new(max_permits: usize) -> Self {
+        let max_permits = max_permits.max(1);
+        Self {
+            inner: Arc::new(AdaptiveConcurrencyGateInner {
+                semaphore: Arc::new(Semaphore::new(max_permits)),
+                limit: AtomicUsize::new(max_permits),
+                active: AtomicUsize::new(0),
+                notify: Notify::new(),
+            }),
+        }
+    }
+
+    async fn acquire(&self) -> AdaptiveConcurrencyPermit {
+        loop {
+            let permit = self
+                .inner
+                .semaphore
+                .clone()
+                .acquire_owned()
+                .await
+                .expect("adaptive concurrency semaphore cannot be closed");
+            let active = self.inner.active.fetch_add(1, Ordering::AcqRel) + 1;
+            if active <= self.inner.limit.load(Ordering::Acquire) {
+                return AdaptiveConcurrencyPermit {
+                    inner: self.inner.clone(),
+                    _permit: permit,
+                };
+            }
+
+            let notified = self.inner.notify.notified();
+            self.inner.active.fetch_sub(1, Ordering::AcqRel);
+            drop(permit);
+            notified.await;
+        }
+    }
+
+    fn set_limit(&self, limit: usize) {
+        self.inner.limit.store(limit.max(1), Ordering::Release);
+        self.inner.notify.notify_waiters();
+    }
+
+    #[cfg(test)]
+    fn current_limit(&self) -> usize {
+        self.inner.limit.load(Ordering::Acquire)
+    }
+}
+
+impl Drop for AdaptiveConcurrencyPermit {
+    fn drop(&mut self) {
+        self.inner.active.fetch_sub(1, Ordering::AcqRel);
+        self.inner.notify.notify_one();
+    }
+}
+
 // ════════════════════════════════════════════════
 // MAIN STREAMER
 // ════════════════════════════════════════════════
@@ -1481,6 +1553,7 @@ impl Streamer {
         let cache_hits = self.cache_hits.clone();
         let cache_misses = self.cache_misses.clone();
         let adaptive_enabled = self.adaptive;
+        let concurrency_gate = AdaptiveConcurrencyGate::new(initial_workers);
 
         let stream = futures::stream::iter(filtered_sha1s)
             .map(|sha1| {
@@ -1499,7 +1572,9 @@ impl Streamer {
                 let cache_misses = cache_misses.clone();
                 let fp_keywords = self.false_positive_keywords.clone();
                 let processed_tracker = processed_sha1s_tracker.clone();
+                let concurrency_gate = concurrency_gate.clone();
                 async move {
+                    let _permit = concurrency_gate.acquire().await;
                     let result = fetch_and_process(
                         &client,
                         &git_url,
@@ -1653,11 +1728,14 @@ impl Streamer {
                         let old_workers = current_workers.load(Ordering::Relaxed);
                         let new_workers = ac.adjust(done);
                         current_workers.store(new_workers, Ordering::Relaxed);
-                        // Note: buffer_unordered worker count cannot be changed mid-stream
-                        // The adjusted count will take effect on resume
-                        // Only log if workers actually changed
+                        concurrency_gate.set_limit(new_workers);
+                        // The gate applies the adjusted limit to subsequent work in
+                        // this stream while existing operations drain naturally.
                         if self.verbose && new_workers != old_workers {
-                            eprintln!("  [ADAPTIVE] Worker count adjusted: {} (will apply on next resume)", new_workers);
+                            eprintln!(
+                                "  [ADAPTIVE] Worker count adjusted: {} → {}",
+                                old_workers, new_workers
+                            );
                         }
                     }
                 }
@@ -7062,6 +7140,32 @@ REPLACE_WITH_YOUR_KEY
     // ════════════════════════════════════════════════
     // PERF-003: Adaptive Concurrency Tests
     // ════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn adaptive_gate_enforces_runtime_limit() {
+        use tokio::time::{timeout, Duration};
+
+        let gate = AdaptiveConcurrencyGate::new(2);
+        let first = gate.acquire().await;
+        let second = gate.acquire().await;
+        gate.set_limit(1);
+        assert_eq!(gate.current_limit(), 1);
+
+        let waiter_gate = gate.clone();
+        let mut waiter = tokio::spawn(async move {
+            let _permit = waiter_gate.acquire().await;
+        });
+        assert!(timeout(Duration::from_millis(25), &mut waiter)
+            .await
+            .is_err());
+
+        drop(second);
+        drop(first);
+        timeout(Duration::from_secs(1), &mut waiter)
+            .await
+            .expect("waiter should proceed after active permits drain")
+            .expect("waiter task should succeed");
+    }
 
     #[test]
     fn test_adaptive_new_initializes_correctly() {
