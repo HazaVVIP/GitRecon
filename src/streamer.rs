@@ -2162,43 +2162,24 @@ fn process_blob_content(
             detect_tech_from_content(&content_str, &mut tech_set);
             let tech: Vec<String> = tech_set.into_iter().collect();
 
-            // SCAN-001: Convert Arc<Vec<String>> to slice of &str for context analysis
+            // SCAN-001: Convert Arc<Vec<String>> to slice for all text detectors.
             let fp_keywords: Vec<&str> =
                 false_positive_keywords.iter().map(|s| s.as_str()).collect();
-
-            // Primary line-by-line scan (patterns + entropy)
-            let mut findings = scan_content_with_policy(
+            let policy = if exhaustive {
+                ScanPolicy::exhaustive(entropy_threshold, &fp_keywords)
+            } else {
+                ScanPolicy::normal(entropy_threshold, &fp_keywords)
+            };
+            let findings = scan_text_detectors(
                 &content_str,
-                &filename,
-                sha1,
-                is_deleted,
-                &extra_patterns,
-                if exhaustive {
-                    ScanPolicy::exhaustive(entropy_threshold, &fp_keywords)
-                } else {
-                    ScanPolicy::normal(entropy_threshold, &fp_keywords)
+                DetectorContext {
+                    filename: &filename,
+                    sha1,
+                    is_deleted,
+                    extra_patterns: &extra_patterns,
+                    policy,
                 },
             );
-
-            // Multi-line YAML next-line secret detection
-            findings.extend(scan_yaml_nextline_secrets_with_policy(
-                &content_str,
-                &filename,
-                sha1,
-                is_deleted,
-                &fp_keywords,
-                exhaustive,
-            ));
-
-            // S-4: DB credential detection
-            findings.extend(scan_db_config_blocks_with_policy(
-                &content_str,
-                &filename,
-                sha1,
-                is_deleted,
-                &fp_keywords,
-                exhaustive,
-            ));
 
             // BUG-STAB-002: Budget is automatically released when _budget_guard drops here
             WorkerResult::BlobScanned {
@@ -2365,6 +2346,42 @@ fn attach_source(result: WorkerResult, source: ObjectSourceKind) -> WorkerResult
         },
         other => other,
     }
+}
+
+struct DetectorContext<'a> {
+    filename: &'a str,
+    sha1: &'a str,
+    is_deleted: bool,
+    extra_patterns: &'a [DynPattern],
+    policy: ScanPolicy<'a>,
+}
+
+fn scan_text_detectors(content: &str, context: DetectorContext<'_>) -> Vec<Finding> {
+    let mut findings = scan_content_with_policy(
+        content,
+        context.filename,
+        context.sha1,
+        context.is_deleted,
+        context.extra_patterns,
+        context.policy,
+    );
+    findings.extend(scan_yaml_nextline_secrets_with_policy(
+        content,
+        context.filename,
+        context.sha1,
+        context.is_deleted,
+        context.policy.false_positive_keywords,
+        context.policy.include_placeholders,
+    ));
+    findings.extend(scan_db_config_blocks_with_policy(
+        content,
+        context.filename,
+        context.sha1,
+        context.is_deleted,
+        context.policy.false_positive_keywords,
+        context.policy.include_placeholders,
+    ));
+    findings
 }
 
 fn scan_content(
@@ -7506,6 +7523,42 @@ REPLACE_WITH_YOUR_KEY
 
         update_handle.join().unwrap();
         read_handle.join().unwrap();
+    }
+
+    #[test]
+    fn unified_detector_pipeline_preserves_exhaustive_superset() {
+        let text = "api_key: |\n  your_api_key_here_value_123";
+        let keywords: [&str; 0] = [];
+        let normal = scan_text_detectors(
+            text,
+            DetectorContext {
+                filename: "config.yaml",
+                sha1: "a",
+                is_deleted: true,
+                extra_patterns: &[],
+                policy: ScanPolicy::normal(2.5, &keywords),
+            },
+        );
+        let exhaustive = scan_text_detectors(
+            text,
+            DetectorContext {
+                filename: "config.yaml",
+                sha1: "a",
+                is_deleted: true,
+                extra_patterns: &[],
+                policy: ScanPolicy::exhaustive(2.5, &keywords),
+            },
+        );
+
+        assert!(normal
+            .iter()
+            .all(|finding| exhaustive.iter().any(|candidate| {
+                candidate.pattern_id == finding.pattern_id
+                    && candidate.match_str == finding.match_str
+            })));
+        assert!(exhaustive
+            .iter()
+            .any(|finding| finding.pattern_id == "yaml_block_scalar_secret"));
     }
 
     #[test]
