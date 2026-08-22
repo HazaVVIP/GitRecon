@@ -156,6 +156,48 @@ impl MapResult {
         result
     }
 
+    /// Select deterministic blob candidates for accessibility verification.
+    ///
+    /// Current-index entries are preferred because they represent the live tree,
+    /// then graph-derived blobs cover bare/no-index repositories, and finally the
+    /// remaining blob set provides a stable fallback for pack-only or hand-built
+    /// MapResult values.
+    fn verification_candidates(&self) -> Vec<String> {
+        let mut candidates = Vec::new();
+        let mut seen = HashSet::new();
+
+        for entry in &self.index_entries {
+            if is_valid_sha1(&entry.sha1)
+                && self.blob_sha1s.contains(&entry.sha1)
+                && seen.insert(entry.sha1.clone())
+            {
+                candidates.push(entry.sha1.clone());
+            }
+        }
+
+        let mut graph_sha1s: Vec<&String> = self
+            .graph_sha1_to_files
+            .keys()
+            .filter(|sha1| self.blob_sha1s.contains(*sha1))
+            .collect();
+        graph_sha1s.sort_unstable();
+        for sha1 in graph_sha1s {
+            if is_valid_sha1(sha1) && seen.insert(sha1.clone()) {
+                candidates.push(sha1.clone());
+            }
+        }
+
+        let mut remaining: Vec<&String> = self.blob_sha1s.iter().collect();
+        remaining.sort_unstable();
+        for sha1 in remaining {
+            if is_valid_sha1(sha1) && seen.insert(sha1.clone()) {
+                candidates.push(sha1.clone());
+            }
+        }
+
+        candidates
+    }
+
     /// Sprint 5 (S5.3): SHA1→ALL known paths mapping.
     ///
     /// A single blob can appear at multiple paths (LICENSE files copied across
@@ -772,24 +814,20 @@ impl Mapper {
         result.objects_accessible = if result.blob_sha1s.is_empty() {
             true
         } else {
-            // Distribute samples across the index entries (which are ordered)
-            // rather than iterating a HashSet, so a cluster of blocked entries
-            // near the front can't produce a false PARTIAL_EXPOSURE.
-            let entries: Vec<_> = result
-                .index_entries
-                .iter()
-                .filter(|e| is_valid_sha1(&e.sha1) && result.blob_sha1s.contains(&e.sha1))
-                .collect();
-            let sample_size = entries.len().min(10);
+            // Prefer current-index entries, then graph-derived blobs, then the
+            // remaining blob set. This keeps samples deterministic while covering
+            // bare/no-index repositories where index_entries is empty.
+            let candidates = result.verification_candidates();
+            let sample_size = candidates.len().min(10);
             let step = if sample_size > 1 {
-                entries.len() / sample_size
+                candidates.len() / sample_size
             } else {
                 1
             };
             let mut accessible_count = 0usize;
             for i in 0..sample_size {
-                let idx = (i * step).min(entries.len().saturating_sub(1));
-                let sha1 = &entries[idx].sha1;
+                let idx = (i * step).min(candidates.len().saturating_sub(1));
+                let sha1 = &candidates[idx];
                 let url = format!("{}/{}", git_url, obj_path(sha1));
                 let resp = self.client.get(&url).await;
                 if resp.ok() && !resp.body.is_empty() {
@@ -839,6 +877,49 @@ mod tests {
         assert_eq!(all.len(), 2);
         assert!(all.contains("blob1111blob1111blob1111blob1111blob1111b"));
         assert!(all.contains("comm1111comm1111comm1111comm1111comm1111c"));
+    }
+
+    #[test]
+    fn verification_candidates_include_graph_only_blobs() {
+        let index_sha = "1".repeat(40);
+        let graph_sha = "2".repeat(40);
+        let remaining_sha = "3".repeat(40);
+        let mut result = MapResult::default();
+        result
+            .blob_sha1s
+            .extend([index_sha.clone(), graph_sha.clone(), remaining_sha.clone()]);
+        result.index_entries.push(IndexEntry {
+            sha1: index_sha.clone(),
+            filename: "current.txt".to_string(),
+            mode: 0,
+            file_size: 10,
+        });
+        result
+            .graph_sha1_to_files
+            .insert(graph_sha.clone(), vec!["history.txt".to_string()]);
+
+        assert_eq!(
+            result.verification_candidates(),
+            vec![index_sha, graph_sha, remaining_sha]
+        );
+    }
+
+    #[test]
+    fn verification_candidates_ignore_invalid_and_unlisted_entries() {
+        let valid_sha = "4".repeat(40);
+        let mut result = MapResult::default();
+        result.blob_sha1s.insert(valid_sha.clone());
+        result.index_entries.push(IndexEntry {
+            sha1: "invalid".to_string(),
+            filename: "invalid.txt".to_string(),
+            mode: 0,
+            file_size: 0,
+        });
+        result
+            .graph_sha1_to_files
+            .insert("5".repeat(40), vec!["not-a-blob.txt".to_string()]);
+
+        assert_eq!(result.verification_candidates(), vec![valid_sha]);
     }
 
     #[test]
