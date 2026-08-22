@@ -202,7 +202,7 @@ async fn run_url_target(context: UrlRunContext<'_>, url: String, fuzz: bool) -> 
     // VERIFICATION: Check if git objects are actually accessible.
     // Metadata-only exposure reporting is intentionally opt-in because it can
     // create noisy partial statuses during broad default scans.
-    if !map_r.objects_accessible && args.partial_exposure {
+    if should_short_circuit_partial_exposure(map_r.objects_accessible, args.partial_exposure) {
         if verbose {
             println!("  ⚠  PARTIAL EXPOSURE DETECTED: Git metadata files (HEAD, index, config) are accessible, but git objects cannot be fetched (blocked, 404, or non-git response)");
             println!("  → Skipping analysis (no accessible objects to scan)");
@@ -256,20 +256,6 @@ async fn run_url_target(context: UrlRunContext<'_>, url: String, fuzz: bool) -> 
             risk_score: 0,
             error_code: Some(TargetErrorCode::PartialExposure),
             error: Some("Git metadata is accessible but git objects are unavailable".to_string()),
-        };
-    }
-    if !map_r.objects_accessible {
-        return TargetOutcome {
-            target: url.clone(),
-            target_type: "URL".to_string(),
-            status: TargetStatus::Failed,
-            report_path: None,
-            findings_count: 0,
-            risk_score: 0,
-            error_code: Some(TargetErrorCode::NoGitExposure),
-            error: Some(
-                "Git objects are unavailable; partial exposure reporting is disabled".to_string(),
-            ),
         };
     }
     // ── Analysis ─────────────────────────────────────────────────
@@ -2263,6 +2249,10 @@ async fn deliver_report_webhook_if_configured(
     }
 }
 
+fn should_short_circuit_partial_exposure(objects_accessible: bool, report_partial: bool) -> bool {
+    !objects_accessible && report_partial
+}
+
 fn validate_parallel_targets(value: usize) -> Result<(), String> {
     if value == 0 || value > 1000 {
         Err(format!(
@@ -3001,6 +2991,14 @@ pub fn detect_platform(url: &str) -> Option<forge::Platform> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn partial_exposure_short_circuit_is_opt_in() {
+        assert!(!should_short_circuit_partial_exposure(false, false));
+        assert!(should_short_circuit_partial_exposure(false, true));
+        assert!(!should_short_circuit_partial_exposure(true, false));
+        assert!(!should_short_circuit_partial_exposure(true, true));
+    }
 
     #[test]
     fn parallel_target_bounds_reject_zero_and_excessive_values() {
