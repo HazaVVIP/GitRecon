@@ -8,7 +8,7 @@ GitRecon is a high-performance Rust scanner for exposed Git repositories, local 
 
 GitRecon provides a four-stage remote pipeline: exposure detection, Git metadata and object mapping, concurrent streaming analysis, and report generation. It also supports local-directory scanning, binary and archive string extraction, multiple forge APIs, bounded multi-target concurrency, checkpoint/resume, cache isolation, proxy and rate-control options, object-source metrics, typed scan outcomes, and JSON, SARIF, CSV, NDJSON, Markdown, and HTML output.
 
-The scanner is intentionally discovery-oriented. Normal mode filters common template placeholders to reduce noise. `--exhaustive` retains placeholder-like candidates for investigative workflows. Object verification and local binary scanning are enabled by default and can be disabled explicitly.
+The scanner is intentionally discovery-oriented. Normal mode filters common template placeholders to reduce noise. `--exhaustive` retains placeholder-like candidates for investigative workflows. Object verification and local binary scanning are enabled by default and can be disabled explicitly. Local and URL dispatch classify binary content by magic bytes first, then supported filename extension, and finally the null-byte heuristic for unknown binary data; therefore sparse GZIP and low-null archive content are not forced through the text path. Forge binary parity remains a separate roadmap item.
 
 ## Installation
 

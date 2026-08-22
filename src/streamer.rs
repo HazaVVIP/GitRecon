@@ -2243,12 +2243,12 @@ fn process_blob_content(
                 .unwrap_or_else(|| format!("[blob:{}]", &sha1[..sha1.len().min(8)]));
             let is_deleted = !current_blobs.contains(sha1);
 
-            // Fast binary detection: check first 8 KB for null bytes
-            let probe = &obj.data[..obj.data.len().min(8192)];
-            let null_count = probe.iter().filter(|&&b| b == 0).count();
-            if null_count > 10 {
+            // Binary dispatch prioritizes magic bytes, then filename extension,
+            // and finally retains the legacy null-byte signal for unknown data.
+            let dispatch = binary_scanner::classify_binary(&obj.data, &filename, 8192, 10);
+            if dispatch.is_binary() {
                 // S-3: Enhanced binary file scanning
-                let bin_type = binary_scanner::detect_binary_type(&obj.data);
+                let bin_type = dispatch.binary_type;
 
                 // Handle different binary types
                 if matches!(bin_type, binary_scanner::BinaryType::SQLite) {
@@ -2382,7 +2382,39 @@ fn process_blob_content(
                     };
                 }
 
-                // Skip other binary content
+                // Unknown binary content still receives the printable-string
+                // scanner. This preserves discovery coverage for unsupported
+                // formats and extension-only binary fixtures.
+                if matches!(bin_type, binary_scanner::BinaryType::Unknown) {
+                    let binary_findings = binary_scanner::scan_binary_blob_with_patterns(
+                        &obj.data,
+                        &filename,
+                        max_scan_bytes,
+                        &extra_patterns,
+                    );
+                    let fp_keywords: Vec<&str> =
+                        false_positive_keywords.iter().map(|s| s.as_str()).collect();
+                    let findings = normalize_binary_findings(
+                        binary_findings,
+                        BinaryFindingContext {
+                            filename: &filename,
+                            sha1,
+                            is_deleted,
+                            fallback_description: "Binary Secret",
+                            context_keywords: Some(&fp_keywords),
+                            include_placeholders: exhaustive,
+                            extra_patterns: &extra_patterns,
+                        },
+                    );
+                    return WorkerResult::BlobScanned {
+                        findings,
+                        tech: vec![],
+                        bytes: raw_bytes,
+                        save_result,
+                        source: ObjectSourceKind::LooseHttp,
+                    };
+                }
+
                 return WorkerResult::BlobScanned {
                     findings: vec![],
                     tech: vec![],

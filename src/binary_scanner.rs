@@ -29,13 +29,148 @@ pub mod magic {
 }
 
 /// Detected binary file type
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BinaryType {
     SQLite,
     ZipJar,
     Gzip,
     Elf,
     Unknown,
+}
+
+/// Confidence source used when deciding whether a content item enters the
+/// binary scanner. The null-byte heuristic remains a fallback signal rather
+/// than the primary dispatch gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BinaryDetectionConfidence {
+    MagicBytes,
+    ExtensionFallback,
+    NullByteHeuristic,
+    Text,
+}
+
+/// Typed decision used by local and URL content pipelines before scanning.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BinaryDispatch {
+    pub binary_type: BinaryType,
+    pub confidence: BinaryDetectionConfidence,
+}
+
+impl BinaryDispatch {
+    pub fn is_binary(&self) -> bool {
+        self.confidence != BinaryDetectionConfidence::Text
+    }
+}
+
+/// Classify content using magic bytes first, supported extensions second, and
+/// the legacy null-byte heuristic as a final unknown-binary fallback.
+pub fn classify_binary(
+    data: &[u8],
+    filename: &str,
+    probe_size: usize,
+    null_threshold: usize,
+) -> BinaryDispatch {
+    let magic_type = detect_binary_type(data);
+    if magic_type != BinaryType::Unknown {
+        return BinaryDispatch {
+            binary_type: magic_type,
+            confidence: BinaryDetectionConfidence::MagicBytes,
+        };
+    }
+
+    if let Some(extension_type) = binary_type_from_extension(filename) {
+        return BinaryDispatch {
+            binary_type: extension_type,
+            confidence: BinaryDetectionConfidence::ExtensionFallback,
+        };
+    }
+
+    let probe = &data[..data.len().min(probe_size)];
+    if probe.iter().filter(|&&byte| byte == 0).count() > null_threshold {
+        BinaryDispatch {
+            binary_type: BinaryType::Unknown,
+            confidence: BinaryDetectionConfidence::NullByteHeuristic,
+        }
+    } else {
+        BinaryDispatch {
+            binary_type: BinaryType::Unknown,
+            confidence: BinaryDetectionConfidence::Text,
+        }
+    }
+}
+
+/// Return whether a path has an extension commonly associated with binary
+/// content. This remains shared with forge candidate filtering until forge
+/// binary parity is implemented in P1-04.
+pub(crate) fn is_binary_extension(path: &str) -> bool {
+    binary_type_from_extension(path).is_some() || {
+        let ext = path.rsplit('.').next().unwrap_or("").to_lowercase();
+        matches!(
+            ext.as_str(),
+            "png"
+                | "jpg"
+                | "jpeg"
+                | "gif"
+                | "bmp"
+                | "ico"
+                | "webp"
+                | "tiff"
+                | "avif"
+                | "tar"
+                | "bz2"
+                | "xz"
+                | "7z"
+                | "rar"
+                | "pdf"
+                | "doc"
+                | "docx"
+                | "xls"
+                | "xlsx"
+                | "ppt"
+                | "pptx"
+                | "odt"
+                | "ods"
+                | "odp"
+                | "exe"
+                | "dll"
+                | "so"
+                | "dylib"
+                | "bin"
+                | "wasm"
+                | "o"
+                | "a"
+                | "lib"
+                | "obj"
+                | "mp3"
+                | "mp4"
+                | "wav"
+                | "ogg"
+                | "flac"
+                | "avi"
+                | "mov"
+                | "mkv"
+                | "webm"
+                | "m4a"
+                | "ttf"
+                | "otf"
+                | "woff"
+                | "woff2"
+                | "eot"
+                | "pyc"
+                | "pyo"
+                | "class"
+        )
+    }
+}
+
+fn binary_type_from_extension(path: &str) -> Option<BinaryType> {
+    let ext = path.rsplit('.').next().unwrap_or("").to_lowercase();
+    match ext.as_str() {
+        "db" | "sqlite" | "sqlite3" => Some(BinaryType::SQLite),
+        "zip" | "jar" | "war" | "ear" | "whl" => Some(BinaryType::ZipJar),
+        "gz" => Some(BinaryType::Gzip),
+        _ => None,
+    }
 }
 
 /// Detect binary type from magic bytes
@@ -641,6 +776,60 @@ mod tests {
     }
 
     #[test]
+    fn classify_magic_bytes_before_null_heuristic() {
+        let data = b"PK\x03\x04archive marker";
+        let dispatch = classify_binary(data, "fixture.txt", 8192, 10);
+        assert_eq!(dispatch.binary_type, BinaryType::ZipJar);
+        assert_eq!(dispatch.confidence, BinaryDetectionConfidence::MagicBytes);
+        assert!(dispatch.is_binary());
+    }
+
+    #[test]
+    fn classify_extension_fallback_for_sparse_gzip() {
+        let dispatch = classify_binary(b"ARCHIVE_AB12", "fixture.gz", 8192, 10);
+        assert_eq!(dispatch.binary_type, BinaryType::Gzip);
+        assert_eq!(
+            dispatch.confidence,
+            BinaryDetectionConfidence::ExtensionFallback
+        );
+        assert!(dispatch.is_binary());
+    }
+
+    #[test]
+    fn classify_exact_null_threshold_as_text() {
+        let mut data = vec![0u8; 10];
+        data.extend_from_slice(b"ordinary text");
+        let dispatch = classify_binary(&data, "fixture.data", 8192, 10);
+        assert_eq!(dispatch.binary_type, BinaryType::Unknown);
+        assert_eq!(dispatch.confidence, BinaryDetectionConfidence::Text);
+        assert!(!dispatch.is_binary());
+    }
+
+    #[test]
+    fn classify_unknown_binary_from_null_heuristic() {
+        let mut data = vec![0u8; 11];
+        data.extend_from_slice(b"CUSTOM_AB12");
+        let dispatch = classify_binary(&data, "fixture.data", 8192, 10);
+        assert_eq!(dispatch.binary_type, BinaryType::Unknown);
+        assert_eq!(
+            dispatch.confidence,
+            BinaryDetectionConfidence::NullByteHeuristic
+        );
+        assert!(dispatch.is_binary());
+    }
+
+    #[test]
+    fn classify_truncated_magic_uses_extension_fallback() {
+        let dispatch = classify_binary(b"\x1f", "fixture.gz", 8192, 10);
+        assert_eq!(dispatch.binary_type, BinaryType::Gzip);
+        assert_eq!(
+            dispatch.confidence,
+            BinaryDetectionConfidence::ExtensionFallback
+        );
+        assert!(dispatch.is_binary());
+    }
+
+    #[test]
     fn test_detect_sqlite() {
         let data = b"SQLite format 3\x00";
         assert_eq!(detect_binary_type(data), BinaryType::SQLite);
@@ -813,6 +1002,30 @@ mod tests {
             regex: regex::Regex::new("ARCHIVE_[A-Z0-9]{4}").unwrap(),
         };
         let findings = scan_binary_blob_with_patterns(&compressed, "fixture.gz", 1024, &[pattern]);
+        assert!(findings
+            .iter()
+            .any(|finding| finding.0 == "custom_archive" && finding.1 == "ARCHIVE_AB12"));
+    }
+
+    #[test]
+    fn custom_pattern_matches_zip_entry() {
+        use std::io::Write;
+        use zip::{write::SimpleFileOptions, ZipWriter};
+
+        let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+        writer
+            .start_file("nested/config.txt", SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(b"custom=ARCHIVE_AB12").unwrap();
+        let archive = writer.finish().unwrap().into_inner();
+        let pattern = DynPattern {
+            id: "custom_archive".to_string(),
+            sev: "HIGH".to_string(),
+            desc: "Custom archive marker".to_string(),
+            regex: regex::Regex::new("ARCHIVE_[A-Z0-9]{4}").unwrap(),
+        };
+
+        let findings = scan_binary_blob_with_patterns(&archive, "fixture.zip", 1024, &[pattern]);
         assert!(findings
             .iter()
             .any(|finding| finding.0 == "custom_archive" && finding.1 == "ARCHIVE_AB12"));

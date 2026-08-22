@@ -216,14 +216,13 @@ fn local_directory_scan_binary_placeholder_policy_is_exhaustive() {
 fn local_directory_scan_applies_custom_pattern_to_binary_content() {
     let root = tempfile::tempdir().expect("create fixture directory");
     let output = tempfile::tempdir().expect("create output directory");
-    let pattern_file = std::env::current_dir()
-        .expect("read test working directory")
-        .join(format!(
-            ".gitrecon-custom-pattern-{}.json",
-            std::process::id()
-        ));
+    let pattern_file = tempfile::Builder::new()
+        .prefix(".gitrecon-custom-pattern-")
+        .suffix(".json")
+        .tempfile_in(std::env::current_dir().expect("read test working directory"))
+        .expect("create pattern fixture");
     fs::write(
-        &pattern_file,
+        pattern_file.path(),
         r#"{"patterns":[{"id":"custom_binary","severity":"CRITICAL","description":"Custom binary marker","regex":"CUSTOM_[A-Z0-9]{4}"}]}"#,
     )
     .expect("write pattern fixture");
@@ -237,7 +236,7 @@ fn local_directory_scan_applies_custom_pattern_to_binary_content() {
             "--dir",
             root.path().to_str().expect("fixture path is UTF-8"),
             "--patterns",
-            pattern_file.to_str().expect("pattern path is UTF-8"),
+            pattern_file.path().to_str().expect("pattern path is UTF-8"),
             "--output",
             output.path().to_str().expect("output path is UTF-8"),
             "--format",
@@ -259,7 +258,58 @@ fn local_directory_scan_applies_custom_pattern_to_binary_content() {
     assert!(body.contains("Custom binary marker"));
     assert!(body.contains("CUSTOM_AB12"));
     assert!(body.contains("CRITICAL"));
-    fs::remove_file(pattern_file).expect("remove pattern fixture");
+}
+
+#[test]
+fn local_directory_scan_scans_sparse_gzip_by_magic_bytes() {
+    use flate2::{write::GzEncoder, Compression};
+    use std::io::Write;
+
+    let root = tempfile::tempdir().expect("create fixture directory");
+    let output = tempfile::tempdir().expect("create output directory");
+    let pattern_file = tempfile::Builder::new()
+        .prefix(".gitrecon-custom-pattern-")
+        .suffix(".json")
+        .tempfile_in(std::env::current_dir().expect("read test working directory"))
+        .expect("create pattern fixture");
+    fs::write(
+        pattern_file.path(),
+        r#"{"patterns":[{"id":"custom_gzip","severity":"HIGH","description":"Custom GZIP marker","regex":"GZIP_[A-Z0-9]{4}"}]}"#,
+    )
+    .expect("write pattern fixture");
+
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder
+        .write_all(b"config=GZIP_AB12")
+        .expect("write GZIP fixture");
+    let compressed = encoder.finish().expect("finish GZIP fixture");
+    fs::write(root.path().join("fixture.gz"), compressed).expect("write GZIP file");
+
+    let status = Command::new(env!("CARGO_BIN_EXE_gitrecon"))
+        .args([
+            "--dir",
+            root.path().to_str().expect("fixture path is UTF-8"),
+            "--patterns",
+            pattern_file.path().to_str().expect("pattern path is UTF-8"),
+            "--output",
+            output.path().to_str().expect("output path is UTF-8"),
+            "--format",
+            "json",
+            "--no-color",
+            "--quiet",
+        ])
+        .status()
+        .expect("run gitrecon");
+    assert!(status.success(), "gitrecon exited with {status}");
+
+    let report = fs::read_dir(output.path())
+        .expect("read output directory")
+        .map(|entry| entry.expect("read report entry").path())
+        .find(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
+        .expect("JSON report was not generated");
+    let body = fs::read_to_string(report).expect("read JSON report");
+    assert!(body.contains("custom_gzip"));
+    assert!(body.contains("GZIP_AB12"));
 }
 
 #[test]

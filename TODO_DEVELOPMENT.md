@@ -177,8 +177,8 @@ Custom patterns saat ini hanya mengalir ke text detector. Pindahkan detector men
 
 ## P1-03 — Ganti null-byte gate dengan magic-byte plus extension fallback
 
-**Status:** `TODO`  
-**Dependensi:** P1-01  
+**Status:** `DONE`
+**Dependensi:** P1-01
 **Area:** `src/dir_pipeline.rs`, `src/streamer.rs`, `src/binary_adapter.rs`
 
 Null-byte heuristic tetap dapat dipakai sebagai signal, tetapi tidak boleh menjadi satu-satunya pintu masuk. Gunakan magic-byte detection untuk SQLite, ZIP/JAR, GZIP, ELF, dan format yang didukung; gunakan extension sebagai fallback dan catat confidence. Unknown binary tetap diproses melalui printable-string scanner jika policy mengizinkan.
@@ -190,6 +190,10 @@ Null-byte heuristic tetap dapat dipakai sebagai signal, tetapi tidak boleh menja
 - Unknown binary tidak otomatis dibuang tanpa typed reason.
 - `--no-scan-binaries` tetap menjadi opt-out yang jelas.
 - Ditambahkan boundary tests untuk files exactly-at-threshold, truncated headers, and unknown binary.
+
+### Implementasi P1-03
+
+`BinaryDispatch` sekarang dipakai oleh local dan URL pipeline dengan urutan magic bytes, extension fallback, lalu null-byte heuristic. SQLite, ZIP/JAR, GZIP, dan ELF tidak lagi bergantung pada lebih dari 10 null bytes untuk masuk ke binary scanner; unknown binary tetap diproses melalui printable-string fallback dengan confidence yang typed. Regression tests mencakup sparse GZIP end-to-end, ZIP magic priority, extension fallback, truncated header, exact threshold, dan unknown binary. Forge mode tetap belum diubah karena parity binary forge adalah scope P1-04.
 
 ## P1-04 — Pulihkan binary/archive parity pada forge mode
 

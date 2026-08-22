@@ -10,6 +10,7 @@ use std::time::Instant;
 
 use futures::StreamExt;
 
+use crate::binary_scanner;
 use crate::content_scanner::{ContentScanOutcome, ContentScanner, ScanAccumulator};
 use crate::streamer::{DynPattern, StreamResult};
 
@@ -77,9 +78,13 @@ pub(crate) async fn scan_local_files(config: LocalScanConfig) -> StreamResult {
                     .map(|relative| relative.to_string_lossy().replace('\\', "/"))
                     .unwrap_or_else(|_| path.to_string_lossy().replace('\\', "/"));
                 let source = format!("{}/{}", display_root, relative_path);
-                let probe = &data[..data.len().min(BINARY_DETECTION_PROBE_SIZE)];
-                let null_count = probe.iter().filter(|&&byte| byte == 0).count();
-                let is_binary = null_count > NULL_BYTE_THRESHOLD;
+                let dispatch = binary_scanner::classify_binary(
+                    &data,
+                    &source,
+                    BINARY_DETECTION_PROBE_SIZE,
+                    NULL_BYTE_THRESHOLD,
+                );
+                let is_binary = dispatch.is_binary();
                 let scan_path = if is_binary {
                     path.to_string_lossy().into_owned()
                 } else {
@@ -87,7 +92,7 @@ pub(crate) async fn scan_local_files(config: LocalScanConfig) -> StreamResult {
                 };
                 let outcome = scanner.scan(&data, &scan_path, is_binary);
                 let mut technologies = Vec::new();
-                if null_count <= NULL_BYTE_THRESHOLD {
+                if !is_binary {
                     detect_tech_from_path(&relative_path, &mut technologies);
                 }
                 (outcome, technologies)
