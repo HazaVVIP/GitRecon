@@ -43,6 +43,8 @@ The `--help` output is a supported operator interface, not an implementation det
 
 The `--targets` input accepts one target per line: plain URLs remain supported, while JSON lines may describe URL, directory, or token targets. `--parallel-targets` is validated to the range 1–1000 so a malformed or accidental value cannot create unbounded task fan-out. Metadata-only Git exposure is not reported as `PARTIAL` by default; operators can opt in with `--partial-exposure`. The `--patterns-help` output is the source of truth for the custom pattern JSON schema.
 
+`--dry-run` is a strict validation-only path for URL, directory, token, and `--targets` modes. It validates CLI configuration, target shape, directory existence, target-file parsing, and custom patterns, but does not perform URL detection, repository reconnaissance, provider authentication, repository enumeration, local content reads, detector execution, report writing, aggregate report writing, or webhook delivery. With `--pipe`, it emits one machine-readable `dry_run` object and still performs no scan side effects.
+
 ## Production Defaults
 
 The following defaults are deliberate and should not be changed casually:
@@ -70,7 +72,7 @@ cargo build --release
 python3 tools/benchmark_local_scan.py --repetitions 5
 ```
 
-The benchmark creates temporary, non-sensitive fixtures and reports normal versus exhaustive scan timings. Use it to compare commits on the same machine and build profile; do not treat the output as a cross-machine performance claim. A baseline run on the development sandbox with 40 files and 250 lines per file, using five repetitions, produced median times of approximately `0.3200s` in normal mode and `0.3193s` in exhaustive mode.
+The benchmark creates temporary, non-sensitive fixtures and reports normal versus exhaustive scan timings. Use it to compare commits on the same machine and build profile; do not treat the output as a cross-machine performance claim. A baseline run on the development sandbox with 40 files and 250 lines per file, using five repetitions, produced median times of approximately `0.3200s` in normal mode and `0.3193s` in exhaustive mode. Dry-run regressions should additionally assert that valid directory and target-list inputs create no report files and that `--pipe` emits a valid `dry_run` JSON object.
 
 ## Release Checklist
 

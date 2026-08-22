@@ -49,6 +49,119 @@ fn local_directory_scan_detects_secret_and_writes_json_report() {
 }
 
 #[test]
+fn dry_run_directory_validates_without_scanning_or_writing_report() {
+    let root = tempfile::tempdir().expect("create fixture directory");
+    let output = tempfile::tempdir().expect("create output directory");
+    fs::write(root.path().join("config.txt"), b"synthetic content\n").expect("write fixture");
+
+    let result = Command::new(env!("CARGO_BIN_EXE_gitrecon"))
+        .args([
+            "--dir",
+            root.path().to_str().expect("fixture path is UTF-8"),
+            "--output",
+            output.path().to_str().expect("output path is UTF-8"),
+            "--format",
+            "json",
+            "--dry-run",
+            "--no-color",
+        ])
+        .output()
+        .expect("run gitrecon dry-run");
+
+    assert!(
+        result.status.success(),
+        "gitrecon exited with {}",
+        result.status
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("no network or content scan performed"));
+    assert!(fs::read_dir(output.path())
+        .expect("read output directory")
+        .next()
+        .is_none());
+}
+
+#[test]
+fn dry_run_targets_emits_json_without_dispatching_scans() {
+    let root = tempfile::tempdir().expect("create fixture directory");
+    let output = tempfile::tempdir().expect("create output directory");
+    let targets = root.path().join("targets.ndjson");
+    fs::write(
+        &targets,
+        format!(
+            "https://example.test\n{{\"dir\":\"{}\"}}\n",
+            root.path().display()
+        ),
+    )
+    .expect("write targets fixture");
+
+    let result = Command::new(env!("CARGO_BIN_EXE_gitrecon"))
+        .args([
+            "--targets",
+            targets.to_str().expect("targets path is UTF-8"),
+            "--output",
+            output.path().to_str().expect("output path is UTF-8"),
+            "--dry-run",
+            "--pipe",
+            "--no-color",
+        ])
+        .output()
+        .expect("run gitrecon dry-run");
+
+    assert!(
+        result.status.success(),
+        "gitrecon exited with {}",
+        result.status
+    );
+    let json: serde_json::Value =
+        serde_json::from_slice(&result.stdout).expect("parse dry-run JSON");
+    assert_eq!(json["type"], "dry_run");
+    assert_eq!(json["valid"], true);
+    assert_eq!(json["targets"], 2);
+    assert_eq!(json["network"], "skipped");
+    assert_eq!(json["content_scan"], "skipped");
+    assert!(fs::read_dir(output.path())
+        .expect("read output directory")
+        .next()
+        .is_none());
+}
+
+#[test]
+fn dry_run_url_skips_network_and_emits_pipe_json() {
+    let result = Command::new(env!("CARGO_BIN_EXE_gitrecon"))
+        .args(["https://example.test", "--dry-run", "--pipe", "--no-color"])
+        .output()
+        .expect("run URL dry-run");
+
+    assert!(
+        result.status.success(),
+        "gitrecon exited with {}",
+        result.status
+    );
+    let json: serde_json::Value =
+        serde_json::from_slice(&result.stdout).expect("parse dry-run JSON");
+    assert_eq!(json["type"], "dry_run");
+    assert_eq!(json["targets"], 1);
+    assert_eq!(json["network"], "skipped");
+}
+
+#[test]
+fn dry_run_invalid_token_fails_before_authentication() {
+    let result = Command::new(env!("CARGO_BIN_EXE_gitrecon"))
+        .args(["--token", "invalid", "--dry-run", "--quiet", "--no-color"])
+        .output()
+        .expect("run token dry-run");
+
+    assert!(
+        !result.status.success(),
+        "invalid token should fail validation"
+    );
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("Dry-run validation failed"));
+    assert!(stderr.contains("Invalid GitHub token"));
+}
+
+#[test]
 fn local_directory_scan_binary_placeholder_policy_is_exhaustive() {
     let root = tempfile::tempdir().expect("create fixture directory");
     let normal_output = tempfile::tempdir().expect("create normal output directory");

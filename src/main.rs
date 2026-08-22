@@ -163,38 +163,6 @@ async fn run_url_target(context: UrlRunContext<'_>, url: String, fuzz: bool) -> 
         .run(&dr.git_url, dr.branch.as_deref(), !args.no_verify_objects)
         .await;
 
-    // DX-4: --dry-run
-    if args.dry_run {
-        println!("\n  ◈  [DRY RUN] Detection + Reconnaissance complete. Analysis skipped.");
-        println!("  SHA1 objects   : {}", map_r.all_sha1s().len());
-        println!("  Blobs (index)  : {}", map_r.blob_sha1s.len());
-        println!("  Commits/trees  : {}", map_r.commit_sha1s.len());
-        println!(
-            "  Est. disk size : {} ({} files)",
-            map_r.size_human(),
-            map_r.estimated_files
-        );
-        println!(
-            "  Branches       : {}",
-            map_r.branches[..map_r.branches.len().min(8)].join(", ")
-        );
-        if !map_r.remote_urls.is_empty() {
-            if let Some(u) = map_r.remote_urls.first().and_then(|m| m.get("url")) {
-                println!("  Remote origin  : {}", u);
-            }
-        }
-        println!();
-        return TargetOutcome {
-            target: url.clone(),
-            target_type: "URL".to_string(),
-            status: TargetStatus::Success,
-            report_path: None,
-            findings_count: 0,
-            risk_score: 0,
-            error_code: None,
-            error: None,
-        };
-    }
     let total = map_r.all_sha1s().len();
     if verbose {
         println!("  ✔  Repository mapped: {} objects", total);
@@ -403,6 +371,102 @@ async fn run_url_target(context: UrlRunContext<'_>, url: String, fuzz: bool) -> 
         println!("  ✔  Done\n");
     }
     outcome
+}
+
+fn validate_dry_run_target(target: &Target) -> anyhow::Result<()> {
+    match target {
+        Target::Url { url, .. } => validation::validate_and_normalize_url(url)
+            .map(|_| ())
+            .map_err(|error| anyhow::anyhow!("Invalid URL target: {}", error)),
+        Target::Dir { dir } => validation::validate_directory_path(dir)
+            .map(|_| ())
+            .map_err(|error| anyhow::anyhow!("Invalid directory target '{}': {}", dir, error)),
+        Target::Token { token, .. } => validation::validate_github_token(token)
+            .map_err(|error| anyhow::anyhow!("Invalid GitHub token target: {}", error)),
+    }
+}
+
+fn validate_dry_run_inputs(
+    args: &Cli,
+    effective_url: Option<&str>,
+    extra_patterns: &[streamer::DynPattern],
+) -> anyhow::Result<()> {
+    let mut targets = Vec::new();
+    let mut provider_token_targets = 0usize;
+
+    if let Some(ref targets_file) = args.targets {
+        targets = load_targets(targets_file, args.fuzz)?;
+    } else if let Some(ref dir) = args.dir {
+        targets.push(Target::Dir { dir: dir.clone() });
+    } else if let Some(ref token) = args.token {
+        validation::validate_github_token(token)
+            .map_err(|error| anyhow::anyhow!("Invalid GitHub token: {}", error))?;
+        targets.push(Target::Token {
+            token: token.clone(),
+            repos: None,
+        });
+    } else if let Some(ref token) = args.gitlab_token {
+        validation::validate_gitlab_token(token)
+            .map_err(|error| anyhow::anyhow!("Invalid GitLab token: {}", error))?;
+        provider_token_targets = 1;
+    } else if let Some(token) = args
+        .bitbucket_token
+        .as_deref()
+        .or(args.gitea_token.as_deref())
+        .or(args.azure_token.as_deref())
+    {
+        if token.trim().is_empty() {
+            return Err(anyhow::anyhow!("Provider token cannot be empty"));
+        }
+        provider_token_targets = 1;
+    } else if let Some(url) = effective_url {
+        let normalized = validation::validate_and_normalize_url(url)?;
+        targets.push(Target::Url {
+            url: normalized,
+            fuzz: Some(args.fuzz),
+        });
+    } else if args.bitbucket_token.is_none()
+        && args.gitea_token.is_none()
+        && args.azure_token.is_none()
+    {
+        return Err(anyhow::anyhow!(
+            "Either <URL>, --targets FILE, --dir PATH, or a token is required"
+        ));
+    }
+
+    for target in &targets {
+        validate_dry_run_target(target)?;
+    }
+
+    let quiet = args.quiet || args.pipe;
+    if !quiet {
+        println!("\n  ◈  [DRY RUN] Validation complete; no network or content scan performed.");
+        println!(
+            "  Targets        : {}",
+            targets.len() + provider_token_targets
+        );
+        println!("  Custom patterns: {}", extra_patterns.len());
+        println!("  Mode           : exhaustive={}", args.exhaustive);
+        println!("  Binary scan    : {}", !args.no_scan_binaries);
+        println!("  Object verify  : {}", !args.no_verify_objects);
+        println!("  Reports        : skipped");
+        println!("  Webhooks       : skipped\n");
+    } else if args.pipe {
+        println!(
+            "{}",
+            serde_json::json!({
+                "type": "dry_run",
+                "valid": true,
+                "targets": targets.len() + provider_token_targets,
+                "custom_patterns": extra_patterns.len(),
+                "network": "skipped",
+                "content_scan": "skipped",
+                "reports": "skipped",
+                "webhooks": "skipped"
+            })
+        );
+    }
+    Ok(())
 }
 
 async fn run_non_url_target(
@@ -2703,6 +2767,16 @@ async fn main() {
     if args.dir.is_some() && (args.targets.is_some() || args.url.is_some()) {
         eprintln!("  ✘  --dir mode cannot be combined with <URL> or --targets.");
         std::process::exit(1);
+    }
+
+    if args.dry_run {
+        if let Err(error) =
+            validate_dry_run_inputs(&args, effective_url.as_deref(), &extra_patterns)
+        {
+            eprintln!("  ✘  Dry-run validation failed: {}", error);
+            std::process::exit(1);
+        }
+        return;
     }
 
     // ── Token mode: enumerate GitHub repos and scan ──

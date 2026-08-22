@@ -38,7 +38,7 @@ Untuk perubahan behavior, acceptance test harus membuktikan bahwa mode normal te
 
 ## P0-01 — Lengkapi state checkpoint dan resume equivalence
 
-**Status:** `TODO`  
+**Status:** `DONE` — commit `16ad6ade`
 **Dependensi:** tidak ada  
 **Area:** `src/checkpoint.rs`, `src/streamer.rs`, `tests/checkpoint_resume.rs`
 
@@ -55,7 +55,7 @@ Checkpoint saat ini memulihkan processed SHA dan findings, tetapi belum memulihk
 
 ## P0-02 — Perbaiki object verification untuk bare/no-index repository
 
-**Status:** `TODO`  
+**Status:** `DONE` — commit `f9b7d1c1`
 **Dependensi:** tidak ada  
 **Area:** `src/mapper.rs`, `src/object_source.rs`, `tests/`
 
@@ -72,7 +72,7 @@ Verification tidak boleh hanya bergantung pada `index_entries`. Candidate verifi
 
 ## P0-03 — Benahi kontrak `--dry-run` di seluruh mode
 
-**Status:** `TODO`  
+**Status:** `DONE` — implementation validated locally; commit pending in current package
 **Dependensi:** tidak ada  
 **Area:** `src/main.rs`, `src/url_pipeline.rs`, `src/dir_pipeline.rs`, `src/targets.rs`
 
@@ -86,6 +86,10 @@ Verification tidak boleh hanya bergantung pada `index_entries`. Candidate verifi
 - Exit code konsisten untuk input valid dan invalid.
 - Ditambahkan CLI integration test untuk seluruh target mode.
 - README dan DEVELOPMENT.md diperbarui sesuai perilaku final.
+
+### Implementasi P0-03
+
+Dry-run sekarang berhenti sebelum URL detection, repository reconnaissance, provider authentication, repository enumeration, local file collection, content read, detector execution, report writing, aggregate report writing, dan webhook delivery. Target directory serta target-file entries tetap divalidasi; `--pipe` menghasilkan satu objek JSON `dry_run`. Regression test directory dry-run dan mixed target-file dry-run sudah ditambahkan.
 
 ## P0-04 — Validasi input numerik dan perbaiki semantics retry/HTTP
 

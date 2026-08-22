@@ -87,8 +87,11 @@ gitrecon https://target.example --max-history 0 --max-blob-size 8 \
 gitrecon --dir ./project --patterns ./patterns.json \
   --false-positive-keywords example,test,fixture
 
-# Validate configuration and target input without scanning
+# Validate configuration and target input without network or content scanning
 gitrecon --targets targets.ndjson --dry-run
+
+# Emit a machine-readable dry-run result (no report or webhook is created)
+gitrecon --dir ./project --dry-run --pipe
 ```
 
 ## Target Files and Custom Patterns
@@ -143,7 +146,7 @@ Replace the example quantifier with a valid regular-expression bound appropriate
 | `--live` | disabled | Emit findings as they arrive |
 | `--pipe` | disabled | Emit machine-readable pipeline output |
 | `--webhook URL` | — | Deliver a completed report to a validated webhook |
-| `--dry-run` | disabled | Validate target/configuration input without scanning |
+| `--dry-run` | disabled | Validate all target/configuration input without network, content scanning, reports, or webhooks |
 | `--patterns FILE` | — | Load validated custom JSON detection patterns |
 | `--false-positive-keywords LIST` | built-in list | Extend context keywords used for false-positive scoring |
 | `--max-blob-size MB` | `4` | Maximum individual blob or local file size |
