@@ -1428,6 +1428,26 @@ mod tests {
     }
 
     #[test]
+    fn save_json_includes_stream_metrics() {
+        let rep = Reporter::new(true, &ui::theme::Theme::default());
+        let stream = unicode_stream_result();
+        let path = std::env::temp_dir().join(format!(
+            "gitrecon_metrics_report_{}.json",
+            std::process::id()
+        ));
+        let path_str = path.to_string_lossy().to_string();
+
+        rep.save_json(&path_str, "target", None, None, Some(&stream))
+            .expect("save JSON report");
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(value["result"]["object_sources"]["pack"], 0);
+        assert!(value["result"]["outcomes"].is_object());
+        assert!(value["result"]["outcomes"]["failed_http_statuses"].is_object());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn save_markdown_and_html_handle_unicode_without_panic() {
         let rep = Reporter::new(true, &ui::theme::Theme::default());
         let stream = unicode_stream_result();
