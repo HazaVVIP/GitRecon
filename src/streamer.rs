@@ -2274,6 +2274,14 @@ async fn fetch_and_process(
         }
     };
 
+    // Re-check cancellation after acquisition: an in-flight request may have
+    // completed after another worker triggered --max-findings or --stop-on-critical.
+    if stop_flag.load(Ordering::Relaxed) {
+        return WorkerResult::Skipped {
+            reason: SkipReason::StopRequested,
+        };
+    }
+
     if save_dir.is_some() && verbose && envelope.bytes.len() > max_scan_bytes {
         eprintln!(
             "  [!] Blob {} ({} bytes) exceeds --max-blob-size but --save is on: saving without scan",
