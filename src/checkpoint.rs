@@ -42,6 +42,7 @@ use anyhow::{Context, Result};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::fs;
 use std::fs::File;
 use std::io::{BufReader, Read};
@@ -339,9 +340,62 @@ pub struct StreamCheckpoint {
     /// Last checkpoint index (for periodic checkpointing)
     pub last_checkpoint_index: usize,
 
+    /// Complete aggregate state required for report-equivalent resume.
+    /// Optional so older V1/V2 checkpoints remain readable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accumulator: Option<StreamAccumulatorCheckpoint>,
+
     /// PERF-003: Adaptive concurrency state
     #[serde(skip_serializing_if = "Option::is_none")]
     pub adaptive_state: Option<AdaptiveConcurrencyState>,
+}
+
+/// Aggregate scan state needed to make an interrupted/resumed report equivalent
+/// to a one-shot report. Ordered collections keep checkpoint bytes deterministic.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StreamAccumulatorCheckpoint {
+    #[serde(default)]
+    pub contributors: BTreeMap<String, String>,
+    #[serde(default)]
+    pub tech_stack: Vec<String>,
+    #[serde(default)]
+    pub commit_count: usize,
+    #[serde(default)]
+    pub blobs_scanned: usize,
+    #[serde(default)]
+    pub blobs_failed: usize,
+    #[serde(default)]
+    pub bytes_scanned: usize,
+    #[serde(default)]
+    pub files_saved: usize,
+    #[serde(default)]
+    pub files_save_failed: usize,
+    #[serde(default)]
+    pub skipped_stop_requested: usize,
+    #[serde(default)]
+    pub skipped_invalid_object: usize,
+    #[serde(default)]
+    pub skipped_not_found: usize,
+    #[serde(default)]
+    pub skipped_oversized: usize,
+    #[serde(default)]
+    pub failed_http_statuses: BTreeMap<u16, usize>,
+    #[serde(default)]
+    pub objects_pack: usize,
+    #[serde(default)]
+    pub objects_cache: usize,
+    #[serde(default)]
+    pub objects_loose_http: usize,
+    #[serde(default)]
+    pub cache_hits: usize,
+    #[serde(default)]
+    pub cache_misses: usize,
+    #[serde(default)]
+    pub rate_limit_allowed: usize,
+    #[serde(default)]
+    pub rate_limit_dropped: usize,
+    #[serde(default)]
+    pub rate_limit_wait_ms: u64,
 }
 
 /// BUG-STAB-011: Minimal finding representation for checkpoint storage
@@ -1623,6 +1677,7 @@ mod tests {
                 confidence_adjustment: None,
             }],
             last_checkpoint_index: 1,
+            accumulator: None,
             adaptive_state: None,
         };
         let encoded = serde_json::to_string(&progress).unwrap();
@@ -1630,6 +1685,70 @@ mod tests {
         assert_eq!(restored.findings_count, 1);
         assert_eq!(restored.findings.len(), 1);
         assert_eq!(restored.findings[0].match_str, "fixture-value");
+        assert_eq!(restored.processed_sha1s, vec!["fixture-sha"]);
+        assert!(restored.accumulator.is_none());
+    }
+
+    #[test]
+    fn stream_checkpoint_accumulator_roundtrip_preserves_aggregate_state() {
+        let mut contributors = BTreeMap::new();
+        contributors.insert("analyst@example.test".to_string(), "Analyst".to_string());
+        let mut failed_http_statuses = BTreeMap::new();
+        failed_http_statuses.insert(503, 2);
+        let progress = StreamCheckpoint {
+            total_sha1s: 12,
+            processed_sha1s: vec!["aaa".to_string(), "bbb".to_string()],
+            findings_count: 1,
+            findings: vec![],
+            last_checkpoint_index: 2,
+            accumulator: Some(StreamAccumulatorCheckpoint {
+                contributors,
+                tech_stack: vec!["Rust".to_string(), "SQLite".to_string()],
+                commit_count: 3,
+                blobs_scanned: 7,
+                blobs_failed: 2,
+                bytes_scanned: 4096,
+                files_saved: 5,
+                files_save_failed: 1,
+                skipped_stop_requested: 1,
+                skipped_invalid_object: 2,
+                skipped_not_found: 3,
+                skipped_oversized: 4,
+                failed_http_statuses,
+                objects_pack: 2,
+                objects_cache: 3,
+                objects_loose_http: 4,
+                cache_hits: 8,
+                cache_misses: 5,
+                rate_limit_allowed: 9,
+                rate_limit_dropped: 1,
+                rate_limit_wait_ms: 125,
+            }),
+            adaptive_state: None,
+        };
+
+        let encoded = serde_json::to_string(&progress).unwrap();
+        let restored: StreamCheckpoint = serde_json::from_str(&encoded).unwrap();
+        let accumulator = restored.accumulator.unwrap();
+        assert_eq!(accumulator.commit_count, 3);
+        assert_eq!(accumulator.bytes_scanned, 4096);
+        assert_eq!(accumulator.contributors["analyst@example.test"], "Analyst");
+        assert_eq!(accumulator.failed_http_statuses[&503], 2);
+        assert_eq!(accumulator.objects_cache, 3);
+        assert_eq!(accumulator.rate_limit_wait_ms, 125);
+    }
+
+    #[test]
+    fn legacy_stream_checkpoint_without_accumulator_remains_readable() {
+        let encoded = r#"{
+            "total_sha1s": 1,
+            "processed_sha1s": ["fixture-sha"],
+            "findings_count": 0,
+            "findings": [],
+            "last_checkpoint_index": 1
+        }"#;
+        let restored: StreamCheckpoint = serde_json::from_str(encoded).unwrap();
+        assert!(restored.accumulator.is_none());
         assert_eq!(restored.processed_sha1s, vec!["fixture-sha"]);
     }
 
@@ -1659,6 +1778,7 @@ mod tests {
                 findings_count: 5,
                 findings: vec![],
                 last_checkpoint_index: 100,
+                accumulator: None,
                 adaptive_state: None,
             }),
             hmac: None,

@@ -911,6 +911,114 @@ impl State {
     fn record_source(&mut self, source: ObjectSourceKind) {
         *self.objects_by_source.entry(source).or_default() += 1;
     }
+
+    fn to_checkpoint(
+        &self,
+        cache_hits: usize,
+        cache_misses: usize,
+        rate_limit_allowed: usize,
+        rate_limit_dropped: usize,
+        rate_limit_wait_ms: u64,
+    ) -> checkpoint::StreamAccumulatorCheckpoint {
+        let mut tech_stack: Vec<String> = self.tech_stack.iter().cloned().collect();
+        tech_stack.sort_unstable();
+
+        let mut failed_http_statuses = BTreeMap::new();
+        for (kind, count) in &self.failed_by_kind {
+            let FailureKind::HttpStatus(status) = kind;
+            failed_http_statuses.insert(*status, *count);
+        }
+
+        checkpoint::StreamAccumulatorCheckpoint {
+            contributors: self
+                .contributors
+                .iter()
+                .map(|(email, name)| (email.clone(), name.clone()))
+                .collect(),
+            tech_stack,
+            commit_count: self.commit_count,
+            blobs_scanned: self.blobs_scanned,
+            blobs_failed: self.blobs_failed,
+            bytes_scanned: self.bytes_scanned,
+            files_saved: self.files_saved,
+            files_save_failed: self.files_save_failed,
+            skipped_stop_requested: self
+                .skipped_by_reason
+                .get(&SkipReason::StopRequested)
+                .copied()
+                .unwrap_or_default(),
+            skipped_invalid_object: self
+                .skipped_by_reason
+                .get(&SkipReason::InvalidObject)
+                .copied()
+                .unwrap_or_default(),
+            skipped_not_found: self
+                .skipped_by_reason
+                .get(&SkipReason::NotFound)
+                .copied()
+                .unwrap_or_default(),
+            skipped_oversized: self
+                .skipped_by_reason
+                .get(&SkipReason::Oversized)
+                .copied()
+                .unwrap_or_default(),
+            failed_http_statuses,
+            objects_pack: self
+                .objects_by_source
+                .get(&ObjectSourceKind::Pack)
+                .copied()
+                .unwrap_or_default(),
+            objects_cache: self
+                .objects_by_source
+                .get(&ObjectSourceKind::Cache)
+                .copied()
+                .unwrap_or_default(),
+            objects_loose_http: self
+                .objects_by_source
+                .get(&ObjectSourceKind::LooseHttp)
+                .copied()
+                .unwrap_or_default(),
+            cache_hits,
+            cache_misses,
+            rate_limit_allowed,
+            rate_limit_dropped,
+            rate_limit_wait_ms,
+        }
+    }
+
+    fn restore_checkpoint(&mut self, snapshot: checkpoint::StreamAccumulatorCheckpoint) {
+        self.contributors = snapshot.contributors.into_iter().collect();
+        self.tech_stack = snapshot.tech_stack.into_iter().collect();
+        self.commit_count = snapshot.commit_count;
+        self.blobs_scanned = snapshot.blobs_scanned;
+        self.blobs_failed = snapshot.blobs_failed;
+        self.bytes_scanned = snapshot.bytes_scanned;
+        self.files_saved = snapshot.files_saved;
+        self.files_save_failed = snapshot.files_save_failed;
+
+        self.skipped_by_reason = [
+            (SkipReason::StopRequested, snapshot.skipped_stop_requested),
+            (SkipReason::InvalidObject, snapshot.skipped_invalid_object),
+            (SkipReason::NotFound, snapshot.skipped_not_found),
+            (SkipReason::Oversized, snapshot.skipped_oversized),
+        ]
+        .into_iter()
+        .filter(|(_, count)| *count > 0)
+        .collect();
+        self.failed_by_kind = snapshot
+            .failed_http_statuses
+            .into_iter()
+            .map(|(status, count)| (FailureKind::HttpStatus(status), count))
+            .collect();
+        self.objects_by_source = [
+            (ObjectSourceKind::Pack, snapshot.objects_pack),
+            (ObjectSourceKind::Cache, snapshot.objects_cache),
+            (ObjectSourceKind::LooseHttp, snapshot.objects_loose_http),
+        ]
+        .into_iter()
+        .filter(|(_, count)| *count > 0)
+        .collect();
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1464,6 +1572,7 @@ impl Streamer {
 
         // R-1: Checkpoint & Resume logic
         let mut checkpoint: Option<Checkpoint> = None;
+        let mut restored_accumulator: Option<checkpoint::StreamAccumulatorCheckpoint> = None;
         let mut processed_sha1s_set: HashSet<String> = HashSet::new();
         let target_for_checkpoint = self.target_url.as_ref().unwrap_or(&git_url);
 
@@ -1497,6 +1606,7 @@ impl Streamer {
                         if let Some(ref stream_prog) = loaded.stream_progress {
                             processed_sha1s_set =
                                 stream_prog.processed_sha1s.clone().into_iter().collect();
+                            restored_accumulator = stream_prog.accumulator.clone();
                             checkpoint = Some(loaded.clone());
 
                             if self.verbose {
@@ -1660,6 +1770,19 @@ impl Streamer {
             .buffer_unordered(initial_workers);
 
         let mut state = State::default();
+        if let Some(snapshot) = restored_accumulator {
+            self.cache_hits
+                .store(snapshot.cache_hits, Ordering::Relaxed);
+            self.cache_misses
+                .store(snapshot.cache_misses, Ordering::Relaxed);
+            self.rate_limit_allowed
+                .store(snapshot.rate_limit_allowed, Ordering::Relaxed);
+            self.rate_limit_dropped
+                .store(snapshot.rate_limit_dropped, Ordering::Relaxed);
+            self.rate_limit_wait_ms
+                .store(snapshot.rate_limit_wait_ms, Ordering::Relaxed);
+            state.restore_checkpoint(snapshot);
+        }
 
         // BUG-STAB-011: Restore findings from checkpoint for resume capability
         if let Some(ref cp) = checkpoint {
@@ -1837,6 +1960,13 @@ impl Streamer {
                     ordered_processed_sha1s(&tracker)
                 };
 
+                let accumulator = state.to_checkpoint(
+                    self.cache_hits.load(Ordering::Relaxed),
+                    self.cache_misses.load(Ordering::Relaxed),
+                    self.rate_limit_allowed.load(Ordering::Relaxed),
+                    self.rate_limit_dropped.load(Ordering::Relaxed),
+                    self.rate_limit_wait_ms.load(Ordering::Relaxed),
+                );
                 let new_checkpoint = Checkpoint {
                     version: checkpoint::CheckpointVersion::latest(),
                     target: target_for_checkpoint.clone(),
@@ -1859,6 +1989,7 @@ impl Streamer {
                             .map(|f| checkpoint::FindingCheckpoint::from(f.clone()))
                             .collect(),
                         last_checkpoint_index: done,
+                        accumulator: Some(accumulator),
                         adaptive_state,
                     }),
                     hmac: None, // BUG-SEC-005: Will be computed in save_checkpoint()
@@ -1904,8 +2035,15 @@ impl Streamer {
             // R-1: Collect processed SHA1s for final checkpoint
             let processed_list: Vec<String> = {
                 let tracker = processed_sha1s_tracker.lock().await;
-                tracker.iter().cloned().collect()
+                ordered_processed_sha1s(&tracker)
             };
+            let accumulator = state.to_checkpoint(
+                self.cache_hits.load(Ordering::Relaxed),
+                self.cache_misses.load(Ordering::Relaxed),
+                self.rate_limit_allowed.load(Ordering::Relaxed),
+                self.rate_limit_dropped.load(Ordering::Relaxed),
+                self.rate_limit_wait_ms.load(Ordering::Relaxed),
+            );
 
             let final_checkpoint = Checkpoint {
                 version: checkpoint::CheckpointVersion::latest(),
@@ -1928,6 +2066,7 @@ impl Streamer {
                         .map(|f| checkpoint::FindingCheckpoint::from(f.clone()))
                         .collect(),
                     last_checkpoint_index: done_counter.load(Ordering::Relaxed),
+                    accumulator: Some(accumulator),
                     adaptive_state,
                 }),
                 hmac: None, // BUG-SEC-005: Will be computed in save_checkpoint()
@@ -5989,6 +6128,50 @@ mod tests {
                 "cccccccccccccccccccccccccccccccccccccccc".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn aggregate_state_roundtrip_restores_report_metrics() {
+        let mut original = State::default();
+        original
+            .contributors
+            .insert("analyst@example.test".to_string(), "Analyst".to_string());
+        original
+            .tech_stack
+            .extend(["Rust".to_string(), "SQLite".to_string()]);
+        original.commit_count = 4;
+        original.blobs_scanned = 8;
+        original.blobs_failed = 1;
+        original.bytes_scanned = 4096;
+        original.files_saved = 6;
+        original.files_save_failed = 1;
+        original.record_skip(SkipReason::NotFound);
+        original.record_skip(SkipReason::Oversized);
+        original.record_failure(FailureKind::HttpStatus(503));
+        original.record_source(ObjectSourceKind::Pack);
+        original.record_source(ObjectSourceKind::Cache);
+        original.record_source(ObjectSourceKind::LooseHttp);
+
+        let snapshot = original.to_checkpoint(11, 13, 17, 2, 125);
+        assert_eq!(snapshot.tech_stack, vec!["Rust", "SQLite"]);
+        let encoded = serde_json::to_string(&snapshot).unwrap();
+        let restored_snapshot: checkpoint::StreamAccumulatorCheckpoint =
+            serde_json::from_str(&encoded).unwrap();
+
+        let mut resumed = State::default();
+        resumed.restore_checkpoint(restored_snapshot);
+
+        assert_eq!(resumed.contributors, original.contributors);
+        assert_eq!(resumed.tech_stack, original.tech_stack);
+        assert_eq!(resumed.commit_count, original.commit_count);
+        assert_eq!(resumed.blobs_scanned, original.blobs_scanned);
+        assert_eq!(resumed.blobs_failed, original.blobs_failed);
+        assert_eq!(resumed.bytes_scanned, original.bytes_scanned);
+        assert_eq!(resumed.files_saved, original.files_saved);
+        assert_eq!(resumed.files_save_failed, original.files_save_failed);
+        assert_eq!(resumed.skipped_by_reason, original.skipped_by_reason);
+        assert_eq!(resumed.failed_by_kind, original.failed_by_kind);
+        assert_eq!(resumed.objects_by_source, original.objects_by_source);
     }
 
     // unique_findings / unique_count
