@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+use crate::checkpoint::ScanConfigSnapshot;
 use crate::config::ScanConfig;
 use crate::http_client::HttpClient;
 use crate::streamer::{DynPattern, Streamer};
@@ -36,5 +37,6 @@ pub(crate) fn build_streamer(
         cache,
         false_positive_keywords,
         config.exhaustive,
+        ScanConfigSnapshot::from_config(config),
     )
 }

@@ -87,6 +87,64 @@ impl CheckpointVersion {
     }
 }
 
+/// Immutable scan settings captured in a checkpoint.
+///
+/// The snapshot makes resume compatibility explicit instead of relying on
+/// scattered defaults in the stream loop. It is optional on the checkpoint
+/// schema so V1/V2 files written before this field existed remain readable.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScanConfigSnapshot {
+    pub workers: usize,
+    pub mem_limit_mb: usize,
+    pub max_findings: usize,
+    pub stop_on_critical: bool,
+    pub max_blob_size_mb: usize,
+    pub max_history: usize,
+    pub entropy_threshold: f64,
+    pub live: bool,
+    pub adaptive_workers: bool,
+    pub checkpoint_interval: usize,
+    pub exhaustive: bool,
+    pub scan_binaries: bool,
+    pub verify_objects: bool,
+    pub cache_enabled: bool,
+    pub cache_ttl: u64,
+    pub policy_version: u32,
+}
+
+impl ScanConfigSnapshot {
+    /// Build a snapshot from validated runtime configuration.
+    pub(crate) fn from_config(config: &crate::config::ScanConfig) -> Self {
+        Self {
+            workers: config.workers,
+            mem_limit_mb: config.mem_limit,
+            max_findings: config.max_findings,
+            stop_on_critical: config.stop_on_critical,
+            max_blob_size_mb: config.max_blob_size,
+            max_history: config.max_history,
+            entropy_threshold: config.entropy_threshold,
+            live: config.live,
+            adaptive_workers: config.adaptive_workers,
+            checkpoint_interval: config.checkpoint_interval,
+            exhaustive: config.exhaustive,
+            scan_binaries: config.scan_binaries,
+            verify_objects: config.verify_objects,
+            cache_enabled: config.cache_enabled,
+            cache_ttl: config.cache_ttl,
+            // Increment when the interpretation of scan settings changes.
+            policy_version: 1,
+        }
+    }
+
+    /// Compute a stable fingerprint over the complete scan configuration.
+    pub(crate) fn fingerprint(&self) -> Result<String> {
+        let canonical =
+            serde_json::to_vec(self).context("Failed to serialize scan configuration snapshot")?;
+        let digest = Sha256::digest(canonical);
+        Ok(hex::encode(digest))
+    }
+}
+
 /// Checkpoint data structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Checkpoint {
@@ -106,8 +164,15 @@ pub struct Checkpoint {
     /// Current phase: DETECT, MAP, STREAM
     pub phase: CheckpointPhase,
 
-    /// Configuration fingerprint (hash of key args)
+    /// Configuration fingerprint (hash of the complete scan configuration snapshot)
     pub config_fingerprint: String,
+
+    /// Complete scan settings used to create this checkpoint.
+    ///
+    /// Optional for backward compatibility with checkpoints written before the
+    /// snapshot contract was introduced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_snapshot: Option<ScanConfigSnapshot>,
 
     /// Phase 1: Detect result (if completed)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -141,6 +206,7 @@ impl Checkpoint {
             updated_at: now,
             phase,
             config_fingerprint,
+            config_snapshot: None,
             detect_result: None,
             map_result: None,
             stream_progress: None,
@@ -346,49 +412,6 @@ pub struct AdaptiveConcurrencyState {
 
     /// Last adjustment index (blob count when last adjustment was made)
     pub last_adjustment_index: usize,
-}
-
-/// Compute config fingerprint from key arguments
-///
-/// This ensures we don't resume with mismatched configuration.
-#[allow(dead_code)]
-pub fn compute_config_fingerprint(
-    fuzz: bool,
-    min_confidence: u32,
-    entropy_threshold: f64,
-    max_blob_size: usize,
-) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    let mut hasher = DefaultHasher::new();
-    fuzz.hash(&mut hasher);
-    min_confidence.hash(&mut hasher);
-    entropy_threshold.to_bits().hash(&mut hasher);
-    max_blob_size.hash(&mut hasher);
-    format!("{:x}", hasher.finish())
-}
-
-/// Compute a checkpoint fingerprint including scan-policy identity.
-///
-/// The legacy function remains stable for old checkpoint fixtures; new Streamer
-/// checkpoints use this variant so normal and exhaustive scans cannot resume
-/// from one another's object-processing state.
-pub fn compute_config_fingerprint_with_policy(
-    fuzz: bool,
-    min_confidence: u32,
-    entropy_threshold: f64,
-    max_blob_size: usize,
-    exhaustive: bool,
-) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    let mut hasher = DefaultHasher::new();
-    compute_config_fingerprint(fuzz, min_confidence, entropy_threshold, max_blob_size)
-        .hash(&mut hasher);
-    exhaustive.hash(&mut hasher);
-    format!("{:x}", hasher.finish())
 }
 
 /// Get checkpoint directory path
@@ -980,6 +1003,25 @@ pub fn cleanup_old_checkpoints() -> Result<usize> {
     Ok(cleaned)
 }
 
+/// Legacy fingerprint primitive used by `verify_config_fingerprint` for old callers.
+/// New stream checkpoints use `ScanConfigSnapshot::fingerprint` instead.
+pub fn compute_config_fingerprint(
+    fuzz: bool,
+    min_confidence: u32,
+    entropy_threshold: f64,
+    max_blob_size: usize,
+) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    fuzz.hash(&mut hasher);
+    min_confidence.hash(&mut hasher);
+    entropy_threshold.to_bits().hash(&mut hasher);
+    max_blob_size.hash(&mut hasher);
+    format!("{:x}", hasher.finish())
+}
+
 /// Verify config fingerprint matches
 #[allow(dead_code)]
 pub fn verify_config_fingerprint(
@@ -1095,7 +1137,8 @@ mod tests {
             created_at: 123456,
             updated_at: 123456,
             phase: CheckpointPhase::Detect,
-            config_fingerprint: compute_config_fingerprint(true, 45, 4.5, 4),
+            config_fingerprint: "legacy-test-fingerprint".to_string(),
+            config_snapshot: None,
             detect_result: Some(DetectCheckpoint {
                 git_url: target.to_string(),
                 confidence: 95,
@@ -1493,22 +1536,44 @@ mod tests {
         drop(temp_dir);
     }
 
-    // Legacy tests from original implementation
     #[test]
-    fn test_config_fingerprint() {
-        let _lock = TEST_MUTEX.lock().unwrap();
-        let fp1 = compute_config_fingerprint(true, 45, 4.5, 4);
-        let fp2 = compute_config_fingerprint(true, 45, 4.5, 4);
-        let fp3 = compute_config_fingerprint(false, 45, 4.5, 4);
-        let normal_policy = compute_config_fingerprint_with_policy(true, 45, 4.5, 4, false);
-        let exhaustive_policy = compute_config_fingerprint_with_policy(true, 45, 4.5, 4, true);
-        let exhaustive_policy_again =
-            compute_config_fingerprint_with_policy(true, 45, 4.5, 4, true);
+    fn scan_config_snapshot_changes_fingerprint_when_behavior_changes() {
+        let config = crate::config::ScanConfig::from_values(
+            16, 128, 0, false, 4, 500, 4.5, false, true, true, 1000, false, true, true, true,
+            604_800,
+        );
+        let normal = ScanConfigSnapshot::from_config(&config);
+        let mut exhaustive = normal.clone();
+        exhaustive.exhaustive = true;
 
-        assert_eq!(fp1, fp2);
-        assert_ne!(fp1, fp3);
-        assert_ne!(normal_policy, exhaustive_policy);
-        assert_eq!(exhaustive_policy, exhaustive_policy_again);
+        assert_eq!(normal.fingerprint().unwrap(), normal.fingerprint().unwrap());
+        assert_ne!(
+            normal.fingerprint().unwrap(),
+            exhaustive.fingerprint().unwrap()
+        );
+    }
+
+    #[test]
+    fn scan_config_snapshot_roundtrip_and_fingerprint_are_stable() {
+        let config = crate::config::ScanConfig::from_values(
+            32, 256, 100, true, 8, 0, 4.2, true, true, true, 500, true, true, true, true, 86_400,
+        );
+        let snapshot = ScanConfigSnapshot::from_config(&config);
+        let json = serde_json::to_string(&snapshot).unwrap();
+        let restored: ScanConfigSnapshot = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(restored, snapshot);
+        assert_eq!(
+            restored.fingerprint().unwrap(),
+            snapshot.fingerprint().unwrap()
+        );
+
+        let mut changed = restored.clone();
+        changed.exhaustive = false;
+        assert_ne!(
+            changed.fingerprint().unwrap(),
+            snapshot.fingerprint().unwrap()
+        );
     }
 
     #[test]
@@ -1585,6 +1650,7 @@ mod tests {
             updated_at: 123456,
             phase: CheckpointPhase::Stream,
             config_fingerprint: "test123".to_string(),
+            config_snapshot: None,
             detect_result: None,
             map_result: None,
             stream_progress: Some(StreamCheckpoint {

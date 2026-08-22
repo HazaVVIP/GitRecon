@@ -839,6 +839,31 @@ struct State {
     bytes_scanned: usize,
     files_saved: usize,
     files_save_failed: usize,
+    skipped_by_reason: HashMap<SkipReason, usize>,
+    failed_by_kind: HashMap<FailureKind, usize>,
+}
+
+impl State {
+    fn record_skip(&mut self, reason: SkipReason) {
+        *self.skipped_by_reason.entry(reason).or_default() += 1;
+    }
+
+    fn record_failure(&mut self, kind: FailureKind) {
+        *self.failed_by_kind.entry(kind).or_default() += 1;
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum SkipReason {
+    StopRequested,
+    InvalidObject,
+    NotFound,
+    Oversized,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum FailureKind {
+    HttpStatus(u16),
 }
 
 // Result sent back from each worker task via channel
@@ -849,7 +874,9 @@ enum WorkerResult {
         bytes: usize,
         save_result: Option<bool>, // None = not attempted, Some(true) = saved, Some(false) = failed
     },
-    BlobFailed,
+    BlobFailed {
+        kind: FailureKind,
+    },
     CommitProcessed {
         email: String,
         name: String,
@@ -858,7 +885,9 @@ enum WorkerResult {
     TreeProcessed {
         file_techs: Vec<(String, String)>, // (sha1, filename)
     },
-    Skipped,
+    Skipped {
+        reason: SkipReason,
+    },
 }
 
 // ════════════════════════════════════════════════
@@ -1151,6 +1180,8 @@ pub struct Streamer {
     // SCAN-001: Custom false-positive keywords for context-aware confidence scoring
     false_positive_keywords: Arc<Vec<String>>,
     exhaustive: bool,
+    /// Complete runtime settings used for checkpoint compatibility.
+    config_snapshot: checkpoint::ScanConfigSnapshot,
 }
 
 impl Streamer {
@@ -1173,6 +1204,7 @@ impl Streamer {
         cache: Option<Arc<crate::cache::ObjectCache>>,
         false_positive_keywords: Vec<String>,
         exhaustive: bool,
+        config_snapshot: checkpoint::ScanConfigSnapshot,
     ) -> Self {
         Self {
             client,
@@ -1197,6 +1229,7 @@ impl Streamer {
             rate_limit_wait_ms: Arc::new(AtomicU64::new(0)),
             false_positive_keywords: Arc::new(false_positive_keywords),
             exhaustive,
+            config_snapshot,
         }
     }
 
@@ -1209,6 +1242,10 @@ impl Streamer {
     ) -> StreamResult {
         let t0 = Instant::now();
         let git_url = git_url.trim_end_matches('/').to_string();
+        let config_fingerprint = self
+            .config_snapshot
+            .fingerprint()
+            .unwrap_or_else(|_| "snapshot-unavailable".to_string());
 
         // Create save directory upfront if --save is active
         if let Some(ref dir) = save_dir {
@@ -1310,19 +1347,41 @@ impl Streamer {
                     println!("  [R] Found checkpoint from {}", ts);
                 }
 
-                // Verify we're in STREAM phase
+                // Verify we're in STREAM phase and, for modern checkpoints,
+                // that the complete scan configuration is unchanged.
                 if matches!(loaded.phase, CheckpointPhase::Stream) {
-                    if let Some(ref stream_prog) = loaded.stream_progress {
-                        processed_sha1s_set =
-                            stream_prog.processed_sha1s.clone().into_iter().collect();
-                        checkpoint = Some(loaded.clone());
+                    let snapshot_compatible = loaded
+                        .config_snapshot
+                        .as_ref()
+                        .map(|snapshot| {
+                            snapshot == &self.config_snapshot
+                                && loaded.config_fingerprint == config_fingerprint
+                        })
+                        // V1/V2 checkpoints created before the snapshot field
+                        // remain readable and retain the legacy resume behavior.
+                        .unwrap_or(true);
+                    if snapshot_compatible {
+                        if let Some(ref stream_prog) = loaded.stream_progress {
+                            processed_sha1s_set =
+                                stream_prog.processed_sha1s.clone().into_iter().collect();
+                            checkpoint = Some(loaded.clone());
 
-                        if self.verbose {
-                            println!(
-                                "  [R] Resuming from checkpoint: {} SHA1s already processed",
-                                processed_sha1s_set.len()
-                            );
+                            if self.verbose {
+                                if loaded.config_snapshot.is_none() {
+                                    println!(
+                                        "  [R] Resuming legacy checkpoint without config snapshot"
+                                    );
+                                }
+                                println!(
+                                    "  [R] Resuming from checkpoint: {} SHA1s already processed",
+                                    processed_sha1s_set.len()
+                                );
+                            }
                         }
+                    } else if self.verbose {
+                        println!(
+                            "  [R] Checkpoint configuration differs from the current scan; starting a fresh stream"
+                        );
                     }
                 }
             }
@@ -1451,7 +1510,10 @@ impl Streamer {
                     )
                     .await;
                     // R-1: Register processed SHA1 on success (BUG-CON-002: use .lock().await for tokio::sync::Mutex)
-                    if !matches!(result, WorkerResult::Skipped | WorkerResult::BlobFailed) {
+                    if !matches!(
+                        result,
+                        WorkerResult::Skipped { .. } | WorkerResult::BlobFailed { .. }
+                    ) {
                         let mut tracker = processed_tracker.lock().await;
                         tracker.insert(sha1.to_string());
                     }
@@ -1522,9 +1584,10 @@ impl Streamer {
                         None => {}
                     }
                 }
-                WorkerResult::BlobFailed => {
+                WorkerResult::BlobFailed { kind } => {
                     worker_result_failed = true;
                     state.blobs_failed += 1;
+                    state.record_failure(kind);
                 }
                 WorkerResult::CommitProcessed {
                     email,
@@ -1551,7 +1614,9 @@ impl Streamer {
                         detect_tech(&filename, &mut state.tech_stack);
                     }
                 }
-                WorkerResult::Skipped => {}
+                WorkerResult::Skipped { reason } => {
+                    state.record_skip(reason);
+                }
             }
 
             // PERF-003: Update adaptive concurrency tracking
@@ -1637,21 +1702,9 @@ impl Streamer {
                     created_at: checkpoint.as_ref().map(|c| c.created_at).unwrap_or(now),
                     updated_at: now,
                     phase: CheckpointPhase::Stream,
-                    // BUG-STAB-008: Fixed - Use stable fingerprint without timestamp to prevent false resume failures
-                    config_fingerprint: checkpoint
-                        .as_ref()
-                        .map(|c| c.config_fingerprint.clone())
-                        .unwrap_or_else(|| {
-                            // Compute fingerprint if this is first checkpoint
-                            // BUG-STAB-008: Use actual config parameters instead of timestamp
-                            checkpoint::compute_config_fingerprint_with_policy(
-                                false, // fuzz - should be passed from args
-                                50,    // min_confidence - should be passed from args
-                                4.5,   // entropy_threshold - should be passed from args
-                                10,    // max_blob_size - should be passed from args
-                                self.exhaustive,
-                            )
-                        }),
+                    // Stable fingerprint over the complete runtime configuration.
+                    config_fingerprint: config_fingerprint.clone(),
+                    config_snapshot: Some(self.config_snapshot.clone()),
                     detect_result: None,
                     map_result: None,
                     stream_progress: Some(StreamCheckpoint {
@@ -1719,18 +1772,8 @@ impl Streamer {
                 created_at: checkpoint.as_ref().map(|c| c.created_at).unwrap_or(now),
                 updated_at: now,
                 phase: CheckpointPhase::Stream,
-                config_fingerprint: checkpoint
-                    .as_ref()
-                    .map(|c| c.config_fingerprint.clone())
-                    .unwrap_or_else(|| {
-                        checkpoint::compute_config_fingerprint_with_policy(
-                            false,
-                            50,
-                            4.5,
-                            10,
-                            self.exhaustive,
-                        )
-                    }),
+                config_fingerprint: config_fingerprint.clone(),
+                config_snapshot: Some(self.config_snapshot.clone()),
                 detect_result: None,
                 map_result: None,
                 stream_progress: Some(StreamCheckpoint {
@@ -1850,7 +1893,11 @@ fn process_blob_content(
     let parser = ObjectParser;
     let obj = match parser.parse(content, sha1) {
         Some(o) => o,
-        None => return WorkerResult::Skipped,
+        None => {
+            return WorkerResult::Skipped {
+                reason: SkipReason::InvalidObject,
+            };
+        }
     };
 
     let raw_bytes = content.len();
@@ -2174,7 +2221,9 @@ fn process_blob_content(
                     findings: msg_findings,
                 }
             } else {
-                WorkerResult::Skipped
+                WorkerResult::Skipped {
+                    reason: SkipReason::InvalidObject,
+                }
             }
         }
         "tree" => {
@@ -2187,7 +2236,9 @@ fn process_blob_content(
                 .collect();
             WorkerResult::TreeProcessed { file_techs }
         }
-        _ => WorkerResult::Skipped,
+        _ => WorkerResult::Skipped {
+            reason: SkipReason::InvalidObject,
+        },
     }
 }
 
@@ -2216,7 +2267,9 @@ async fn fetch_and_process(
 ) -> WorkerResult {
     // Bail immediately if a stop condition was already triggered
     if stop_flag.load(Ordering::Relaxed) {
-        return WorkerResult::Skipped;
+        return WorkerResult::Skipped {
+            reason: SkipReason::StopRequested,
+        };
     }
 
     // Sprint 5 (S5.1): serve pack-resolved objects first — no HTTP round trip
@@ -2282,9 +2335,13 @@ async fn fetch_and_process(
     if !resp.ok() {
         // 404 → loose object simply not present (expected for pack-only repos); not a failure
         if resp.status == 404 {
-            return WorkerResult::Skipped;
+            return WorkerResult::Skipped {
+                reason: SkipReason::NotFound,
+            };
         }
-        return WorkerResult::BlobFailed;
+        return WorkerResult::BlobFailed {
+            kind: FailureKind::HttpStatus(resp.status),
+        };
     }
 
     // SEC-005: Check Content-Length before processing
@@ -2307,7 +2364,9 @@ async fn fetch_and_process(
                     content_length
                 );
             }
-            return WorkerResult::Skipped;
+            return WorkerResult::Skipped {
+                reason: SkipReason::Oversized,
+            };
         }
     } else if verbose {
         if let Some(len) = content_length {
@@ -4259,6 +4318,25 @@ fn scan_db_config_blocks_with_policy(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typed_worker_outcomes_are_accounted_by_reason() {
+        let mut state = State::default();
+        state.record_skip(SkipReason::NotFound);
+        state.record_skip(SkipReason::NotFound);
+        state.record_skip(SkipReason::Oversized);
+        state.record_failure(FailureKind::HttpStatus(429));
+
+        assert_eq!(state.skipped_by_reason.get(&SkipReason::NotFound), Some(&2));
+        assert_eq!(
+            state.skipped_by_reason.get(&SkipReason::Oversized),
+            Some(&1)
+        );
+        assert_eq!(
+            state.failed_by_kind.get(&FailureKind::HttpStatus(429)),
+            Some(&1)
+        );
+    }
 
     #[test]
     fn test_is_placeholder() {
