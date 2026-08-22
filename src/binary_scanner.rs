@@ -138,6 +138,23 @@ pub fn extract_zip_files_enhanced(data: &[u8]) -> Vec<(String, Vec<u8>)> {
     files
 }
 
+/// Maximum decompressed GZIP output accepted for scanning.
+const MAX_GZIP_OUTPUT_SIZE: usize = 100 * 1024 * 1024;
+
+fn decompress_gzip(data: &[u8]) -> Option<Vec<u8>> {
+    use flate2::read::GzDecoder;
+
+    let decoder = GzDecoder::new(Cursor::new(data));
+    let mut limited = decoder.take((MAX_GZIP_OUTPUT_SIZE + 1) as u64);
+    let mut decompressed = Vec::new();
+    if limited.read_to_end(&mut decompressed).is_ok() && decompressed.len() <= MAX_GZIP_OUTPUT_SIZE
+    {
+        Some(decompressed)
+    } else {
+        None
+    }
+}
+
 /// Scan binary blob for secrets with enhanced detection
 ///
 /// Returns findings (pattern_id, match_string, context, source)
@@ -257,8 +274,16 @@ pub fn scan_binary_blob(
                 }
             }
         }
-        _ => {
-            // Gzip and other formats - use basic string extraction
+        BinaryType::Gzip => {
+            // Scan decompressed content recursively, then retain the legacy raw
+            // string fallback for malformed or unusual GZIP payloads.
+            if let Some(decompressed) = decompress_gzip(data) {
+                findings.extend(scan_binary_blob(
+                    &decompressed,
+                    &format!("{}:gzip", filename),
+                    max_blob_size,
+                ));
+            }
             let strings = extract_printable_strings(data, 4);
             for s in strings {
                 if let Some((pattern_id, match_str)) = check_string_for_secrets(&s) {
@@ -722,6 +747,22 @@ mod tests {
         assert!(!findings.is_empty());
         // Check that findings include the source tag
         assert!(findings.iter().all(|f| f.3 == "binary"));
+    }
+
+    #[test]
+    fn test_scan_binary_blob_gzip_decompresses_and_scans() {
+        use flate2::{write::GzEncoder, Compression};
+        use std::io::Write;
+
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        let key = synthetic_aws_key();
+        write!(encoder, "config_key={key}").unwrap();
+        let compressed = encoder.finish().unwrap();
+
+        let findings = scan_binary_blob(&compressed, "config.env.gz", 1024);
+        assert!(findings
+            .iter()
+            .any(|finding| { finding.1 == key && finding.2.contains(":gzip") }));
     }
 
     #[test]
