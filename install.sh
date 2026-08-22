@@ -3,7 +3,7 @@ set -e
 
 REPO="HazaVVIP/GitRecon"
 BIN_NAME="gitrecon"
-INSTALL_DIR="/usr/local/bin"
+INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
 
 # ════════════════════════════════════════════════
 # UTILITY FUNCTIONS
@@ -17,6 +17,20 @@ warn()    { echo "[~] $1"; }
 # Check if a command exists
 command_exists() {
     command -v "$1" &>/dev/null
+}
+
+ensure_install_dir() {
+    if [ -d "$INSTALL_DIR" ]; then
+        return 0
+    fi
+    if mkdir -p "$INSTALL_DIR" 2>/dev/null; then
+        return 0
+    fi
+    if command_exists sudo && sudo mkdir -p "$INSTALL_DIR" 2>/dev/null; then
+        return 0
+    fi
+    error "Unable to create install directory: $INSTALL_DIR"
+    return 1
 }
 
 # Detect package manager
@@ -129,10 +143,19 @@ fi
 # ════════════════════════════════════════════════
 
 # Releases use versioned archive names, so resolve the latest tag first.
+# Prefer the API, but fall back to GitHub's unauthenticated redirect when the
+# API is rate-limited or unavailable. The redirect does not require JSON parsing.
 RELEASE_API_URL="https://api.github.com/repos/${REPO}/releases/latest"
 RELEASE_TAG="$(curl -fsSL "$RELEASE_API_URL" 2>/dev/null \
     | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
     | head -n 1 || true)"
+if [ -z "$RELEASE_TAG" ]; then
+    LATEST_RELEASE_URL="$(curl -fsSL -o /dev/null -w '%{url_effective}' \
+        "https://github.com/${REPO}/releases/latest" 2>/dev/null || true)"
+    RELEASE_TAG="$(printf '%s\n' "$LATEST_RELEASE_URL" \
+        | sed -n 's#.*/releases/tag/\([^/?]*\).*#\1#p' \
+        | head -n 1)"
+fi
 
 if [ -n "$RELEASE_TAG" ]; then
     RELEASE_VERSION="${RELEASE_TAG#v}"
@@ -198,6 +221,7 @@ if [ -n "$RELEASE_TAG" ]; then
             exit 1
         fi
         chmod +x "$BINARY_SOURCE"
+        ensure_install_dir
 
         if [ -w "$INSTALL_DIR" ]; then
             install -m 0755 "$BINARY_SOURCE" "${INSTALL_DIR}/${BIN_NAME}"
@@ -320,6 +344,7 @@ fi
 
 # Install binary
 info "Installing binary..."
+ensure_install_dir
 if [ -w "$INSTALL_DIR" ]; then
     cp "$BIN" "${INSTALL_DIR}/${BIN_NAME}"
 else
