@@ -1,5 +1,5 @@
 //! main.rs
-//! GitRecon v3.2.5 — Streaming Git Exposure Scanner (Rust)
+//! GitRecon v3.2.6 — Streaming Git Exposure Scanner (Rust)
 //!
 //! Usage:
 //!   gitrecon <url> [options]

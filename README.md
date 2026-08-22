@@ -6,7 +6,7 @@ GitRecon is a high-performance Rust scanner for exposed Git repositories, local 
 
 ## Capabilities
 
-GitRecon provides a four-stage remote pipeline: exposure detection, Git metadata and object mapping, concurrent streaming analysis, and report generation. It also supports local-directory scanning, binary and archive string extraction, multiple forge APIs, bounded multi-target concurrency, checkpoint/resume, cache isolation, proxy and rate-control options, and JSON, SARIF, CSV, NDJSON, Markdown, and HTML output.
+GitRecon provides a four-stage remote pipeline: exposure detection, Git metadata and object mapping, concurrent streaming analysis, and report generation. It also supports local-directory scanning, binary and archive string extraction, multiple forge APIs, bounded multi-target concurrency, checkpoint/resume, cache isolation, proxy and rate-control options, object-source metrics, typed scan outcomes, and JSON, SARIF, CSV, NDJSON, Markdown, and HTML output.
 
 The scanner is intentionally discovery-oriented. Normal mode filters common template placeholders to reduce noise. `--exhaustive` retains placeholder-like candidates for investigative workflows. Object verification and local binary scanning are enabled by default and can be disabled explicitly.
 
@@ -29,7 +29,7 @@ gitrecon --version
 gitrecon --help
 ```
 
-For a pinned release or a manual checksum-verified download, use the assets listed on the [v3.2.5 release page](https://github.com/HazaVVIP/GitRecon/releases/tag/v3.2.5).
+For a pinned release or a manual checksum-verified download, use the assets listed on the [v3.2.6 release page](https://github.com/HazaVVIP/GitRecon/releases/tag/v3.2.6).
 
 ### Build from source
 
@@ -165,7 +165,7 @@ Run `gitrecon --help` for the complete option list, including forge-specific URL
 
 ## Outputs
 
-Reports are written below the selected output directory. The default JSON report contains detection metadata, mapping information, findings, severity counts, risk score, scan statistics, and technology fingerprints. `--save` writes reconstructed source under a target-specific directory. Treat reports and reconstructed source as sensitive because findings may contain plaintext credential material.
+Reports are written below the selected output directory. The default JSON report contains detection metadata, mapping information, findings, severity counts, risk score, scan statistics, technology fingerprints, object-source distribution, and typed skip/failure outcomes. `--save` writes reconstructed source under a target-specific directory. Treat reports and reconstructed source as sensitive because findings may contain plaintext credential material.
 
 ## Architecture
 

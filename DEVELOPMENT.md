@@ -1,6 +1,6 @@
 # GitRecon Development and Release Guide
 
-**Version:** 3.2.5
+**Version:** 3.2.6
 **Status:** Production-readiness maintenance
 **Language:** Rust 2021
 
@@ -17,7 +17,7 @@ The project intentionally favors **offensive discovery effectiveness**. Normal s
 | Orchestration | `src/main.rs`, `src/config.rs`, `src/targets.rs`, `src/target_utils.rs`, `src/outcome.rs` | CLI parsing, runtime scan configuration, target planning, shared repository selection, target dispatch, bounded concurrency, deterministic aggregate outcomes, and error classification |
 | URL and local pipelines | `src/url_pipeline.rs`, `src/dir_pipeline.rs`, `src/detect.rs`, `src/mapper.rs`, `src/git_parser.rs`, `src/pack_reader.rs` | URL exposure-to-stream execution, local recursive file scanning, binary/text policy, Git object mapping, loose and packed object parsing, and delta resolution |
 | Forge integrations | `src/forge.rs`, `src/forge_factory.rs`, `src/forge_scan.rs`, `src/*_api.rs` | Common forge contract, provider construction, authentication, enumeration, provider-neutral workspace lifecycle, path-aware blob retrieval, bounded blob reconstruction, and object access; local TCP contracts cover identity, retrieval, pagination, and forbidden/error paths |
-| Scanning | `src/streamer.rs`, `src/scanner_factory.rs`, `src/scanner_policy.rs`, `src/binary_scanner.rs`, `src/binary_adapter.rs` | Policy-driven pattern, entropy, multiline, database, AI-path, text, binary, and archive detection; scanner construction and custom pattern loading are centralized |
+| Scanning | `src/streamer.rs`, `src/scanner_factory.rs`, `src/scanner_policy.rs`, `src/binary_scanner.rs`, `src/binary_adapter.rs`, `src/object_source.rs` | Policy-driven pattern, entropy, multiline, database, AI-path, text, binary, archive, pack/cache/HTTP acquisition, and typed scan-outcome metrics |
 | Reliability | `src/http_client.rs`, `src/cache.rs`, `src/checkpoint.rs`, `src/rate_limiter.rs`, `src/temp_cleanup.rs` | Timeouts, retries, rate limits, cache isolation, HMAC checkpoints, and temporary-resource cleanup |
 | Reporting and validation | `src/reporter.rs`, `src/validation.rs`, `src/layout.rs` | JSON, SARIF, CSV, NDJSON, Markdown, HTML, aggregate and per-target persistence, terminal output, input validation, and layout helpers |
 | Theme | `src/ui/theme.rs` | Optional TOML-backed terminal theme configuration |
