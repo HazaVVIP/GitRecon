@@ -832,6 +832,12 @@ fn finding_dedup_key(finding: &Finding) -> (&str, &str) {
     (finding.pattern_id.as_str(), finding.match_str.as_str())
 }
 
+fn ordered_processed_sha1s(processed: &HashSet<String>) -> Vec<String> {
+    let mut ordered: Vec<String> = processed.iter().cloned().collect();
+    ordered.sort_unstable();
+    ordered
+}
+
 // ════════════════════════════════════════════════
 // SHARED STATE
 // ════════════════════════════════════════════════
@@ -1785,9 +1791,9 @@ impl Streamer {
                 };
 
                 // R-1: Collect processed SHA1s for checkpoint resume (BUG-CON-002: await tokio::sync::Mutex lock)
-                let processed_list: Vec<String> = {
+                let processed_list = {
                     let tracker = processed_sha1s_tracker.lock().await;
-                    tracker.iter().cloned().collect()
+                    ordered_processed_sha1s(&tracker)
                 };
 
                 let new_checkpoint = Checkpoint {
@@ -5902,6 +5908,24 @@ mod tests {
         assert!(
             findings.iter().any(|f| f.pattern_id == "mapbox_token"),
             "Should detect Mapbox access token"
+        );
+    }
+
+    #[test]
+    fn processed_checkpoint_objects_are_sorted_deterministically() {
+        let processed = HashSet::from([
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            "cccccccccccccccccccccccccccccccccccccccc".to_string(),
+        ]);
+
+        assert_eq!(
+            ordered_processed_sha1s(&processed),
+            vec![
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+                "cccccccccccccccccccccccccccccccccccccccc".to_string(),
+            ]
         );
     }
 
