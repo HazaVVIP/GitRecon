@@ -10,11 +10,14 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::content_scanner::{ContentScanOutcome, ContentScanner, ScanAccumulator};
 use crate::forge::{Forge, Repository};
 use crate::streamer::{DynPattern, Finding, StreamResult};
 use crate::temp_cleanup::TempDirGuard;
 use colored::Colorize;
 use tokio::sync::Mutex;
+
+const RECENT_FINDINGS_WINDOW: usize = 20;
 
 pub(crate) trait BlobEntry: Clone + Send {
     fn is_blob(&self) -> bool;
@@ -318,6 +321,13 @@ pub(crate) struct FileScanConfig {
 
 /// Scan all eligible files in a reconstructed repository workspace.
 pub(crate) async fn scan_workspace_files(config: FileScanConfig) {
+    let scanner = Arc::new(ContentScanner::new(
+        config.extra_patterns.clone(),
+        config.exhaustive,
+        config.entropy_threshold,
+        config.max_blob_bytes,
+        false,
+    ));
     let mut candidates: Vec<PathBuf> = crate::collect_local_files(&config.workspace)
         .into_iter()
         .filter(|(path, size)| {
@@ -338,94 +348,94 @@ pub(crate) async fn scan_workspace_files(config: FileScanConfig) {
         println!("      Scanning {} workspace files", candidates.len());
     }
 
+    let mut accumulator = ScanAccumulator::default();
     let file_stream = futures::stream::iter(candidates)
         .map(|path| {
             let stop_flag = config.stop_flag.clone();
-            let extra_patterns = config.extra_patterns.clone();
+            let scanner = scanner.clone();
             let workspace = config.workspace.clone();
             let repository_name = config.repository_name.clone();
-            let entropy_threshold = config.entropy_threshold;
             async move {
                 if stop_flag.load(Ordering::Relaxed) {
-                    return (Vec::new(), Vec::new(), 0usize, false, true);
+                    return (ContentScanOutcome::stopped(), Vec::new());
                 }
                 let data = match tokio::fs::read(&path).await {
                     Ok(data) => data,
-                    Err(_) => return (Vec::new(), Vec::new(), 0usize, true, false),
+                    Err(_) => return (ContentScanOutcome::failed(), Vec::new()),
                 };
                 if data.is_empty() {
-                    return (Vec::new(), Vec::new(), 0usize, false, false);
+                    return (ContentScanOutcome::empty(), Vec::new());
                 }
                 let probe = &data[..data.len().min(crate::BINARY_DETECTION_PROBE_SIZE)];
                 let null_count = probe.iter().filter(|&&byte| byte == 0).count();
                 if null_count > crate::NULL_BYTE_THRESHOLD {
-                    return (Vec::new(), Vec::new(), 0usize, false, false);
+                    return (ContentScanOutcome::empty(), Vec::new());
                 }
-                let text = String::from_utf8_lossy(&data);
                 let relative_path = path
                     .strip_prefix(&workspace)
                     .map(|relative| relative.to_string_lossy().replace('\\', "/"))
                     .unwrap_or_else(|_| path.to_string_lossy().replace('\\', "/"));
                 let source = format!("{}/{}", repository_name, relative_path);
-                let findings = if config.exhaustive {
-                    crate::streamer::scan_text_exhaustive(
-                        &text,
-                        &source,
-                        &extra_patterns,
-                        entropy_threshold,
-                    )
-                } else {
-                    crate::streamer::scan_text(&text, &source, &extra_patterns, entropy_threshold)
-                };
+                let outcome = scanner.scan(&data, &source, false);
                 let mut technologies = Vec::new();
                 crate::detect_tech_from_path(&relative_path, &mut technologies);
-                (findings, technologies, data.len(), false, false)
+                (outcome, technologies)
             }
         })
         .buffer_unordered(config.workers.max(1));
     futures::pin_mut!(file_stream);
-    while let Some((findings, technologies, bytes, failed, skipped_by_stop)) =
-        file_stream.next().await
-    {
-        if skipped_by_stop {
-            continue;
-        }
-        if failed {
-            config.blobs_failed.fetch_add(1, Ordering::Relaxed);
-            continue;
-        }
-        if bytes > 0 {
-            config.blobs_scanned.fetch_add(1, Ordering::Relaxed);
-            config.bytes_scanned.fetch_add(bytes, Ordering::Relaxed);
-        }
-        if !technologies.is_empty() {
-            let mut tech_stack = config.tech_stack_set.lock().await;
-            tech_stack.extend(technologies);
-        }
-        if findings.is_empty() {
+    while let Some((outcome, technologies)) = file_stream.next().await {
+        if outcome.stopped {
             continue;
         }
         if config.live || config.pipe {
-            for finding in &findings {
+            for finding in &outcome.findings {
                 println!(
                     "{}",
                     serde_json::to_string(&finding.to_dict()).unwrap_or_default()
                 );
             }
         }
-        let mut all_findings = config.all_findings.lock().await;
-        all_findings.extend(findings);
-        if crate::should_stop_scan(&all_findings, config.max_findings, config.stop_on_critical) {
+        accumulator.absorb(outcome, technologies);
+        let existing_findings = config.all_findings.lock().await.len();
+        let local_limit_reached = config.max_findings > 0
+            && existing_findings + accumulator.findings.len() >= config.max_findings;
+        let local_critical_reached = config.stop_on_critical
+            && accumulator
+                .findings
+                .iter()
+                .rev()
+                .take(RECENT_FINDINGS_WINDOW)
+                .any(|finding| finding.severity == "CRITICAL");
+        if local_limit_reached || local_critical_reached {
             config.stop_flag.store(true, Ordering::Relaxed);
             if config.verbose {
-                if config.max_findings > 0 && all_findings.len() >= config.max_findings {
-                    println!("\n  [!] Reached --max-findings limit. Stopping scan.");
+                if local_limit_reached {
+                    println!("\\n  [!] Reached --max-findings limit. Stopping scan.");
                 } else {
-                    println!("\n  [!] --stop-on-critical triggered. Stopping scan.");
+                    println!("\\n  [!] --stop-on-critical triggered. Stopping scan.");
                 }
             }
             break;
         }
+    }
+
+    config
+        .blobs_failed
+        .fetch_add(accumulator.blobs_failed, Ordering::Relaxed);
+    config
+        .blobs_scanned
+        .fetch_add(accumulator.blobs_scanned, Ordering::Relaxed);
+    config
+        .bytes_scanned
+        .fetch_add(accumulator.bytes_scanned, Ordering::Relaxed);
+    {
+        let mut all_findings = config.all_findings.lock().await;
+        all_findings.extend(accumulator.findings);
+    }
+    {
+        let mut tech_stack = config.tech_stack_set.lock().await;
+        tech_stack.extend(accumulator.tech_stack);
     }
 }
 

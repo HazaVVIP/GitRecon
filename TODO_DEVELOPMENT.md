@@ -137,7 +137,7 @@ Tambahkan validator finite dan non-negative untuk `delay`, `jitter`, `entropy-th
 
 ## P1-01 — Ekstrak `ContentScanner` dan `ScanAccumulator`
 
-**Status:** `TODO`  
+**Status:** `IN PROGRESS` — shared foundation and local/forge migration validated; URL object-aware integration remains
 **Dependensi:** P0-01, P0-03  
 **Area:** `src/streamer.rs`, `src/dir_pipeline.rs`, `src/forge_scan.rs`, `src/scanner_factory.rs`
 
@@ -150,6 +150,10 @@ Buat scanner engine bersama yang menerima `ContentView` dan policy. `ContentView
 - Report schema tetap backward-compatible kecuali field baru ditambahkan secara additive.
 - Unit test dapat memanggil core scanner tanpa menjalankan CLI process.
 - Local, URL, dan forge fixture yang setara menghasilkan policy dan result shape yang konsisten.
+
+### Implementasi P1-01
+
+Modul `src/content_scanner.rs` sekarang menyediakan shared `ContentScanner`, `ContentScanOutcome`, `ScanAccumulator`, dan stop policy. Local directory serta forge workspace scanning memakai text/binary policy dan accumulator yang sama; URL streamer masih mempertahankan object-aware orchestration dan belum memakai accumulator baru secara penuh. Regression tests mencakup normal-versus-exhaustive policy, binary opt-out accounting, accumulator metrics, stop limits, dan existing local scan behavior. Sisa P1-01 adalah integrasi accumulator ke URL object flow serta parity fixture lintas mode.
 
 ## P1-02 — Satukan detector registry untuk text, binary, dan archive
 

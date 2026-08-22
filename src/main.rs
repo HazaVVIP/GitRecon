@@ -24,6 +24,7 @@ mod bitbucket_api;
 mod cache; // PERF-005: SQLite cache layer
 mod checkpoint;
 mod config;
+mod content_scanner;
 mod detect;
 mod dir_pipeline;
 mod forge;
@@ -911,7 +912,6 @@ struct Cli {
 
 const BINARY_DETECTION_PROBE_SIZE: usize = 8192;
 const NULL_BYTE_THRESHOLD: usize = 10;
-const RECENT_FINDINGS_WINDOW: usize = 20;
 
 fn collect_local_files(root: &Path) -> Vec<(PathBuf, u64)> {
     let mut files = Vec::new();
@@ -1079,20 +1079,6 @@ fn prompt_save_choice(default: bool) -> bool {
             }
         }
     }
-}
-
-fn should_stop_scan(
-    findings: &[streamer::Finding],
-    max_findings: usize,
-    stop_on_critical: bool,
-) -> bool {
-    (max_findings > 0 && findings.len() >= max_findings)
-        || (stop_on_critical
-            && findings
-                .iter()
-                .rev()
-                .take(RECENT_FINDINGS_WINDOW)
-                .any(|f| f.severity == "CRITICAL"))
 }
 
 fn build_forge_file_scan_config(
@@ -3198,21 +3184,6 @@ mod tests {
         assert!(opt_outs.partial_exposure);
     }
 
-    fn mk_find(severity: &str) -> streamer::Finding {
-        streamer::Finding {
-            filename: "a.txt".to_string(),
-            line: 1,
-            pattern_id: "p".to_string(),
-            description: "d".to_string(),
-            severity: severity.to_string(),
-            match_str: "m".to_string(),
-            context: "c".to_string(),
-            is_deleted: false,
-            commit_sha1: None,
-            confidence_adjustment: None,
-        }
-    }
-
     #[test]
     fn test_is_binary_extension_detects_known_types() {
         assert!(is_binary_extension("foo.png"));
@@ -3225,20 +3196,6 @@ mod tests {
     fn test_dir_target_name_fallback_and_sanitize() {
         assert_eq!(dir_target_name(Path::new("/tmp/my repo")), "my_repo");
         assert_eq!(dir_target_name(Path::new("/")), "directory_scan");
-    }
-
-    #[test]
-    fn test_should_stop_scan_by_limit() {
-        let findings = vec![mk_find("LOW"), mk_find("MEDIUM")];
-        assert!(should_stop_scan(&findings, 2, false));
-        assert!(!should_stop_scan(&findings, 3, false));
-    }
-
-    #[test]
-    fn test_should_stop_scan_by_critical() {
-        let findings = vec![mk_find("LOW"), mk_find("CRITICAL")];
-        assert!(should_stop_scan(&findings, 0, true));
-        assert!(!should_stop_scan(&findings, 0, false));
     }
 
     #[test]
