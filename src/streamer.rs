@@ -17,6 +17,7 @@ use crate::binary_scanner;
 use crate::checkpoint::{
     self, AdaptiveConcurrencyState, Checkpoint, CheckpointPhase, StreamCheckpoint,
 };
+use crate::content_scanner::ContentScanner;
 use crate::git_parser::ObjectParser;
 use crate::http_client::HttpClient;
 use crate::mapper::MapResult;
@@ -2396,23 +2397,19 @@ fn process_blob_content(
             detect_tech_from_content(&content_str, &mut tech_set);
             let tech: Vec<String> = tech_set.into_iter().collect();
 
-            // SCAN-001: Convert Arc<Vec<String>> to slice for all text detectors.
-            let fp_keywords: Vec<&str> =
-                false_positive_keywords.iter().map(|s| s.as_str()).collect();
-            let policy = if exhaustive {
-                ScanPolicy::exhaustive(entropy_threshold, &fp_keywords)
-            } else {
-                ScanPolicy::normal(entropy_threshold, &fp_keywords)
-            };
-            let findings = scan_text_detectors(
+            let shared_scanner = ContentScanner::new(
+                extra_patterns.clone(),
+                exhaustive,
+                entropy_threshold,
+                max_scan_bytes,
+                false,
+            );
+            let findings = shared_scanner.scan_text_object(
                 &content_str,
-                DetectorContext {
-                    filename: &filename,
-                    sha1,
-                    is_deleted,
-                    extra_patterns: &extra_patterns,
-                    policy,
-                },
+                &filename,
+                sha1,
+                is_deleted,
+                &false_positive_keywords,
             );
 
             // BUG-STAB-002: Budget is automatically released when _budget_guard drops here
@@ -2649,6 +2646,40 @@ struct DetectorContext<'a> {
     is_deleted: bool,
     extra_patterns: &'a [DynPattern],
     policy: ScanPolicy<'a>,
+}
+
+pub(crate) struct TextScanContext<'a> {
+    pub(crate) content: &'a str,
+    pub(crate) filename: &'a str,
+    pub(crate) sha1: &'a str,
+    pub(crate) is_deleted: bool,
+    pub(crate) extra_patterns: &'a [DynPattern],
+    pub(crate) entropy_threshold: f64,
+    pub(crate) false_positive_keywords: &'a [String],
+    pub(crate) exhaustive: bool,
+}
+
+pub(crate) fn scan_text_with_context(context: TextScanContext<'_>) -> Vec<Finding> {
+    let keywords: Vec<&str> = context
+        .false_positive_keywords
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let policy = if context.exhaustive {
+        ScanPolicy::exhaustive(context.entropy_threshold, &keywords)
+    } else {
+        ScanPolicy::normal(context.entropy_threshold, &keywords)
+    };
+    scan_text_detectors(
+        context.content,
+        DetectorContext {
+            filename: context.filename,
+            sha1: context.sha1,
+            is_deleted: context.is_deleted,
+            extra_patterns: context.extra_patterns,
+            policy,
+        },
+    )
 }
 
 fn scan_text_detectors(content: &str, context: DetectorContext<'_>) -> Vec<Finding> {
@@ -4157,6 +4188,7 @@ fn scan_multiline_with_policy(
 ///
 /// All findings returned have `is_deleted = false` and `commit_sha1 = None`
 /// because there is no Git object SHA in this context.
+#[cfg(test)]
 pub fn scan_text(
     text: &str,
     source: &str,
@@ -4169,6 +4201,7 @@ pub fn scan_text(
 /// Exhaustive text scan for offensive workflows. It preserves direct pattern
 /// candidates that normal mode classifies as placeholders while retaining all
 /// existing resource limits and report structures.
+#[cfg(test)]
 pub fn scan_text_exhaustive(
     text: &str,
     source: &str,
@@ -4178,6 +4211,7 @@ pub fn scan_text_exhaustive(
     scan_text_with_policy(text, source, dyn_patterns, entropy_threshold, true)
 }
 
+#[cfg(test)]
 fn scan_text_with_policy(
     text: &str,
     source: &str,

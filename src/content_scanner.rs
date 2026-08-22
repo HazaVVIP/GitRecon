@@ -74,6 +74,26 @@ impl ContentScanner {
         }
     }
 
+    pub(crate) fn scan_text_object(
+        &self,
+        content: &str,
+        filename: &str,
+        sha1: &str,
+        is_deleted: bool,
+        false_positive_keywords: &[String],
+    ) -> Vec<Finding> {
+        streamer::scan_text_with_context(streamer::TextScanContext {
+            content,
+            filename,
+            sha1,
+            is_deleted,
+            extra_patterns: &self.extra_patterns,
+            entropy_threshold: self.entropy_threshold,
+            false_positive_keywords,
+            exhaustive: self.exhaustive,
+        })
+    }
+
     pub(crate) fn scan(
         &self,
         data: &[u8],
@@ -109,21 +129,7 @@ impl ContentScanner {
         }
 
         let text = String::from_utf8_lossy(data);
-        let findings = if self.exhaustive {
-            streamer::scan_text_exhaustive(
-                &text,
-                logical_path,
-                &self.extra_patterns,
-                self.entropy_threshold,
-            )
-        } else {
-            streamer::scan_text(
-                &text,
-                logical_path,
-                &self.extra_patterns,
-                self.entropy_threshold,
-            )
-        };
+        let findings = self.scan_text_object(&text, logical_path, "", false, &[]);
         ContentScanOutcome {
             findings,
             bytes: data.len(),
@@ -220,6 +226,24 @@ mod tests {
             .scan(data, "config.env", false)
             .findings
             .is_empty());
+    }
+
+    #[test]
+    fn metadata_aware_text_scan_preserves_object_provenance() {
+        let scanner = ContentScanner::new(Arc::new(Vec::new()), true, 4.5, 1024, false);
+        let sha1 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let findings = scanner.scan_text_object(
+            "api_key=your_api_key_here_value_123",
+            "config.env",
+            sha1,
+            true,
+            &[],
+        );
+        assert!(!findings.is_empty());
+        assert!(findings.iter().all(|finding| finding.is_deleted));
+        assert!(findings
+            .iter()
+            .all(|finding| finding.commit_sha1.as_deref() == Some(sha1)));
     }
 
     #[test]
