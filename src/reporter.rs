@@ -525,6 +525,14 @@ impl Reporter {
                 r.object_source_stats.loose_http
             );
         }
+        let skipped = r.outcome_stats.skipped_total();
+        let failed = r.outcome_stats.failed_total();
+        if skipped > 0 || failed > 0 {
+            println!(
+                "│  {:<16}: skipped={} failed={}",
+                "Object outcomes", skipped, failed
+            );
+        }
         // PERF-005: Display cache stats
         if r.cache_hits > 0 || r.cache_misses > 0 {
             let total_requests = r.cache_hits + r.cache_misses;
@@ -817,6 +825,7 @@ impl Reporter {
                 "bytes_scanned":   s.bytes_scanned,
                 "elapsed_s":       (s.elapsed_s * 100.0).round() / 100.0,
                 "object_sources":  s.object_source_stats,
+                "outcomes":        s.outcome_stats,
                 "findings":        s.findings.iter().map(|f| f.to_dict()).collect::<Vec<_>>(),
             });
         }
@@ -859,6 +868,7 @@ impl Reporter {
                 "bytes_scanned":   stream_r.bytes_scanned,
                 "elapsed_s":       (stream_r.elapsed_s * 100.0).round() / 100.0,
                 "object_sources":  stream_r.object_source_stats,
+                "outcomes":        stream_r.outcome_stats,
                 "findings":        stream_r.findings.iter().map(|f| f.to_dict()).collect::<Vec<_>>(),
             }
         });
@@ -1406,6 +1416,7 @@ mod tests {
             cache_misses: 0,
             cache_stats: None,
             object_source_stats: crate::streamer::ObjectSourceStats::default(),
+            outcome_stats: crate::streamer::ScanOutcomeStats::default(),
         }
     }
 

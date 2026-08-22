@@ -286,6 +286,7 @@ pub(crate) async fn build_stream_result(
         cache_misses: 0,
         cache_stats: None,
         object_source_stats: crate::streamer::ObjectSourceStats::default(),
+        outcome_stats: crate::streamer::ScanOutcomeStats::default(),
         rate_limit_allowed: 0,
         rate_limit_dropped: 0,
         rate_limit_wait_ms: 0,

@@ -6,7 +6,7 @@
 use futures::StreamExt;
 use lazy_static::lazy_static;
 use regex::Regex;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{fence, AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -748,6 +748,8 @@ pub struct StreamResult {
     pub cache_stats: Option<CacheReportStats>,
     /// Object acquisition source metrics for processed blobs.
     pub object_source_stats: ObjectSourceStats,
+    /// Object processing outcome metrics.
+    pub outcome_stats: ScanOutcomeStats,
     /// PERF-004: Rate limit metrics
     #[allow(dead_code)]
     pub rate_limit_allowed: usize,
@@ -763,6 +765,45 @@ pub struct ObjectSourceStats {
     pub pack: usize,
     pub cache: usize,
     pub loose_http: usize,
+}
+
+/// Object processing outcome metrics.
+#[derive(Debug, Default, Clone, serde::Serialize)]
+pub struct ScanOutcomeStats {
+    pub skipped_stop_requested: usize,
+    pub skipped_invalid_object: usize,
+    pub skipped_not_found: usize,
+    pub skipped_oversized: usize,
+    pub failed_http_statuses: BTreeMap<String, usize>,
+}
+
+impl ScanOutcomeStats {
+    fn from_state(state: &State) -> Self {
+        let count_skip = |reason| state.skipped_by_reason.get(&reason).copied().unwrap_or(0);
+        let mut failed_http_statuses = BTreeMap::new();
+        for (kind, count) in &state.failed_by_kind {
+            let FailureKind::HttpStatus(status) = kind;
+            failed_http_statuses.insert(status.to_string(), *count);
+        }
+        Self {
+            skipped_stop_requested: count_skip(SkipReason::StopRequested),
+            skipped_invalid_object: count_skip(SkipReason::InvalidObject),
+            skipped_not_found: count_skip(SkipReason::NotFound),
+            skipped_oversized: count_skip(SkipReason::Oversized),
+            failed_http_statuses,
+        }
+    }
+
+    pub fn skipped_total(&self) -> usize {
+        self.skipped_stop_requested
+            + self.skipped_invalid_object
+            + self.skipped_not_found
+            + self.skipped_oversized
+    }
+
+    pub fn failed_total(&self) -> usize {
+        self.failed_http_statuses.values().sum()
+    }
 }
 
 /// Cache statistics for reporting
@@ -1905,6 +1946,7 @@ impl Streamer {
             }
         }
 
+        let outcome_stats = ScanOutcomeStats::from_state(&state);
         let elapsed = t0.elapsed().as_secs_f64();
         let mut ts: Vec<_> = state.tech_stack.iter().cloned().collect();
         ts.sort();
@@ -1965,6 +2007,7 @@ impl Streamer {
                     .get(&ObjectSourceKind::LooseHttp)
                     .unwrap_or(&0),
             },
+            outcome_stats,
             // PERF-004: Rate limit metrics
             rate_limit_allowed: rate_limit_allowed_final,
             rate_limit_dropped: rate_limit_dropped_final,
@@ -5912,6 +5955,25 @@ mod tests {
     }
 
     #[test]
+    fn scan_outcome_stats_preserve_typed_reasons() {
+        let mut state = State::default();
+        state.record_skip(SkipReason::StopRequested);
+        state.record_skip(SkipReason::NotFound);
+        state.record_skip(SkipReason::NotFound);
+        state.record_failure(FailureKind::HttpStatus(429));
+        state.record_failure(FailureKind::HttpStatus(429));
+        state.record_failure(FailureKind::HttpStatus(503));
+
+        let stats = ScanOutcomeStats::from_state(&state);
+        assert_eq!(stats.skipped_stop_requested, 1);
+        assert_eq!(stats.skipped_not_found, 2);
+        assert_eq!(stats.skipped_total(), 3);
+        assert_eq!(stats.failed_total(), 3);
+        assert_eq!(stats.failed_http_statuses.get("429"), Some(&2));
+        assert_eq!(stats.failed_http_statuses.get("503"), Some(&1));
+    }
+
+    #[test]
     fn processed_checkpoint_objects_are_sorted_deterministically() {
         let processed = HashSet::from([
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
@@ -5987,6 +6049,7 @@ mod tests {
             cache_misses: 0,
             cache_stats: None,
             object_source_stats: ObjectSourceStats::default(),
+            outcome_stats: ScanOutcomeStats::default(),
         };
         // Both lines have the same match, so unique should be 1
         assert_eq!(
@@ -6745,6 +6808,7 @@ mod tests {
             cache_misses: 0,
             cache_stats: None,
             object_source_stats: ObjectSourceStats::default(),
+            outcome_stats: ScanOutcomeStats::default(),
         };
         assert_eq!(stream.unique_count(), 1);
         assert_eq!(stream.unique_findings().len(), 1);
