@@ -1965,47 +1965,16 @@ fn process_blob_content(
                         binary_scanner::scan_binary_blob(&obj.data, &filename, max_scan_bytes);
 
                     if !binary_findings.is_empty() {
-                        // Convert binary findings to Finding structs with proper tagging
                         let fp_keywords: Vec<&str> =
                             false_positive_keywords.iter().map(|s| s.as_str()).collect();
-                        let mut findings = Vec::new();
-
-                        for (pattern_id, match_str, context, _source) in binary_findings {
-                            // Find the pattern description from PATTERNS
-                            let (desc, sev) = PATTERNS
-                                .iter()
-                                .find(|p| p.id == pattern_id)
-                                .map(|p| (p.desc, p.sev))
-                                .unwrap_or(("Binary Secret", "HIGH"));
-
-                            findings.push(Finding {
-                                filename: filename.clone(),
-                                line: 1,
-                                pattern_id: pattern_id.clone(),
-                                description: desc.to_string(),
-                                severity: sev.to_string(),
-                                match_str: match_str.clone(),
-                                context: context.clone(),
-                                is_deleted,
-                                commit_sha1: Some(sha1.to_string()),
-                                confidence_adjustment: None,
-                            });
-                        }
-
-                        // Apply context analysis for false positives
-                        // We need to collect contexts first to avoid borrowing issues
-                        let contexts: Vec<String> =
-                            findings.iter().map(|f| f.context.clone()).collect();
-                        let lines_ref: Vec<&str> = contexts.iter().map(|s| s.as_str()).collect();
-
-                        for f in findings.iter_mut() {
-                            if let Some(reason) =
-                                analyze_context_for_binary(&lines_ref, 0, &fp_keywords)
-                            {
-                                f.severity = downgrade_severity(&f.severity).to_string();
-                                f.confidence_adjustment = Some(reason);
-                            }
-                        }
+                        let findings = normalize_binary_findings(
+                            binary_findings,
+                            &filename,
+                            sha1,
+                            is_deleted,
+                            "Binary Secret",
+                            Some(&fp_keywords),
+                        );
 
                         return WorkerResult::BlobScanned {
                             findings,
@@ -2023,27 +1992,14 @@ fn process_blob_content(
                         binary_scanner::scan_binary_blob(&obj.data, &filename, max_scan_bytes);
 
                     if !binary_findings.is_empty() {
-                        let mut findings = Vec::new();
-                        for (pattern_id, match_str, context, _source) in binary_findings {
-                            let (desc, sev) = PATTERNS
-                                .iter()
-                                .find(|p| p.id == pattern_id)
-                                .map(|p| (p.desc, p.sev))
-                                .unwrap_or(("ZIP Secret", "HIGH"));
-
-                            findings.push(Finding {
-                                filename: filename.clone(),
-                                line: 1,
-                                pattern_id: pattern_id.clone(),
-                                description: desc.to_string(),
-                                severity: sev.to_string(),
-                                match_str: match_str.clone(),
-                                context: context.clone(),
-                                is_deleted,
-                                commit_sha1: Some(sha1.to_string()),
-                                confidence_adjustment: None,
-                            });
-                        }
+                        let findings = normalize_binary_findings(
+                            binary_findings,
+                            &filename,
+                            sha1,
+                            is_deleted,
+                            "ZIP Secret",
+                            None,
+                        );
                         return WorkerResult::BlobScanned {
                             findings,
                             tech: vec![],
@@ -2060,27 +2016,14 @@ fn process_blob_content(
                         binary_scanner::scan_binary_blob(&obj.data, &filename, max_scan_bytes);
 
                     if !binary_findings.is_empty() {
-                        let mut findings = Vec::new();
-                        for (pattern_id, match_str, context, _source) in binary_findings {
-                            let (desc, sev) = PATTERNS
-                                .iter()
-                                .find(|p| p.id == pattern_id)
-                                .map(|p| (p.desc, p.sev))
-                                .unwrap_or(("ELF Secret", "HIGH"));
-
-                            findings.push(Finding {
-                                filename: filename.clone(),
-                                line: 1,
-                                pattern_id: pattern_id.clone(),
-                                description: desc.to_string(),
-                                severity: sev.to_string(),
-                                match_str: match_str.clone(),
-                                context: context.clone(),
-                                is_deleted,
-                                commit_sha1: Some(sha1.to_string()),
-                                confidence_adjustment: None,
-                            });
-                        }
+                        let findings = normalize_binary_findings(
+                            binary_findings,
+                            &filename,
+                            sha1,
+                            is_deleted,
+                            "ELF Secret",
+                            None,
+                        );
                         return WorkerResult::BlobScanned {
                             findings,
                             tech: vec![],
@@ -2196,14 +2139,20 @@ fn process_blob_content(
                 let msg_findings = if !commit.message.is_empty() {
                     let fp_keywords: Vec<&str> =
                         false_positive_keywords.iter().map(|s| s.as_str()).collect();
-                    scan_content(
+                    let policy = if exhaustive {
+                        ScanPolicy::exhaustive(entropy_threshold, &fp_keywords)
+                    } else {
+                        ScanPolicy::normal(entropy_threshold, &fp_keywords)
+                    };
+                    let message_filename =
+                        format!("[commit:{}:message]", &sha1[..sha1.len().min(8)]);
+                    scan_content_with_policy(
                         &commit.message,
-                        &format!("[commit:{}:message]", &sha1[..sha1.len().min(8)]),
+                        &message_filename,
                         sha1,
                         false,
                         &extra_patterns,
-                        entropy_threshold,
-                        &fp_keywords,
+                        policy,
                     )
                 } else {
                     vec![]
@@ -2348,6 +2297,53 @@ fn attach_source(result: WorkerResult, source: ObjectSourceKind) -> WorkerResult
     }
 }
 
+fn normalize_binary_findings(
+    binary_findings: Vec<(String, String, String, String)>,
+    filename: &str,
+    sha1: &str,
+    is_deleted: bool,
+    fallback_description: &str,
+    context_keywords: Option<&[&str]>,
+) -> Vec<Finding> {
+    let mut findings = binary_findings
+        .into_iter()
+        .map(|(pattern_id, match_str, context, _source)| {
+            let (description, severity) = PATTERNS
+                .iter()
+                .find(|pattern| pattern.id == pattern_id)
+                .map(|pattern| (pattern.desc, pattern.sev))
+                .unwrap_or((fallback_description, "HIGH"));
+            Finding {
+                filename: filename.to_string(),
+                line: 1,
+                pattern_id,
+                description: description.to_string(),
+                severity: severity.to_string(),
+                match_str,
+                context,
+                is_deleted,
+                commit_sha1: Some(sha1.to_string()),
+                confidence_adjustment: None,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    if let Some(keywords) = context_keywords {
+        let contexts: Vec<String> = findings
+            .iter()
+            .map(|finding| finding.context.clone())
+            .collect();
+        let lines_ref: Vec<&str> = contexts.iter().map(String::as_str).collect();
+        for finding in &mut findings {
+            if let Some(reason) = analyze_context_for_binary(&lines_ref, 0, keywords) {
+                finding.severity = downgrade_severity(&finding.severity).to_string();
+                finding.confidence_adjustment = Some(reason);
+            }
+        }
+    }
+    findings
+}
+
 struct DetectorContext<'a> {
     filename: &'a str,
     sha1: &'a str,
@@ -2384,6 +2380,7 @@ fn scan_text_detectors(content: &str, context: DetectorContext<'_>) -> Vec<Findi
     findings
 }
 
+#[cfg(test)]
 fn scan_content(
     content: &str,
     filename: &str,
@@ -4282,6 +4279,34 @@ fn scan_db_config_blocks_with_policy(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn binary_finding_normalizer_preserves_provenance() {
+        let findings = normalize_binary_findings(
+            vec![(
+                "api_key".to_string(),
+                "candidate_value".to_string(),
+                "SQLite: config.db".to_string(),
+                "binary".to_string(),
+            )],
+            "config.db",
+            "0123456789012345678901234567890123456789",
+            true,
+            "Binary Secret",
+            None,
+        );
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].pattern_id, "api_key");
+        assert_eq!(findings[0].description, "Generic API Key");
+        assert_eq!(findings[0].filename, "config.db");
+        assert_eq!(findings[0].context, "SQLite: config.db");
+        assert!(findings[0].is_deleted);
+        assert_eq!(
+            findings[0].commit_sha1.as_deref(),
+            Some("0123456789012345678901234567890123456789")
+        );
+    }
 
     #[test]
     fn typed_worker_outcomes_are_accounted_by_reason() {
