@@ -99,8 +99,10 @@ pub struct MapResult {
     pub index_entries: Vec<IndexEntry>,
     /// SHA1→filename mapping from index file only
     pub index_sha1_to_file: HashMap<String, String>,
-    /// SHA1→filename mapping from commit graph tree traversal (for bare repos, historical files)
+    /// SHA1→filename mapping from commit graph tree traversal (compatibility primary path).
     pub graph_sha1_to_file: HashMap<String, String>,
+    /// SHA1→all filenames observed during commit graph traversal.
+    pub graph_sha1_to_files: HashMap<String, Vec<String>>,
     pub estimated_files: usize,
     pub estimated_bytes: usize,
     /// Whether at least one git object (blob/tree/commit) is accessible
@@ -173,8 +175,16 @@ impl MapResult {
         }
 
         // Graph-derived paths supplement with historical / dangling entries.
-        // We only ADD a graph path if it isn't already present under this SHA1
-        // (prevents dupes when a file exists in both current index and history).
+        // Prefer the lossless multi-path map when available, then retain the
+        // compatibility map for older callers and hand-built MapResult values.
+        for (sha1, paths) in &self.graph_sha1_to_files {
+            let entry = result.entry(sha1.clone()).or_default();
+            for path in paths {
+                if !entry.iter().any(|p| p == path) {
+                    entry.push(path.clone());
+                }
+            }
+        }
         for (sha1, path) in &self.graph_sha1_to_file {
             let entry = result.entry(sha1.clone()).or_default();
             if !entry.iter().any(|p| p == path) {
@@ -587,6 +597,7 @@ impl Mapper {
                 let mut visited_commits = std::collections::HashSet::new();
                 let mut graph_blobs = std::collections::HashSet::new();
                 let mut graph_paths = std::collections::HashMap::new();
+                let mut graph_paths_all: HashMap<String, Vec<String>> = HashMap::new();
                 let mut commit_queue = std::collections::VecDeque::new();
 
                 commit_queue.push_back(head.clone());
@@ -686,7 +697,13 @@ impl Mapper {
 
                             if entry.is_blob() {
                                 graph_blobs.insert(entry.sha1.clone());
-                                graph_paths.entry(entry.sha1).or_insert(full_path);
+                                graph_paths
+                                    .entry(entry.sha1.clone())
+                                    .or_insert_with(|| full_path.clone());
+                                let paths = graph_paths_all.entry(entry.sha1).or_default();
+                                if !paths.iter().any(|path| path == &full_path) {
+                                    paths.push(full_path);
+                                }
                             } else if entry.is_tree() {
                                 // Queue nested tree — Git stores tree mode as "40000" (no leading zero).
                                 // Previously compared against "040000" which never matched → all subdirs silently dropped.
@@ -710,8 +727,9 @@ impl Mapper {
                     // Merge blob SHA1s
                     result.blob_sha1s.extend(graph_blobs.clone());
 
-                    // Store graph-derived SHA1→path mappings for reconstruction
+                    // Store graph-derived SHA1→path mappings for reconstruction.
                     result.graph_sha1_to_file = graph_paths;
+                    result.graph_sha1_to_files = graph_paths_all;
 
                     // Log commit graph walk results
                     if commits_walked > 0 {
@@ -1046,6 +1064,19 @@ mod tests {
         assert_eq!(paths.len(), 2, "must return both index and graph paths");
         assert!(paths.contains(&"LICENSE".to_string()));
         assert!(paths.contains(&"subdir/LICENSE".to_string()));
+    }
+
+    #[test]
+    fn complete_sha1_to_files_preserves_multiple_historical_paths() {
+        let mut m = MapResult::default();
+        let sha = "c".repeat(40);
+        m.graph_sha1_to_files.insert(
+            sha.clone(),
+            vec!["old/name.txt".into(), "legacy/name.txt".into()],
+        );
+
+        let paths = m.complete_sha1_to_files().remove(&sha).unwrap();
+        assert_eq!(paths, vec!["old/name.txt", "legacy/name.txt"]);
     }
 
     #[test]
