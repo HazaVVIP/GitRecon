@@ -2649,7 +2649,13 @@ async fn main() {
         }
     }
 
-    let mut extra_headers = parse_extra_headers(&args.headers);
+    let mut extra_headers = match parse_extra_headers(&args.headers) {
+        Ok(headers) => headers,
+        Err(error) => {
+            eprintln!("  ✘  {}", error);
+            std::process::exit(1);
+        }
+    };
     if args.ua_git {
         extra_headers.push(("Git-Protocol".to_string(), "version=2".to_string()));
     }
@@ -2929,8 +2935,15 @@ async fn main() {
         }
     } else {
         // Single URL target (from command line argument or --resume)
+        let normalized_url = match normalize_url(&raw_url) {
+            Ok(url) => url,
+            Err(error) => {
+                eprintln!("  ✘  {}", error);
+                std::process::exit(1);
+            }
+        };
         vec![Target::Url {
-            url: normalize_url(&raw_url),
+            url: normalized_url,
             fuzz: Some(args.fuzz),
         }]
     };

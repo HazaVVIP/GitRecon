@@ -114,7 +114,7 @@ Tambahkan validator finite dan non-negative untuk `delay`, `jitter`, `entropy-th
 
 ## P0-05 — Ganti process exit pada helper reusable dengan typed errors
 
-**Status:** `TODO`  
+**Status:** `DONE` — implementation validated locally; commit pending in current package
 **Dependensi:** P2-02 bila dilakukan bersamaan dengan core extraction  
 **Area:** `src/target_utils.rs`, `src/validation.rs`, `src/outcome.rs`
 
@@ -126,6 +126,10 @@ Tambahkan validator finite dan non-negative untuk `delay`, `jitter`, `entropy-th
 - Invalid URL/header dapat diuji langsung sebagai `Result`.
 - Aggregate target mode dapat melaporkan error per target tanpa mematikan seluruh process secara prematur.
 - Exit code CLI tetap kompatibel pada jalur command-line utama.
+
+### Implementasi P0-05
+
+`normalize_url` dan `parse_extra_headers` kini mengembalikan `anyhow::Result` dan tidak lagi menghentikan process dari helper reusable. `targets::load_targets` meneruskan error typed ke caller, sedangkan exit tetap dilakukan hanya pada CLI boundary. Unit tests memastikan URL/header invalid dapat diuji sebagai error dan behavior CLI utama tetap kompatibel.
 
 ---
 

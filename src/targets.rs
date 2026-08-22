@@ -42,7 +42,7 @@ pub fn load_targets(path: &str, default_fuzz: bool) -> anyhow::Result<Vec<Target
             targets.push(target);
         } else {
             targets.push(Target::Url {
-                url: normalize_url(line),
+                url: normalize_url(line)?,
                 fuzz: Some(default_fuzz),
             });
         }
