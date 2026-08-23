@@ -357,9 +357,13 @@ Ganti constructor dengan 16 positional arguments menjadi `ScanConfigBuilder` ata
 
 ## P2-04 — Ekstrak common provider transport
 
-**Status:** `TODO`  
+**Status:** `IN PROGRESS`  
 **Dependensi:** P0-04, P2-01  
-**Area:** `src/http_client.rs`, `src/forge.rs`, `src/*_api.rs`
+**Area:** `src/http_client.rs`, `src/forge.rs`, `src/*_api.rs`, `src/provider_transport.rs`
+
+### Implementasi P2-04 (sub-bagian wire-format parsers)
+
+Parser `rel="next"` pada Link header dan numeric `Retry-After` dipindahkan ke `src/provider_transport.rs`. GitHub dan GitLab tetap memiliki thin compatibility wrappers sehingga retry policy, fallback delay, rate-limit reset semantics, endpoint schema, dan provider-specific pagination header tetap berada di adapter masing-masing. Pekerjaan berikutnya adalah common response/error mapping, URL normalization, dan pagination abstraction lintas provider setelah contract coverage diperluas.
 
 Satukan retry, Retry-After, rate-limit header parsing, pagination primitives, URL normalization, response-size policy, dan redacted error handling. Provider modules hanya menangani endpoint serta response schema yang spesifik.
 

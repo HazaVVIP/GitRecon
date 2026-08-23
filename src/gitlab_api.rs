@@ -70,12 +70,7 @@ impl GitLabForgeClient {
         for attempt in 0..3u32 {
             let resp = self.client.get(url).await;
             if resp.status == 429 {
-                let wait_s = resp
-                    .headers
-                    .get("retry-after")
-                    .and_then(|v| v.trim().parse::<u64>().ok())
-                    .unwrap_or(60)
-                    .min(300);
+                let wait_s = parse_retry_after(&resp.headers).unwrap_or(60).min(300);
                 log::warn!(
                     "GitLab rate-limited (HTTP 429); sleeping {}s before retry {}/3",
                     wait_s,
@@ -422,17 +417,11 @@ pub fn build_gitlab_client(
 /// <https://gitlab.com/api/v4/projects?page=2>; rel="next", ...
 /// ```
 fn parse_next_link(header: &str) -> Option<String> {
-    for part in header.split(',') {
-        let part = part.trim();
-        if part.contains(r#"rel="next""#) {
-            if let Some(start) = part.find('<') {
-                if let Some(end) = part.find('>') {
-                    return Some(part[start + 1..end].to_string());
-                }
-            }
-        }
-    }
-    None
+    crate::provider_transport::parse_next_link(header)
+}
+
+fn parse_retry_after(headers: &std::collections::HashMap<String, String>) -> Option<u64> {
+    crate::provider_transport::parse_retry_after(headers)
 }
 
 fn parse_repo(v: &serde_json::Value) -> Option<GlProject> {

@@ -41,6 +41,7 @@ mod object_source;
 mod object_worker;
 mod outcome;
 mod pack_reader; // Sprint 5 (S5.1): pack file parser + delta resolver
+mod provider_transport;
 mod rate_limiter; // PERF-004: Token bucket rate limiter
 mod reporter;
 mod resource_budget;

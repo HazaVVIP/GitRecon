@@ -113,10 +113,7 @@ impl GitHubForgeClient {
 /// interpret X-RateLimit-Reset as an epoch here — that's forge-specific formatting
 /// and each impl handles it in `update_rate_limit`.
 fn parse_retry_after(headers: &std::collections::HashMap<String, String>) -> Option<u64> {
-    let raw = headers
-        .get("retry-after")
-        .or_else(|| headers.get("Retry-After"))?;
-    raw.trim().parse::<u64>().ok()
+    crate::provider_transport::parse_retry_after(headers)
 }
 
 #[async_trait]
@@ -380,17 +377,7 @@ pub fn build_github_client(mut base_cfg: HttpConfig, token: &str) -> anyhow::Res
 /// <https://api.github.com/user/repos?page=2>; rel="next", ...
 /// ```
 fn parse_next_link(header: &str) -> Option<String> {
-    for part in header.split(',') {
-        let part = part.trim();
-        if part.contains(r#"rel="next""#) {
-            if let Some(start) = part.find('<') {
-                if let Some(end) = part.find('>') {
-                    return Some(part[start + 1..end].to_string());
-                }
-            }
-        }
-    }
-    None
+    crate::provider_transport::parse_next_link(header)
 }
 
 fn parse_repo(v: &serde_json::Value) -> Option<GhRepo> {
