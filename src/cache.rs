@@ -547,7 +547,7 @@ fn cleanup_expired_entries(
     conn: &mut rusqlite::Connection,
     cutoff: i64,
 ) -> rusqlite::Result<usize> {
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let expired_bytes: i64 = tx.query_row(
         "SELECT COALESCE(SUM(LENGTH(content)), 0) FROM cache WHERE created_at < ?1",
         params![cutoff],
@@ -734,6 +734,51 @@ mod tests {
         let stats = cache.stats().await;
         assert_eq!(stats.total_entries, 31);
         let expected_bytes: i64 = (0..31).map(|i| format!("payload-{i}").len() as i64).sum();
+        assert_eq!(stats.total_bytes, expected_bytes);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_cleanup_and_remove_preserve_metadata() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache =
+            Arc::new(ObjectCache::new_at_path(temp.path().join("cache.db"), 3600, false).unwrap());
+        cache.put("shared", b"shared-payload", None).await;
+        for index in 0..31 {
+            let key = format!("entry-{index}");
+            let payload = format!("payload-{index}");
+            cache.put(&key, payload.as_bytes(), None).await;
+        }
+        {
+            let conn = cache.pool.get().unwrap();
+            for index in 0..15 {
+                conn.execute(
+                    "UPDATE cache SET created_at = 0 WHERE sha1 = ?1",
+                    params![format!("entry-{index}")],
+                )
+                .unwrap();
+            }
+        }
+
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let cache = Arc::clone(&cache);
+            tasks.push(tokio::spawn(async move {
+                cache.cleanup_expired().await.map(|_| ())
+            }));
+        }
+        for _ in 0..8 {
+            let cache = Arc::clone(&cache);
+            tasks.push(tokio::spawn(async move {
+                cache.remove("shared").await.map(|_| ())
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap().unwrap();
+        }
+
+        let stats = cache.stats().await;
+        assert_eq!(stats.total_entries, 16);
+        let expected_bytes: i64 = (15..31).map(|i| format!("payload-{i}").len() as i64).sum();
         assert_eq!(stats.total_bytes, expected_bytes);
     }
 
