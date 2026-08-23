@@ -6,8 +6,8 @@
 //! `https://api.github.com`.
 
 use crate::forge::{
-    EnumScope, Forge, ForgeHistory, HistoryChangeStatus, HistoryEntry, Platform, RateLimitInfo,
-    Repository, TreeEntry,
+    EnumScope, Forge, ForgeCapabilities, ForgeHistory, HistoryChangeStatus, HistoryEntry, Platform,
+    RateLimitInfo, Repository, TreeEntry,
 };
 use crate::http_client::{HttpClient, HttpConfig};
 use anyhow::Context;
@@ -278,6 +278,17 @@ impl Forge for GitHubForgeClient {
             max_commits,
         )
         .await
+    }
+
+    fn capabilities(&self) -> ForgeCapabilities {
+        ForgeCapabilities {
+            snapshot: true,
+            history: true,
+            branches: false,
+            tags: false,
+            commits: true,
+            deleted_blobs: true,
+        }
     }
 
     fn rate_limit_remaining(&self) -> Option<(u32, Duration)> {

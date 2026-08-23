@@ -1094,6 +1094,7 @@ fn build_forge_file_scan_config(
         max_blob_bytes: args.max_blob_size * 1024 * 1024,
         workers: args.workers,
         scan_scope: args.scan_scope,
+        max_history: args.max_history,
         scan_binaries: !args.no_scan_binaries,
         exhaustive: args.exhaustive,
         entropy_threshold: args.entropy_threshold,

@@ -548,6 +548,24 @@ impl Reporter {
                 "Invalid archives", r.outcome_stats.archive_invalid
             );
         }
+        if let Some(scope) = r.outcome_stats.scan_scope.as_deref() {
+            println!("│  {:<16}: {}", "Scan scope", scope);
+            if scope == "history" {
+                println!(
+                    "│  {:<16}: commits={} entries={} scanned={} dedup={} deleted={} truncated={}",
+                    "History coverage",
+                    r.outcome_stats.history_commits_scanned,
+                    r.outcome_stats.history_entries_considered,
+                    r.outcome_stats.history_entries_scanned,
+                    r.outcome_stats.history_entries_deduplicated,
+                    r.outcome_stats.history_deleted_entries,
+                    r.outcome_stats.history_truncated
+                );
+            }
+            if let Some(capability) = r.outcome_stats.unsupported_capability.as_deref() {
+                println!("│  {:<16}: {}", "Unsupported", capability);
+            }
+        }
         // PERF-005: Display cache stats
         if r.cache_hits > 0 || r.cache_misses > 0 {
             let total_requests = r.cache_hits + r.cache_misses;

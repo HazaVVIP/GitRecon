@@ -783,6 +783,12 @@ pub struct ScanOutcomeStats {
     pub scan_scope: Option<String>,
     pub capabilities: Option<crate::forge::ForgeCapabilities>,
     pub unsupported_capability: Option<String>,
+    pub history_commits_scanned: usize,
+    pub history_entries_considered: usize,
+    pub history_entries_scanned: usize,
+    pub history_entries_deduplicated: usize,
+    pub history_deleted_entries: usize,
+    pub history_truncated: bool,
     pub failed_http_statuses: BTreeMap<String, usize>,
 }
 
@@ -806,6 +812,12 @@ impl ScanOutcomeStats {
             scan_scope: None,
             capabilities: None,
             unsupported_capability: None,
+            history_commits_scanned: 0,
+            history_entries_considered: 0,
+            history_entries_scanned: 0,
+            history_entries_deduplicated: 0,
+            history_deleted_entries: 0,
+            history_truncated: false,
             failed_http_statuses,
         }
     }

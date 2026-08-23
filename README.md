@@ -76,8 +76,8 @@ gitrecon --dir ./project --no-scan-binaries
 # Verify an authenticated forge token and scan the current snapshot
 gitrecon --token "$GITHUB_TOKEN" --scan-scope snapshot --quiet --format sarif --output ./results
 
-# Request forge history mode; unsupported providers return typed unsupported_capability
-gitrecon --token "$GITHUB_TOKEN" --scan-scope history --quiet --format json --output ./results
+# Scan bounded GitHub history; other providers return typed unsupported_capability
+gitrecon --token "$GITHUB_TOKEN" --scan-scope history --max-history 200 --quiet --format json --output ./results
 
 # Scan targets concurrently while preserving deterministic aggregate ordering
 gitrecon --targets targets.ndjson --parallel-targets 8 --workers 50
@@ -153,8 +153,8 @@ Replace the example quantifier with a valid regular-expression bound appropriate
 | `--patterns FILE` | — | Load validated custom JSON detection patterns |
 | `--false-positive-keywords LIST` | built-in list | Extend context keywords used for false-positive scoring |
 | `--max-blob-size MB` | `4` | Maximum individual blob or local file size |
-| `--max-history COMMITS` | `500` | Commit traversal depth; `0` means unlimited |
-| `--scan-scope SCOPE` | `snapshot` | Forge scope: `snapshot` is supported by default; `history` is capability-checked |
+| `--max-history COMMITS` | `500` | Commit traversal depth; `0` uses the bounded provider maximum in history mode |
+| `--scan-scope SCOPE` | `snapshot` | Forge scope: snapshot scans the current branch; GitHub history is bounded, other providers report `unsupported_capability` |
 | `--entropy-threshold FLOAT` | `4.5` | High-entropy candidate threshold |
 | `--max-timeout SEC` | `60` | Maximum adaptive request timeout |
 | `--rate N` | — | Global request rate limit; `0` means unlimited and values must be finite |

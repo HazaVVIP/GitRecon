@@ -252,7 +252,7 @@ Dokumentasikan dan modelkan perbedaan `snapshot` versus `history` scan. Tambahka
 
 ### Implementasi P1-06 (scope dan capability foundation)
 
-`ForgeScanScope` sekarang memodelkan `snapshot` dan `history`, dengan `--scan-scope snapshot` sebagai default yang backward-compatible. Trait `Forge` memiliki capability contract snapshot-only yang dapat dioverride provider setelah traversal history benar-benar tersedia. Forge reports menyimpan `scan_scope`, capability map, dan `unsupported_capability`; permintaan history pada provider snapshot-only tidak lagi menjadi silent success dan dipetakan ke `unsupported_capability`. Bounded history traversal, deleted-path mapping, deduplication, dan capability implementations per provider masih menjadi pekerjaan berikutnya.
+`ForgeScanScope` sekarang memodelkan `snapshot` dan `history`, dengan `--scan-scope snapshot` sebagai default yang backward-compatible. Trait `Forge` memiliki capability contract dan typed `ForgeHistory`; GitHub mengimplementasikan bounded commit pagination, changed-path status mapping, blob SHA retrieval, rename provenance, deduplication, deleted-path scanning, dan coverage counters. Forge reports menyimpan `scan_scope`, capability map, history coverage, dan `unsupported_capability`; provider snapshot-only tidak lagi menjadi silent success. Implementasi history provider berikutnya, termasuk GitLab, branch/tag capability discovery, dan coverage lintas provider masih menjadi pekerjaan roadmap.
 
 ## P1-07 — Bangun deterministic remote acquisition test harness
 

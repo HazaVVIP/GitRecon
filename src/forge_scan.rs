@@ -12,7 +12,7 @@ use std::time::Instant;
 
 use crate::binary_scanner;
 use crate::content_scanner::{ContentScanOutcome, ContentScanner, ScanAccumulator};
-use crate::forge::{Forge, Repository};
+use crate::forge::{Forge, ForgeScanScope, HistoryChangeStatus, Repository, TreeEntry};
 use crate::streamer::{DynPattern, Finding, ScanOutcomeStats, StreamResult};
 use crate::temp_cleanup::TempDirGuard;
 use colored::Colorize;
@@ -353,6 +353,7 @@ pub(crate) struct FileScanConfig {
     pub(crate) workspace: PathBuf,
     pub(crate) repository_name: String,
     pub(crate) scan_scope: crate::forge::ForgeScanScope,
+    pub(crate) max_history: usize,
     pub(crate) max_blob_bytes: usize,
     pub(crate) workers: usize,
     pub(crate) scan_binaries: bool,
@@ -508,6 +509,136 @@ pub(crate) async fn scan_workspace_files(config: FileScanConfig) {
     }
 }
 
+async fn scan_history_repositories<F, Fut>(
+    forge: Arc<dyn Forge>,
+    selected_repos: &[Repository],
+    config: &FileScanConfig,
+    fetch_blob: F,
+) where
+    F: Fn(Arc<dyn Forge>, Repository, TreeEntry, String) -> Fut + Clone + Send + Sync + 'static,
+    Fut: Future<Output = anyhow::Result<Vec<u8>>> + Send,
+{
+    let scanner = ContentScanner::new(
+        config.extra_patterns.clone(),
+        config.exhaustive,
+        config.entropy_threshold,
+        config.max_blob_bytes,
+        config.scan_binaries,
+    );
+    let mut seen_views = HashSet::new();
+
+    for repo in selected_repos {
+        if config.stop_flag.load(Ordering::Relaxed) {
+            break;
+        }
+        let history = match forge
+            .get_history(repo, &repo.default_branch, config.max_history)
+            .await
+        {
+            Ok(history) => history,
+            Err(error) => {
+                let mut stats = config.outcome_stats.lock().await;
+                if error
+                    .to_string()
+                    .to_ascii_lowercase()
+                    .contains("unsupported capability")
+                {
+                    stats.unsupported_capability = Some("history".to_string());
+                } else {
+                    stats.failed_files += 1;
+                }
+                continue;
+            }
+        };
+        {
+            let mut stats = config.outcome_stats.lock().await;
+            stats.history_commits_scanned += history.commits_scanned;
+            stats.history_truncated |= history.truncated;
+            stats.history_entries_considered += history.entries.len();
+        }
+
+        for entry in history.entries {
+            if config.stop_flag.load(Ordering::Relaxed) {
+                config.outcome_stats.lock().await.skipped_stop_requested += 1;
+                break;
+            }
+            let is_deleted = entry.status == HistoryChangeStatus::Removed;
+            if is_deleted {
+                config.outcome_stats.lock().await.history_deleted_entries += 1;
+            }
+            let Some(blob_sha) = entry.blob_sha.clone() else {
+                continue;
+            };
+            let view_key = format!("{}:{}", entry.path, blob_sha);
+            if !seen_views.insert(view_key) {
+                config
+                    .outcome_stats
+                    .lock()
+                    .await
+                    .history_entries_deduplicated += 1;
+                continue;
+            }
+            let tree_entry = TreeEntry {
+                path: entry.path.clone(),
+                obj_type: "blob".to_string(),
+                sha: blob_sha,
+                size: entry.size,
+                mode: None,
+            };
+            let data = match fetch_blob(
+                forge.clone(),
+                repo.clone(),
+                tree_entry,
+                entry.commit_sha.clone(),
+            )
+            .await
+            {
+                Ok(data) => data,
+                Err(_) => {
+                    config.outcome_stats.lock().await.failed_files += 1;
+                    config.blobs_failed.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
+            };
+            if data.is_empty() {
+                config.outcome_stats.lock().await.skipped_files += 1;
+                continue;
+            }
+            let source = format!(
+                "{}/history/{}/{}",
+                repo.full_name, entry.commit_sha, entry.path
+            );
+            let dispatch = binary_scanner::classify_binary(&data, &source, 8192, 10);
+            let mut outcome = scanner.scan(&data, &source, dispatch.is_binary());
+            for finding in &mut outcome.findings {
+                finding.commit_sha1 = Some(entry.commit_sha.clone());
+                finding.is_deleted = is_deleted;
+            }
+            {
+                let mut stats = config.outcome_stats.lock().await;
+                stats.history_entries_scanned += 1;
+                stats.archive_truncated += outcome.archive_truncated;
+                stats.archive_invalid += outcome.archive_invalid;
+            }
+            if outcome.bytes > 0 {
+                config.blobs_scanned.fetch_add(1, Ordering::Relaxed);
+                config
+                    .bytes_scanned
+                    .fetch_add(outcome.bytes, Ordering::Relaxed);
+            }
+            if !outcome.findings.is_empty() {
+                config.all_findings.lock().await.extend(outcome.findings);
+            }
+            if config.max_findings > 0
+                && config.all_findings.lock().await.len() >= config.max_findings
+            {
+                config.stop_flag.store(true, Ordering::Relaxed);
+                break;
+            }
+        }
+    }
+}
+
 /// Execute the common per-repository forge scan lifecycle through the Forge trait.
 pub(crate) async fn run_repository_scan_loop<F, Fut>(
     forge: Arc<dyn Forge>,
@@ -537,6 +668,14 @@ where
             .lock()
             .await
             .unsupported_capability = Some("history".to_string());
+    } else if scan_config.scan_scope == ForgeScanScope::History {
+        scan_history_repositories(
+            forge.clone(),
+            selected_repos,
+            &scan_config,
+            fetch_blob.clone(),
+        )
+        .await;
     } else {
         for (repo_idx, repo) in selected_repos.iter().enumerate() {
             if scan_config.stop_flag.load(Ordering::Relaxed) {
@@ -643,7 +782,10 @@ mod tests {
         scan_workspace_files, FileScanConfig, RepositoryScanOutcome, RepositoryScanRequest,
         WorkspaceLifecycle,
     };
-    use crate::forge::{EnumScope, Forge, Platform, RateLimitInfo, Repository, TreeEntry};
+    use crate::forge::{
+        EnumScope, Forge, ForgeCapabilities, ForgeHistory, ForgeScanScope, HistoryChangeStatus,
+        HistoryEntry, Platform, RateLimitInfo, Repository, TreeEntry,
+    };
     use crate::streamer::{DynPattern, ScanOutcomeStats};
     use tokio::sync::Mutex;
     use zip::{write::SimpleFileOptions, ZipWriter};
@@ -743,6 +885,7 @@ mod tests {
             workspace: workspace.clone(),
             repository_name: "acme/example".to_string(),
             scan_scope: crate::forge::ForgeScanScope::Snapshot,
+            max_history: 500,
             max_blob_bytes: 1024,
             workers: 2,
             scan_binaries: true,
@@ -825,8 +968,100 @@ mod tests {
     }
 
     struct EmptyForge;
-
     struct ParityForge;
+    struct HistoryForge;
+
+    #[async_trait::async_trait]
+    impl Forge for HistoryForge {
+        async fn authenticate(&mut self, _token: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn enumerate_repos(&self, _scope: EnumScope) -> anyhow::Result<Vec<Repository>> {
+            Ok(vec![fixture_repository()])
+        }
+
+        async fn get_tree(
+            &self,
+            _repo: &Repository,
+            _branch: &str,
+        ) -> anyhow::Result<Vec<TreeEntry>> {
+            Ok(Vec::new())
+        }
+
+        async fn get_blob(&self, _repo: &Repository, sha: &str) -> anyhow::Result<Vec<u8>> {
+            match sha {
+                "history-sha" | "deleted-sha" => Ok(b"CUSTOM_ABCD1234".to_vec()),
+                _ => anyhow::bail!("unexpected history blob {sha}"),
+            }
+        }
+
+        async fn get_history(
+            &self,
+            _repo: &Repository,
+            _branch: &str,
+            max_commits: usize,
+        ) -> anyhow::Result<ForgeHistory> {
+            assert_eq!(max_commits, 2);
+            Ok(ForgeHistory {
+                commits_scanned: 2,
+                entries: vec![
+                    HistoryEntry {
+                        commit_sha: "commit-one".to_string(),
+                        path: "config.txt".to_string(),
+                        status: HistoryChangeStatus::Modified,
+                        blob_sha: Some("history-sha".to_string()),
+                        previous_path: None,
+                        size: Some(15),
+                    },
+                    HistoryEntry {
+                        commit_sha: "commit-two".to_string(),
+                        path: "config.txt".to_string(),
+                        status: HistoryChangeStatus::Modified,
+                        blob_sha: Some("history-sha".to_string()),
+                        previous_path: None,
+                        size: Some(15),
+                    },
+                    HistoryEntry {
+                        commit_sha: "commit-two".to_string(),
+                        path: "old.txt".to_string(),
+                        status: HistoryChangeStatus::Removed,
+                        blob_sha: Some("deleted-sha".to_string()),
+                        previous_path: None,
+                        size: Some(15),
+                    },
+                ],
+                truncated: true,
+            })
+        }
+
+        fn capabilities(&self) -> ForgeCapabilities {
+            ForgeCapabilities {
+                snapshot: true,
+                history: true,
+                branches: false,
+                tags: false,
+                commits: true,
+                deleted_blobs: true,
+            }
+        }
+
+        fn rate_limit_remaining(&self) -> Option<(u32, std::time::Duration)> {
+            Some((999, std::time::Duration::from_secs(30)))
+        }
+
+        fn platform(&self) -> Platform {
+            Platform::GitHub
+        }
+
+        async fn get_head_sha(&self, _repo: &Repository, _branch: &str) -> anyhow::Result<String> {
+            Ok("history-head".to_string())
+        }
+
+        async fn whoami(&self) -> anyhow::Result<(String, String)> {
+            Ok(("history-user".to_string(), "History User".to_string()))
+        }
+    }
 
     #[async_trait::async_trait]
     impl Forge for ParityForge {
@@ -977,6 +1212,7 @@ mod tests {
                 workspace: PathBuf::new(),
                 repository_name: String::new(),
                 scan_scope: crate::forge::ForgeScanScope::Snapshot,
+                max_history: 500,
                 max_blob_bytes: 1024 * 1024,
                 workers: 2,
                 scan_binaries: true,
@@ -1028,6 +1264,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn history_scope_scans_deduplicated_and_deleted_entries() {
+        let output = tempfile::tempdir().expect("create output directory");
+        let workspace = WorkspaceLifecycle::new(
+            output.path(),
+            "history-mock",
+            false,
+            "gitrecon_history_mock_scan",
+        );
+        let all_findings = Arc::new(Mutex::new(Vec::new()));
+        let outcome_stats = Arc::new(Mutex::new(ScanOutcomeStats::default()));
+        let result = run_repository_scan_loop(
+            Arc::new(HistoryForge),
+            &[fixture_repository()],
+            &workspace,
+            FileScanConfig {
+                workspace: PathBuf::new(),
+                repository_name: String::new(),
+                scan_scope: ForgeScanScope::History,
+                max_history: 2,
+                max_blob_bytes: 1024,
+                workers: 1,
+                scan_binaries: true,
+                exhaustive: true,
+                entropy_threshold: 4.5,
+                live: false,
+                pipe: false,
+                verbose: false,
+                max_findings: 0,
+                stop_on_critical: false,
+                extra_patterns: Arc::new(vec![DynPattern {
+                    id: "custom_token".to_string(),
+                    sev: "CRITICAL".to_string(),
+                    desc: "Custom history token".to_string(),
+                    regex: regex::Regex::new(r"CUSTOM_[A-Z0-9]{8}").unwrap(),
+                }]),
+                stop_flag: Arc::new(AtomicBool::new(false)),
+                all_findings: all_findings.clone(),
+                tech_stack_set: Arc::new(Mutex::new(HashSet::new())),
+                blobs_scanned: Arc::new(AtomicUsize::new(0)),
+                blobs_failed: Arc::new(AtomicUsize::new(0)),
+                bytes_scanned: Arc::new(AtomicUsize::new(0)),
+                outcome_stats,
+            },
+            |forge, repo, entry, _head_sha| async move {
+                forge.get_blob_entry(&repo, &entry).await
+            },
+            Instant::now(),
+        )
+        .await;
+
+        assert_eq!(result.findings.len(), 2);
+        assert!(result.findings.iter().any(|finding| finding.is_deleted));
+        assert!(result
+            .findings
+            .iter()
+            .all(|finding| finding.pattern_id == "custom_token"));
+        assert!(result
+            .findings
+            .iter()
+            .all(|finding| finding.commit_sha1.is_some()));
+        assert_eq!(result.object_source_stats.forge, 2);
+        assert_eq!(result.bytes_scanned, 30);
+        assert_eq!(result.outcome_stats.scan_scope.as_deref(), Some("history"));
+        assert_eq!(result.outcome_stats.history_commits_scanned, 2);
+        assert_eq!(result.outcome_stats.history_entries_considered, 3);
+        assert_eq!(result.outcome_stats.history_entries_scanned, 2);
+        assert_eq!(result.outcome_stats.history_entries_deduplicated, 1);
+        assert_eq!(result.outcome_stats.history_deleted_entries, 1);
+        assert!(result.outcome_stats.history_truncated);
+        assert_eq!(result.outcome_stats.unsupported_capability, None);
+    }
+
+    #[tokio::test]
     async fn run_repository_scan_loop_reports_unsupported_history_scope() {
         let workspace = WorkspaceLifecycle::new(
             &std::env::temp_dir(),
@@ -1043,6 +1352,7 @@ mod tests {
                 workspace: PathBuf::new(),
                 repository_name: String::new(),
                 scan_scope: crate::forge::ForgeScanScope::History,
+                max_history: 1,
                 max_blob_bytes: 1024,
                 workers: 1,
                 scan_binaries: true,
