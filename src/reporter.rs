@@ -2,6 +2,7 @@
 //! Intelligence Report: colored terminal summary + report files to disk (JSON, SARIF, CSV, NDJSON, Markdown, HTML).
 //! The only thing written to disk is the report file.
 
+use crate::cache::CacheStats;
 use crate::detect::DetectResult;
 use crate::layout;
 use crate::mapper::MapResult;
@@ -583,6 +584,14 @@ impl Reporter {
                     "│  {:<16}: {} entries, {}",
                     "Cache size", stats.total_entries, stats.size_human
                 );
+                if stats.evicted_entries > 0 {
+                    println!(
+                        "│  {:<16}: {} entries, {}",
+                        "Cache evicted",
+                        stats.evicted_entries,
+                        CacheStats::format_bytes(stats.evicted_bytes)
+                    );
+                }
             }
         }
         println!("│");

@@ -101,5 +101,7 @@ pub struct CacheReportStats {
     pub total_entries: i64,
     pub total_bytes: i64,
     pub expired_entries: i64,
+    pub evicted_entries: i64,
+    pub evicted_bytes: i64,
     pub size_human: String,
 }

@@ -77,6 +77,16 @@ fn init_db(conn: &Connection) -> Result<()> {
         params![seed],
     )
     .context("Failed to seed cache_meta.total_bytes")?;
+    conn.execute(
+        "INSERT OR IGNORE INTO cache_meta (key, value) VALUES ('evicted_entries', 0)",
+        [],
+    )
+    .context("Failed to seed cache_meta.evicted_entries")?;
+    conn.execute(
+        "INSERT OR IGNORE INTO cache_meta (key, value) VALUES ('evicted_bytes', 0)",
+        [],
+    )
+    .context("Failed to seed cache_meta.evicted_bytes")?;
 
     Ok(())
 }
@@ -88,6 +98,7 @@ pub struct ObjectCache {
     pool: Pool<SqliteConnectionManager>,
     ttl_seconds: i64,
     no_cache: bool,
+    max_size_bytes: i64,
 }
 
 impl ObjectCache {
@@ -105,6 +116,16 @@ impl ObjectCache {
     /// This is useful for deterministic tests and isolated scan jobs; the
     /// production constructor above continues to use `~/.gitrecon/cache.db`.
     pub fn new_at_path(path: impl AsRef<Path>, ttl_seconds: i64, no_cache: bool) -> Result<Self> {
+        Self::new_at_path_with_limit(path, ttl_seconds, no_cache, MAX_CACHE_SIZE_BYTES)
+    }
+
+    /// Create a cache with an explicit byte limit for deterministic tests.
+    pub fn new_at_path_with_limit(
+        path: impl AsRef<Path>,
+        ttl_seconds: i64,
+        no_cache: bool,
+        max_size_bytes: i64,
+    ) -> Result<Self> {
         let cache_path = path.as_ref();
 
         // Create cache directory if it doesn't exist
@@ -150,6 +171,7 @@ impl ObjectCache {
                 ttl_seconds
             },
             no_cache,
+            max_size_bytes: max_size_bytes.max(0),
         })
     }
 
@@ -252,8 +274,8 @@ impl ObjectCache {
                     |row| row.get(0),
                 )
                 .unwrap_or(0);
-            if total > MAX_CACHE_SIZE_BYTES {
-                let target = MAX_CACHE_SIZE_BYTES * 9 / 10;
+            if total > self.max_size_bytes {
+                let target = self.max_size_bytes * 9 / 10;
                 // Evict in batches of 100 until we reach 90 % of the cap.
                 while total > target {
                     let deleted_size: i64 = tx
@@ -270,7 +292,7 @@ impl ObjectCache {
                     if deleted_size == 0 {
                         break; // Nothing to evict — cache empty (shouldn't happen).
                     }
-                    tx.execute(
+                    let deleted_count = tx.execute(
                         "DELETE FROM cache
                          WHERE sha1 IN (
                              SELECT sha1 FROM cache
@@ -281,6 +303,14 @@ impl ObjectCache {
                     )?;
                     tx.execute(
                         "UPDATE cache_meta SET value = value - ?1 WHERE key = 'total_bytes'",
+                        params![deleted_size],
+                    )?;
+                    tx.execute(
+                        "UPDATE cache_meta SET value = value + ?1 WHERE key = 'evicted_entries'",
+                        params![deleted_count],
+                    )?;
+                    tx.execute(
+                        "UPDATE cache_meta SET value = value + ?1 WHERE key = 'evicted_bytes'",
                         params![deleted_size],
                     )?;
                     total -= deleted_size;
@@ -354,6 +384,8 @@ impl ObjectCache {
                     total_entries: 0,
                     total_bytes: 0,
                     expired_entries: 0,
+                    evicted_entries: 0,
+                    evicted_bytes: 0,
                 };
             }
         };
@@ -374,6 +406,21 @@ impl ObjectCache {
                 )
                 .unwrap_or(0)
             });
+
+        let evicted_entries = conn
+            .query_row(
+                "SELECT value FROM cache_meta WHERE key = 'evicted_entries'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap_or(0);
+        let evicted_bytes = conn
+            .query_row(
+                "SELECT value FROM cache_meta WHERE key = 'evicted_bytes'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap_or(0);
 
         // Sprint 3 (S3.5): permanent TTL means nothing ever expires — skip the
         // underflowing cutoff computation.
@@ -396,6 +443,8 @@ impl ObjectCache {
                 .unwrap_or(0),
             total_bytes,
             expired_entries,
+            evicted_entries,
+            evicted_bytes,
         }
     }
 
@@ -431,6 +480,8 @@ pub struct CacheStats {
     pub total_entries: i64,
     pub total_bytes: i64,
     pub expired_entries: i64,
+    pub evicted_entries: i64,
+    pub evicted_bytes: i64,
 }
 
 impl CacheStats {
@@ -525,6 +576,28 @@ mod tests {
         let stats = CacheStats::default();
         assert_eq!(stats.total_entries, 0);
         assert_eq!(stats.total_bytes, 0);
+        assert_eq!(stats.evicted_entries, 0);
+        assert_eq!(stats.evicted_bytes, 0);
+    }
+
+    #[tokio::test]
+    async fn eviction_telemetry_tracks_entries_and_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache =
+            ObjectCache::new_at_path_with_limit(temp.path().join("cache.db"), 0, false, 667)
+                .unwrap();
+        for index in 0..112 {
+            cache.put(&format!("entry-{index}"), b"123456", None).await;
+        }
+        let stats = cache.stats().await;
+        assert_eq!(stats.total_entries, 12);
+        assert_eq!(stats.total_bytes, 72);
+        assert_eq!(stats.evicted_entries, 100);
+        assert_eq!(stats.evicted_bytes, 600);
+        assert_eq!(cache.get("entry-0").await, None);
+        assert_eq!(cache.get("entry-99").await, None);
+        assert_eq!(cache.get("entry-100").await, Some(b"123456".to_vec()));
+        assert_eq!(cache.get("entry-111").await, Some(b"123456".to_vec()));
     }
 
     #[test]

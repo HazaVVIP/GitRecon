@@ -1569,6 +1569,8 @@ impl Streamer {
                 total_entries: stats.total_entries,
                 total_bytes: stats.total_bytes,
                 expired_entries: stats.expired_entries,
+                evicted_entries: stats.evicted_entries,
+                evicted_bytes: stats.evicted_bytes,
                 size_human: stats.size_human(),
             })
         } else {
