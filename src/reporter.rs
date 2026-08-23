@@ -515,14 +515,16 @@ impl Reporter {
         println!("│  {:<16}: {:.1}s", "Elapsed", r.elapsed_s);
         let source_total = r.object_source_stats.pack
             + r.object_source_stats.cache
-            + r.object_source_stats.loose_http;
+            + r.object_source_stats.loose_http
+            + r.object_source_stats.forge;
         if source_total > 0 {
             println!(
-                "│  {:<16}: pack={} cache={} HTTP={}",
+                "│  {:<16}: pack={} cache={} HTTP={} forge={}",
                 "Object sources",
                 r.object_source_stats.pack,
                 r.object_source_stats.cache,
-                r.object_source_stats.loose_http
+                r.object_source_stats.loose_http,
+                r.object_source_stats.forge
             );
         }
         let skipped = r.outcome_stats.skipped_total();
