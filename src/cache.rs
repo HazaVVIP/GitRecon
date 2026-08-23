@@ -126,6 +126,23 @@ impl ObjectCache {
         no_cache: bool,
         max_size_bytes: i64,
     ) -> Result<Self> {
+        if no_cache {
+            let pool = Pool::builder()
+                .max_size(1)
+                .build(SqliteConnectionManager::memory())
+                .context("Failed to create disabled cache pool")?;
+            return Ok(Self {
+                pool,
+                ttl_seconds: if ttl_seconds == 0 {
+                    i64::MAX
+                } else {
+                    ttl_seconds
+                },
+                no_cache: true,
+                max_size_bytes: max_size_bytes.max(0),
+            });
+        }
+
         let cache_path = path.as_ref();
 
         // Create cache directory if it doesn't exist
@@ -358,6 +375,10 @@ impl ObjectCache {
 
     /// Clean up expired entries (TTL-based cleanup)
     pub async fn cleanup_expired(&self) -> Result<usize> {
+        if self.no_cache {
+            return Ok(0);
+        }
+
         // Sprint 3 (S3.5): permanent-TTL short-circuit — nothing to clean.
         if self.ttl_seconds == i64::MAX {
             return Ok(0);
@@ -376,6 +397,10 @@ impl ObjectCache {
 
     /// Get cache statistics
     pub async fn stats(&self) -> CacheStats {
+        if self.no_cache {
+            return CacheStats::default();
+        }
+
         let conn = match self.pool.get().ok() {
             Some(c) => c,
             None => {
@@ -576,6 +601,26 @@ mod tests {
         let stats = CacheStats::default();
         assert_eq!(stats.total_entries, 0);
         assert_eq!(stats.total_bytes, 0);
+        assert_eq!(stats.evicted_entries, 0);
+        assert_eq!(stats.evicted_bytes, 0);
+    }
+
+    #[tokio::test]
+    async fn no_cache_constructor_skips_disk_io() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("disabled.db");
+        let cache = ObjectCache::new_at_path(&path, 0, true).unwrap();
+
+        assert!(!path.exists());
+        assert!(cache.is_disabled());
+        assert_eq!(cache.get("entry").await, None);
+        cache.put("entry", b"payload", None).await;
+        assert!(!cache.remove("entry").await.unwrap());
+        assert_eq!(cache.cleanup_expired().await.unwrap(), 0);
+        let stats = cache.stats().await;
+        assert_eq!(stats.total_entries, 0);
+        assert_eq!(stats.total_bytes, 0);
+        assert_eq!(stats.expired_entries, 0);
         assert_eq!(stats.evicted_entries, 0);
         assert_eq!(stats.evicted_bytes, 0);
     }
