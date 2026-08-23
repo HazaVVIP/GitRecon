@@ -81,7 +81,7 @@ use reporter::{ReportContext, Reporter};
 use target_utils::{
     dir_target_name, normalize_url, parse_extra_headers, select_by_indexes, target_name,
 };
-use targets::{load_targets, Target};
+use targets::{load_targets, Target, TokenProvider};
 use ui::theme::{BannerStyle as ThemeBannerStyle, Theme};
 
 struct UrlRunContext<'a> {
@@ -405,8 +405,15 @@ fn validate_dry_run_target(target: &Target) -> anyhow::Result<()> {
         Target::Dir { dir } => validation::validate_directory_path(dir)
             .map(|_| ())
             .map_err(|error| anyhow::anyhow!("Invalid directory target '{}': {}", dir, error)),
-        Target::Token { token, .. } => validation::validate_github_token(token)
-            .map_err(|error| anyhow::anyhow!("Invalid GitHub token target: {}", error)),
+        Target::Token {
+            token, provider, ..
+        } => {
+            validate_token_for_provider(token, provider.unwrap_or_default())?;
+            target
+                .token_selectors()
+                .map(|_| ())
+                .map_err(|error| anyhow::anyhow!("Invalid token target selector: {}", error))
+        }
     }
 }
 
@@ -514,7 +521,9 @@ fn validate_dry_run_inputs(
             .map_err(|error| anyhow::anyhow!("Invalid GitHub token: {}", error))?;
         targets.push(Target::Token {
             token: token.clone(),
+            provider: Some(TokenProvider::Github),
             repos: None,
+            selectors: None,
         });
     } else if let Some(ref token) = args.gitlab_token {
         validation::validate_gitlab_token(token)
@@ -580,6 +589,29 @@ fn validate_dry_run_inputs(
     Ok(())
 }
 
+fn empty_scan_summary() -> ScanSummary {
+    ScanSummary {
+        report_path: String::new(),
+        findings_count: 0,
+        risk_score: 0,
+    }
+}
+
+fn validate_token_for_provider(token: &str, provider: TokenProvider) -> anyhow::Result<()> {
+    match provider {
+        TokenProvider::Github => validation::validate_github_token(token)
+            .map_err(|error| anyhow::anyhow!("Invalid GitHub token target: {}", error)),
+        TokenProvider::Gitlab => validation::validate_gitlab_token(token)
+            .map_err(|error| anyhow::anyhow!("Invalid GitLab token target: {}", error)),
+        TokenProvider::Bitbucket | TokenProvider::Gitea | TokenProvider::Azure => {
+            if token.trim().is_empty() {
+                anyhow::bail!("{} token target cannot be empty", provider.as_str());
+            }
+            Ok(())
+        }
+    }
+}
+
 async fn run_non_url_target(
     args: &Cli,
     rep: &Reporter,
@@ -588,19 +620,82 @@ async fn run_non_url_target(
     target: Target,
     extra_patterns: Vec<streamer::DynPattern>,
 ) -> TargetOutcome {
-    match target {
-        Target::Token { token, repos } => {
-            let target_name = format!("token:{}", &token[..token.len().min(8)]);
-            match run_token_scan(
-                args,
-                rep,
-                base_cfg.clone(),
-                &token,
-                repos.as_deref(),
-                extra_patterns,
+    let provider = target.token_provider().unwrap_or_default();
+    let selectors = match target.token_selectors() {
+        Ok(selectors) => selectors,
+        Err(error) => {
+            return TargetOutcome::failure(
+                format!("token:{}", provider.as_str()),
+                "TOKEN",
+                error.to_string(),
             )
-            .await
-            {
+        }
+    };
+    match target {
+        Target::Token { token, .. } => {
+            let target_name = format!("token:{}", provider.as_str());
+            let scan_result = match provider {
+                TokenProvider::Github => {
+                    run_token_scan(
+                        args,
+                        rep,
+                        base_cfg.clone(),
+                        &token,
+                        selectors.as_deref(),
+                        extra_patterns,
+                    )
+                    .await
+                }
+                TokenProvider::Gitlab => {
+                    run_gitlab_token_scan(
+                        args,
+                        rep,
+                        base_cfg.clone(),
+                        &token,
+                        args.gitlab_url.as_deref(),
+                        selectors.as_deref(),
+                        extra_patterns,
+                    )
+                    .await
+                }
+                TokenProvider::Bitbucket => {
+                    run_bitbucket_token_scan(
+                        args,
+                        rep,
+                        base_cfg.clone(),
+                        &token,
+                        args.bitbucket_url.as_deref(),
+                        selectors.as_deref(),
+                        extra_patterns,
+                    )
+                    .await
+                }
+                TokenProvider::Gitea => {
+                    run_gitea_token_scan(
+                        args,
+                        rep,
+                        base_cfg.clone(),
+                        &token,
+                        args.gitea_url.as_deref(),
+                        selectors.as_deref(),
+                        extra_patterns,
+                    )
+                    .await
+                }
+                TokenProvider::Azure => {
+                    run_azure_token_scan(
+                        args,
+                        rep,
+                        base_cfg.clone(),
+                        &token,
+                        args.azure_url.as_deref(),
+                        selectors.as_deref(),
+                        extra_patterns,
+                    )
+                    .await
+                }
+            };
+            match scan_result {
                 Ok(summary) => TargetOutcome {
                     target: target_name,
                     target_type: "TOKEN".to_string(),
@@ -1205,6 +1300,37 @@ fn prompt_save_choice(default: bool) -> bool {
     }
 }
 
+fn filter_repositories_by_selectors(
+    repositories: Vec<forge::Repository>,
+    selectors: Option<&[String]>,
+    provider: TokenProvider,
+) -> anyhow::Result<Vec<forge::Repository>> {
+    let Some(selectors) = selectors else {
+        return Ok(repositories);
+    };
+    if selectors.is_empty() {
+        anyhow::bail!(
+            "{} token target selectors cannot be empty",
+            provider.as_str()
+        );
+    }
+    let selected: Vec<_> = repositories
+        .into_iter()
+        .filter(|repository| {
+            selectors
+                .iter()
+                .any(|selector| targets::selector_matches(&repository.full_name, selector))
+        })
+        .collect();
+    if selected.is_empty() {
+        anyhow::bail!(
+            "No {} repositories matched the requested selectors",
+            provider.as_str()
+        );
+    }
+    Ok(selected)
+}
+
 fn parse_false_positive_keywords(args: &Cli) -> Vec<String> {
     args.false_positive_keywords
         .as_deref()
@@ -1351,7 +1477,7 @@ fn prepare_forge_selection(
 async fn collect_github_repositories(
     client: &HttpClient,
     verbose: bool,
-    repo_allowlist: Option<&[String]>,
+    repo_selectors: Option<&[String]>,
 ) -> anyhow::Result<Vec<forge::Repository>> {
     if verbose {
         println!("  ◈  Enumerating repositories...");
@@ -1380,25 +1506,11 @@ async fn collect_github_repositories(
     }
     let mut seen_names = std::collections::HashSet::new();
     all_repos.retain(|repo| seen_names.insert(repo.full_name.clone()));
-    if let Some(allowlist) = repo_allowlist {
-        let requested: std::collections::HashSet<String> = allowlist
-            .iter()
-            .map(|name| name.trim().trim_matches('/').to_ascii_lowercase())
-            .filter(|name| !name.is_empty())
-            .collect();
-        if requested.is_empty() {
-            return Err(anyhow::anyhow!(
-                "Token target repository allowlist is empty."
-            ));
-        }
-        all_repos.retain(|repo| requested.contains(&repo.full_name.to_ascii_lowercase()));
-        if all_repos.is_empty() {
-            return Err(anyhow::anyhow!(
-                "None of the requested repositories are accessible."
-            ));
-        }
-    }
-    Ok(all_repos.iter().map(github_repo_to_repository).collect())
+    let repositories: Vec<_> = all_repos
+        .into_iter()
+        .map(|repo| github_repo_to_repository(&repo))
+        .collect();
+    filter_repositories_by_selectors(repositories, repo_selectors, TokenProvider::Github)
 }
 
 fn reject_unsupported_forge_scope(result: &streamer::StreamResult) -> anyhow::Result<()> {
@@ -1508,6 +1620,8 @@ async fn run_token_scan(
         rep,
         login: &login,
         repo_count: selected_repo_count,
+        provider: "github",
+        selectors: repo_allowlist,
         mode: "token",
         report_prefix: "token",
         stream_r: &stream_r,
@@ -1524,8 +1638,9 @@ async fn run_gitlab_token_scan(
     base_cfg: HttpConfig,
     token: &str,
     gitlab_url: Option<&str>,
+    repo_selectors: Option<&[String]>,
     extra_patterns: Vec<streamer::DynPattern>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<ScanSummary> {
     let quiet = args.quiet || args.pipe;
     let verbose = !quiet;
 
@@ -1563,10 +1678,14 @@ async fn run_gitlab_token_scan(
     .map_err(|error| anyhow::anyhow!("forge scan setup failed: {}", error))?;
     let gl_forge = session.forge;
     let login = session.login;
-    let all_repos = session.repositories;
+    let all_repos = filter_repositories_by_selectors(
+        session.repositories,
+        repo_selectors,
+        TokenProvider::Gitlab,
+    )?;
     let total_repos = all_repos.len();
     if total_repos == 0 {
-        return Ok(());
+        return Ok(empty_scan_summary());
     }
     let interactive = !args.quiet && !args.pipe;
 
@@ -1592,7 +1711,7 @@ async fn run_gitlab_token_scan(
         prepare_forge_selection(args, verbose, interactive, &all_repos, selected_indexes)
     else {
         eprintln!("  ✘  Tidak ada repository valid yang dipilih.");
-        return Ok(());
+        return Ok(empty_scan_summary());
     };
     let selected_repos = selection.repositories;
     let selected_repo_count = selected_repos.len();
@@ -1616,18 +1735,19 @@ async fn run_gitlab_token_scan(
     if verbose && !args.pipe {
         rep.print_findings_summary(&stream_r.findings);
     }
-    let _ = finalize_standard_token_report(StandardTokenReport {
+    Ok(finalize_standard_token_report(StandardTokenReport {
         args,
         rep,
         login: &login,
         repo_count: selected_repo_count,
+        provider: "gitlab",
+        selectors: repo_selectors,
         mode: "gitlab_token",
         report_prefix: "gitlab",
         stream_r: &stream_r,
         verbose,
     })
-    .await;
-    Ok(())
+    .await)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1637,8 +1757,9 @@ async fn run_bitbucket_token_scan(
     base_cfg: HttpConfig,
     token: &str,
     bitbucket_url: Option<&str>,
+    repo_selectors: Option<&[String]>,
     extra_patterns: Vec<streamer::DynPattern>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<ScanSummary> {
     let quiet = args.quiet || args.pipe;
     let verbose = !quiet;
 
@@ -1681,10 +1802,14 @@ async fn run_bitbucket_token_scan(
     .map_err(|error| anyhow::anyhow!("forge scan setup failed: {}", error))?;
     let bb_forge = session.forge;
     let login = session.login;
-    let all_repos = session.repositories;
+    let all_repos = filter_repositories_by_selectors(
+        session.repositories,
+        repo_selectors,
+        TokenProvider::Bitbucket,
+    )?;
     let total_repos = all_repos.len();
     if total_repos == 0 {
-        return Ok(());
+        return Ok(empty_scan_summary());
     }
     let interactive = !args.quiet && !args.pipe;
 
@@ -1710,7 +1835,7 @@ async fn run_bitbucket_token_scan(
         prepare_forge_selection(args, verbose, interactive, &all_repos, selected_indexes)
     else {
         eprintln!("  ✘  Tidak ada repository valid yang dipilih.");
-        return Ok(());
+        return Ok(empty_scan_summary());
     };
     let selected_repos = selection.repositories;
     let selected_repo_count = selected_repos.len();
@@ -1735,18 +1860,19 @@ async fn run_bitbucket_token_scan(
         rep.print_findings_summary(&stream_r.findings);
     }
 
-    let _ = finalize_standard_token_report(StandardTokenReport {
+    Ok(finalize_standard_token_report(StandardTokenReport {
         args,
         rep,
         login: &login,
         repo_count: selected_repo_count,
+        provider: "bitbucket",
+        selectors: repo_selectors,
         mode: "bitbucket_token",
         report_prefix: "bitbucket",
         stream_r: &stream_r,
         verbose,
     })
-    .await;
-    Ok(())
+    .await)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1756,8 +1882,9 @@ async fn run_gitea_token_scan(
     base_cfg: HttpConfig,
     token: &str,
     gitea_url: Option<&str>,
+    repo_selectors: Option<&[String]>,
     extra_patterns: Vec<streamer::DynPattern>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<ScanSummary> {
     let quiet = args.quiet || args.pipe;
     let verbose = !quiet;
 
@@ -1799,10 +1926,14 @@ async fn run_gitea_token_scan(
     .map_err(|error| anyhow::anyhow!("forge scan setup failed: {}", error))?;
     let gt_forge = session.forge;
     let login = session.login;
-    let all_repos = session.repositories;
+    let all_repos = filter_repositories_by_selectors(
+        session.repositories,
+        repo_selectors,
+        TokenProvider::Gitea,
+    )?;
     let total_repos = all_repos.len();
     if total_repos == 0 {
-        return Ok(());
+        return Ok(empty_scan_summary());
     }
     let interactive = !args.quiet && !args.pipe;
 
@@ -1828,7 +1959,7 @@ async fn run_gitea_token_scan(
         prepare_forge_selection(args, verbose, interactive, &all_repos, selected_indexes)
     else {
         eprintln!("  ✘  Tidak ada repository valid yang dipilih.");
-        return Ok(());
+        return Ok(empty_scan_summary());
     };
     let selected_repos = selection.repositories;
     let selected_repo_count = selected_repos.len();
@@ -1853,18 +1984,19 @@ async fn run_gitea_token_scan(
         rep.print_findings_summary(&stream_r.findings);
     }
 
-    let _ = finalize_standard_token_report(StandardTokenReport {
+    Ok(finalize_standard_token_report(StandardTokenReport {
         args,
         rep,
         login: &login,
         repo_count: selected_repo_count,
+        provider: "gitea",
+        selectors: repo_selectors,
         mode: "gitea_token",
         report_prefix: "gitea",
         stream_r: &stream_r,
         verbose,
     })
-    .await;
-    Ok(())
+    .await)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1874,8 +2006,9 @@ async fn run_azure_token_scan(
     base_cfg: HttpConfig,
     token: &str,
     azure_url: Option<&str>,
+    repo_selectors: Option<&[String]>,
     extra_patterns: Vec<streamer::DynPattern>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<ScanSummary> {
     let quiet = args.quiet || args.pipe;
     let verbose = !quiet;
 
@@ -1917,7 +2050,11 @@ async fn run_azure_token_scan(
     .map_err(|error| anyhow::anyhow!("forge scan setup failed: {}", error))?;
     let az_forge = session.forge;
     let login = session.login;
-    let all_repos = session.repositories;
+    let all_repos = filter_repositories_by_selectors(
+        session.repositories,
+        repo_selectors,
+        TokenProvider::Azure,
+    )?;
     let total_repos = all_repos.len();
     if total_repos == 0 {
         if verbose {
@@ -1925,7 +2062,7 @@ async fn run_azure_token_scan(
             println!("  →  --azure-url https://dev.azure.com/{{org}}");
             println!("  →  For on-premise: --azure-url https://{{server}}/{{collection}}");
         }
-        return Ok(());
+        return Ok(empty_scan_summary());
     }
     let interactive = !args.quiet && !args.pipe;
 
@@ -1952,7 +2089,7 @@ async fn run_azure_token_scan(
         prepare_forge_selection(args, verbose, interactive, &all_repos, selected_indexes)
     else {
         eprintln!("  ✘  No valid repositories selected.");
-        return Ok(());
+        return Ok(empty_scan_summary());
     };
     let selected_repos = selection.repositories;
     let persist_source = selection.persist_source;
@@ -1977,7 +2114,7 @@ async fn run_azure_token_scan(
     }
 
     let report_name = format!("azure_{}", login);
-    let _ = finalize_provider_report(
+    Ok(finalize_provider_report(
         args,
         rep,
         ProviderReport {
@@ -2003,8 +2140,7 @@ async fn run_azure_token_scan(
             print_saved_notice: true,
         },
     )
-    .await;
-    Ok(())
+    .await)
 }
 
 /// Prompt for GitLab repository selection.
@@ -2103,6 +2239,8 @@ struct StandardTokenReport<'a> {
     rep: &'a Reporter,
     login: &'a str,
     repo_count: usize,
+    provider: &'a str,
+    selectors: Option<&'a [String]>,
     mode: &'a str,
     report_prefix: &'a str,
     stream_r: &'a streamer::StreamResult,
@@ -2115,6 +2253,8 @@ async fn finalize_standard_token_report(request: StandardTokenReport<'_>) -> Sca
         rep,
         login,
         repo_count,
+        provider,
+        selectors,
         mode,
         report_prefix,
         stream_r,
@@ -2127,7 +2267,12 @@ async fn finalize_standard_token_report(request: StandardTokenReport<'_>) -> Sca
         ProviderReport {
             report_name: &report_name,
             stream_r,
-            report_context: ReportContext::Token { login, repo_count },
+            report_context: ReportContext::Token {
+                login,
+                repo_count,
+                provider: Some(provider),
+                selectors,
+            },
             verbose,
             webhook_style: WebhookSuccessStyle::Standard,
             pipe_summary: serde_json::json!({
@@ -2979,6 +3124,7 @@ async fn main() {
             base_cfg,
             gitlab_token,
             args.gitlab_url.as_deref(),
+            None,
             extra_patterns,
         )
         .await
@@ -2997,6 +3143,7 @@ async fn main() {
             base_cfg,
             bitbucket_token,
             args.bitbucket_url.as_deref(),
+            None,
             extra_patterns,
         )
         .await
@@ -3015,6 +3162,7 @@ async fn main() {
             base_cfg,
             gitea_token,
             args.gitea_url.as_deref(),
+            None,
             extra_patterns,
         )
         .await
@@ -3033,6 +3181,7 @@ async fn main() {
             base_cfg,
             azure_token,
             args.azure_url.as_deref(),
+            None,
             extra_patterns,
         )
         .await
@@ -3169,25 +3318,23 @@ async fn main() {
                     .await;
                     all_results.push(outcome);
                 }
-                Target::Token { token, repos } => {
-                    let target = format!("token:{}", &token[..token.len().min(8)]);
+                Target::Token { provider, .. } => {
+                    let provider = provider.unwrap_or_default();
+                    let target_name = format!("token:{}", provider.as_str());
                     if verbose {
-                        println!("  [{}] Running token target {}", target_num, target);
+                        println!("  [{}] Running token target {}", target_num, target_name);
                     }
-                    let scan_result = run_token_scan(
-                        &args,
-                        &rep,
-                        base_cfg.clone(),
-                        token,
-                        repos.as_deref(),
-                        extra_patterns.clone(),
-                    )
-                    .await;
-                    let outcome = match scan_result {
-                        Ok(summary) => TargetOutcome::success(target, "TOKEN", &summary),
-                        Err(error) => TargetOutcome::failure(target, "TOKEN", error.to_string()),
-                    };
-                    all_results.push(outcome);
+                    all_results.push(
+                        run_non_url_target(
+                            &args,
+                            &rep,
+                            &client,
+                            &base_cfg,
+                            target.clone(),
+                            extra_patterns.clone(),
+                        )
+                        .await,
+                    );
                 }
                 Target::Dir { dir } => {
                     if verbose {

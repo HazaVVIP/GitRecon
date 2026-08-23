@@ -128,3 +128,84 @@ fn mixed_targets_parallel_preserves_input_order() {
     assert_eq!(results[2]["target_type"], "DIR");
     assert!(results[2]["findings_count"].as_u64().unwrap_or(0) > 0);
 }
+
+#[test]
+fn dry_run_accepts_provider_aware_token_target_and_selectors() {
+    let root = tempfile::tempdir().expect("create fixture root");
+    let targets = root.path().join("targets.ndjson");
+    fs::write(
+        &targets,
+        r#"{"token":"synthetic-gitlab-target-12345","provider":"gitlab","selectors":["corp/platform/*"]}"#,
+    )
+    .expect("write targets fixture");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_gitrecon"))
+        .args([
+            "--targets",
+            targets.to_str().expect("targets path is UTF-8"),
+            "--dry-run",
+            "--quiet",
+            "--pipe",
+        ])
+        .output()
+        .expect("run gitrecon dry-run");
+    assert!(
+        output.status.success(),
+        "provider-aware target must pass dry-run validation: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("\"valid\":true"),
+        "unexpected dry-run output: {stdout}"
+    );
+}
+
+#[test]
+fn dry_run_rejects_empty_provider_target_selector() {
+    let root = tempfile::tempdir().expect("create fixture root");
+    let targets = root.path().join("targets.ndjson");
+    fs::write(
+        &targets,
+        r#"{"token":"synthetic-gitlab-target-12345","provider":"gitlab","selectors":["  "]}"#,
+    )
+    .expect("write targets fixture");
+
+    let status = Command::new(env!("CARGO_BIN_EXE_gitrecon"))
+        .args([
+            "--targets",
+            targets.to_str().expect("targets path is UTF-8"),
+            "--dry-run",
+            "--quiet",
+        ])
+        .status()
+        .expect("run gitrecon dry-run");
+    assert!(!status.success(), "empty selector must fail validation");
+}
+
+#[test]
+fn dry_run_defaults_legacy_token_target_to_github() {
+    let root = tempfile::tempdir().expect("create fixture root");
+    let targets = root.path().join("targets.ndjson");
+    fs::write(
+        &targets,
+        r#"{"token":"synthetic-github-target-12345","repos":["owner/repo"]}"#,
+    )
+    .expect("write targets fixture");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_gitrecon"))
+        .args([
+            "--targets",
+            targets.to_str().expect("targets path is UTF-8"),
+            "--dry-run",
+            "--quiet",
+            "--pipe",
+        ])
+        .output()
+        .expect("run gitrecon dry-run");
+    assert!(
+        output.status.success(),
+        "legacy token target must remain valid"
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("\"targets\":1"));
+}
