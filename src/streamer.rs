@@ -741,6 +741,8 @@ impl ScanOutcomeStats {
             archive_invalid_reasons: state.archive_invalid_reasons.clone(),
             resource_peak_bytes: 0,
             resource_denied_reservations: 0,
+            resource_by_stage: BTreeMap::new(),
+            scheduler: Default::default(),
             scan_scope: None,
             capabilities: None,
             unsupported_capability: None,
@@ -1569,6 +1571,15 @@ impl Streamer {
         let resource_stats = resource_budget.stats();
         outcome_stats.resource_peak_bytes = resource_stats.peak_bytes;
         outcome_stats.resource_denied_reservations = resource_stats.denied_reservations;
+        outcome_stats.resource_by_stage = resource_stats.by_stage;
+        let mut scheduler_stats = concurrency_gate.telemetry();
+        if let Some(adaptive) = adaptive_concurrency.as_ref() {
+            let (adjustments, throttles, headroom) = adaptive.telemetry();
+            scheduler_stats.adjustment_events = adjustments;
+            scheduler_stats.throttle_events = throttles;
+            scheduler_stats.headroom_events = headroom;
+        }
+        outcome_stats.scheduler = scheduler_stats;
         let elapsed = t0.elapsed().as_secs_f64();
         let mut ts: Vec<_> = state.tech_stack.iter().cloned().collect();
         ts.sort();
@@ -7020,6 +7031,12 @@ REPLACE_WITH_YOUR_KEY
         assert!(timeout(Duration::from_millis(25), &mut waiter)
             .await
             .is_err());
+        let queued_snapshot = gate.telemetry();
+        assert_eq!(queued_snapshot.acquire_requests, 3);
+        assert_eq!(queued_snapshot.permits_granted, 2);
+        assert_eq!(queued_snapshot.active_peak, 2);
+        assert!(queued_snapshot.queued_acquires >= 1);
+        assert_eq!(queued_snapshot.limit_adjustments, 1);
 
         drop(second);
         drop(first);
@@ -7027,6 +7044,10 @@ REPLACE_WITH_YOUR_KEY
             .await
             .expect("waiter should proceed after active permits drain")
             .expect("waiter task should succeed");
+        let final_snapshot = gate.telemetry();
+        assert_eq!(final_snapshot.acquire_requests, 3);
+        assert_eq!(final_snapshot.permits_granted, 3);
+        assert_eq!(final_snapshot.current_limit, 1);
     }
 
     #[test]
