@@ -76,6 +76,19 @@ def report_file(output: Path) -> Path:
     return reports[0]
 
 
+def process_peak_rss_bytes(pid: int) -> int | None:
+    """Read Linux VmHWM for a running child; return null on unsupported hosts."""
+
+    status_path = Path(f"/proc/{pid}/status")
+    try:
+        for line in status_path.read_text(encoding="utf-8").splitlines():
+            if line.startswith("VmHWM:"):
+                return int(line.split()[1]) * 1024
+    except (FileNotFoundError, OSError, ValueError):
+        return None
+    return None
+
+
 def run_once(binary: Path, target: str) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="gitrecon-remote-bench-output-") as output_dir:
         output = Path(output_dir)
@@ -93,11 +106,23 @@ def run_once(binary: Path, target: str) -> dict[str, Any]:
             "4",
         ]
         started = time.perf_counter()
-        completed = subprocess.run(command, capture_output=True, text=True)
+        completed_process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        peak_rss_bytes: int | None = None
+        while completed_process.poll() is None:
+            current_rss = process_peak_rss_bytes(completed_process.pid)
+            if current_rss is not None:
+                peak_rss_bytes = max(peak_rss_bytes or 0, current_rss)
+            time.sleep(0.01)
+        stdout, stderr = completed_process.communicate()
         elapsed = time.perf_counter() - started
-        if completed.returncode != 0:
+        if completed_process.returncode != 0:
             raise RuntimeError(
-                f"gitrecon failed with {completed.returncode}: {completed.stderr.strip()}"
+                f"gitrecon failed with {completed_process.returncode}: {stderr.strip()}"
             )
         report = json.loads(report_file(output).read_text(encoding="utf-8"))
         result = report.get("result", {})
@@ -108,10 +133,11 @@ def run_once(binary: Path, target: str) -> dict[str, Any]:
         ):
             raise RuntimeError(
                 "remote fixture did not exercise object acquisition; "
-                f"stdout={completed.stdout[-500:]!r} stderr={completed.stderr[-500:]!r}"
+                f"stdout={stdout[-500:]!r} stderr={stderr[-500:]!r}"
             )
         return {
             "elapsed_s": elapsed,
+            "peak_rss_bytes": peak_rss_bytes,
             "findings": len(result.get("findings", [])),
             "objects": {
                 "pack": source_stats.get("pack", 0),
@@ -161,6 +187,11 @@ def main() -> None:
             server.server_close()
 
     elapsed_values = [sample["elapsed_s"] for sample in samples]
+    peak_rss_values = [
+        sample["peak_rss_bytes"]
+        for sample in samples
+        if sample["peak_rss_bytes"] is not None
+    ]
     median_elapsed = statistics.median(elapsed_values)
     print(
         json.dumps(
@@ -184,6 +215,7 @@ def main() -> None:
                     "min_elapsed_s": min(elapsed_values),
                     "max_elapsed_s": max(elapsed_values),
                     "elapsed_variance_s2": statistics.pvariance(elapsed_values),
+                    "peak_rss_bytes": max(peak_rss_values) if peak_rss_values else None,
                     "relative_spread": (
                         (max(elapsed_values) - min(elapsed_values)) / median_elapsed
                         if median_elapsed
