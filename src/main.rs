@@ -277,24 +277,29 @@ async fn run_url_target(context: UrlRunContext<'_>, url: String, fuzz: bool) -> 
         }
     }
 
-    let scan_config = config::ScanConfig::from_values(
-        args.workers,
-        args.mem_limit,
-        args.max_findings,
-        args.stop_on_critical,
-        args.max_blob_size,
-        args.max_history,
-        args.entropy_threshold,
-        args.live || args.pipe,
-        !args.no_adaptive,
-        args.resume,
-        args.checkpoint_interval,
-        args.exhaustive,
-        !args.no_scan_binaries,
-        !args.no_verify_objects,
-        !args.no_cache,
-        args.cache_ttl,
-    );
+    let scan_config = config::ScanConfigInput {
+        workers: args.workers,
+        mem_limit: args.mem_limit,
+        max_findings: args.max_findings,
+        stop_on_critical: args.stop_on_critical,
+        max_blob_size: args.max_blob_size,
+        max_history: args.max_history,
+        entropy_threshold: args.entropy_threshold,
+        live: args.live || args.pipe,
+        adaptive_workers: !args.no_adaptive,
+        resume: args.resume,
+        checkpoint_interval: args.checkpoint_interval,
+        exhaustive: args.exhaustive,
+        scan_binaries: !args.no_scan_binaries,
+        verify_objects: !args.no_verify_objects,
+        cache_enabled: !args.no_cache,
+        cache_ttl: args.cache_ttl,
+    }
+    .build()
+    .unwrap_or_else(|error| {
+        eprintln!("  ✘  {}", error);
+        std::process::exit(2);
+    });
     let streamer = build_streamer(
         client.clone(),
         &scan_config,
@@ -2457,31 +2462,6 @@ async fn main() {
     // so the usize fields validate here at start-up instead.
     if let Err(error) = validate_parallel_targets(args.parallel_targets) {
         eprintln!("  ✘  {}", error);
-        std::process::exit(2);
-    }
-    if args.workers == 0 || args.workers > 1000 {
-        eprintln!("  ✘  --workers must be in [1, 1000], got {}", args.workers);
-        std::process::exit(2);
-    }
-    if args.max_blob_size == 0 || args.max_blob_size > 10_240 {
-        eprintln!(
-            "  ✘  --max-blob-size must be in [1, 10240] MB, got {}",
-            args.max_blob_size
-        );
-        std::process::exit(2);
-    }
-    if args.max_history > 1_000_000 {
-        eprintln!(
-            "  ✘  --max-history must be in [0, 1_000_000], got {}",
-            args.max_history
-        );
-        std::process::exit(2);
-    }
-    if args.checkpoint_interval == 0 || args.checkpoint_interval > 1_000_000 {
-        eprintln!(
-            "  ✘  --checkpoint-interval must be in [1, 1_000_000], got {}",
-            args.checkpoint_interval
-        );
         std::process::exit(2);
     }
     if let Err(error) = validate_runtime_numeric_options(&args) {
