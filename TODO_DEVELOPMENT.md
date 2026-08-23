@@ -122,7 +122,7 @@ Pisahkan batas ukuran response acquisition dari batas ukuran scan dan gunakan st
 
 ### Item baru P1-12 — Archive format and invalid-reason depth
 
-**Status:** `IN PROGRESS — typed archive issue reasons, traversal rejection, and report propagation implemented; tar/compressed-tar support and protected delivery pending`
+**Status:** `DONE — merged via PR #39 (`0e2ba2ec`); post-merge CI `32673344503` succeeded`
 **Dependensi:** P1-05, P1-08
 **Area:** `src/binary_scanner.rs`, `src/content_scanner.rs`, archive corpus tests
 
@@ -132,17 +132,21 @@ Tambahkan typed invalid-archive reason dan perluas parity ke tar/compressed-tar 
 
 ### Implementasi P1-12 (sub-bagian typed archive telemetry)
 
-Binary scanner sekarang menghasilkan `archive_invalid_reasons` additive untuk malformed, traversal, depth, entry count, entry size, expansion size, dan GZIP output/ratio limits. ZIP path traversal ditolak sebelum ekstraksi; raw printable fallback tetap berjalan untuk GZIP dan unsupported binary, dan peta alasan diteruskan melalui local, forge, URL WorkerResult, serta checkpoint schema dengan default backward-compatible. Tar/compressed-tar parity dan unsupported-format classification menjadi sub-bagian lanjutan pada increment ini.
+Binary scanner sekarang menghasilkan `archive_invalid_reasons` additive untuk malformed, traversal, depth, entry count, entry size, expansion size, dan GZIP output/ratio limits. ZIP path traversal ditolak sebelum ekstraksi; raw printable fallback tetap berjalan untuk GZIP dan unsupported binary, dan peta alasan diteruskan melalui local, forge, URL WorkerResult, serta checkpoint schema dengan default backward-compatible. PR #39 (`0e2ba2ec`) dan post-merge CI `32673344503` selesai sukses. Tar/compressed-tar tetap diklasifikasikan sebagai unsupported binary dengan printable fallback; parser tar native menjadi pekerjaan lanjutan bila dependency/resource model telah ditetapkan.
 
 ### Item baru P2-08 — Report-format telemetry parity
 
-**Status:** `TODO`
+**Status:** `IN PROGRESS — additive envelopes implemented for SARIF, NDJSON, CSV, Markdown, and HTML; protected delivery pending`
 **Dependensi:** P3-04, P1-05
 **Area:** `src/reporter.rs`, schema tests, documentation
 
 Tambahkan additive scan-level metadata ke SARIF run properties dan format lain melalui contract yang tidak merusak consumer finding-only. NDJSON membutuhkan reserved metadata record; CSV membutuhkan envelope/sidecar yang terdokumentasi; Markdown/HTML mendapat summary operasional.
 
 **Acceptance criteria:** Existing finding fields dan row consumers tetap valid; telemetry memuat scope, capability, source, skip/failure/truncation, cache/retry/resource summary; schema tests mencakup setiap format; tidak ada secret plaintext tambahan.
+
+### Implementasi P2-08 (sub-bagian additive report envelopes)
+
+SARIF menyimpan telemetry pada `runs[0].properties.gitrecon`; NDJSON menambahkan reserved metadata record pertama; CSV mempertahankan header/row lama dan menulis `<report>.meta.json`; Markdown dan HTML menampilkan section metadata yang escaped. Envelope menggunakan schema version dan hanya memuat operational scope/counter, bukan token atau finding match. Regression lintas lima format telah ditambahkan; PR dan post-merge CI masih menunggu delivery increment ini.
 
 ### Item baru P2-09 — Stage-aware resource and scheduler telemetry
 
