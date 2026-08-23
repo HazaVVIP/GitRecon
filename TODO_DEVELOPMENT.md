@@ -1,7 +1,7 @@
 # GitRecon Development TODO
 
 **Versi backlog:** setelah audit penuh v3.2.6
-**Status baseline:** `origin/main` dan local `main` sinkron pada `e3c9b46b`; worktree bersih dan post-merge CI green
+**Status baseline:** `origin/main` dan local `main` sinkron pada `0c3f04c1`; worktree bersih dan post-merge CI green
 **Prioritas utama:** provider correctness dan coverage integrity, feature parity lintas mode, offensive coverage, performance/resource control, lalu maintainability dan release governance
 
 Dokumen ini adalah backlog development resmi GitRecon. Item dikerjakan secara inkremental, satu paket perubahan pada satu waktu, dan setiap paket wajib mempertahankan kualitas build, test, serta perilaku offensive scanning yang sudah ada. `--exhaustive`, binary scanning default, object verification default, dan partial-exposure opt-in tidak boleh berubah secara tidak sengaja. Tidak boleh ada pagination loss, branch mis-selection, provider misattribution, atau silent filtering baru.
@@ -40,8 +40,8 @@ Audit penuh terhadap `origin/main` mengubah urutan kerja berikutnya. Implementas
 
 | Gelombang baru | Fokus | Item utama | Status |
 |---|---|---|---|
-| A | Provider correctness dan coverage integrity | Azure project scoping, branch/ref, auth; GitLab nested namespace dan tree pagination | TODO |
-| B | Cross-mode operator control | False-positive keyword parity; provider-aware token target; repository/project selectors | TODO |
+| A | Provider correctness dan coverage integrity | Azure project scoping, branch/ref, auth; GitLab nested namespace dan tree pagination | DONE |
+| B | Cross-mode operator control | False-positive keyword parity; provider-aware token target; repository/project selectors | IN PROGRESS |
 | C | Acquisition dan content depth | Streaming size enforcement; typed invalid archive reasons; tar/compressed-tar; archive corpus | TODO |
 | D | History dan report parity | Provider history capability; deleted-content coverage; SARIF/NDJSON/CSV/Markdown/HTML metadata | TODO |
 | E | Performance dan resource control | Stage-aware budget; queue/concurrency telemetry; cold/warm cache benchmark; retry/transport consistency | TODO |
@@ -53,7 +53,7 @@ Setiap item baru wajib menyatakan scope provider/mode yang benar-benar diuji, te
 
 ### Item baru P0-06 — Azure DevOps provider correctness
 
-**Status:** `IN PROGRESS` — project scoping, continuation pagination, branch/ref propagation, and whoami error boundary implemented locally
+**Status:** `DONE` — merged via PR #33 (`b96fc0fd`); post-merge CI run `32665876034` passed
 **Dependensi:** P0-04, P1-06
 **Area:** `src/azure_api.rs`, `src/forge_scan.rs`, provider mock tests
 
@@ -61,13 +61,13 @@ Perbaiki enumerasi repository agar benar-benar project-scoped, teruskan branch/r
 
 ### Implementasi P0-06 (sub-bagian Azure boundary correctness)
 
-Azure repository listing sekarang menggunakan project-scoped API base dan mengikuti `x-ms-continuationtoken` tanpa menggabungkan repository dari project lain. Azure Items traversal meneruskan branch melalui `versionDescriptor.version` dan `versionDescriptor.versionType=branch` pada setiap directory request serta meng-encode path/query secara eksplisit. `whoami` hanya mengizinkan synthetic identity untuk 404 pada endpoint profile di Azure DevOps Server/on-premise; 401/403 dan status lain menjadi error, sedangkan on-premise validation juga menolak status non-2xx. Regression fixtures mencakup project path, continuation page, branch name dengan slash, identity success, dan 401/403 failure. Full milestone masih membutuhkan provider-matrix coverage dan final full quality gates.
+Azure repository listing sekarang menggunakan project-scoped API base dan mengikuti `x-ms-continuationtoken` tanpa menggabungkan repository dari project lain. Azure Items traversal meneruskan branch melalui `versionDescriptor.version` dan `versionDescriptor.versionType=branch` pada setiap directory request serta meng-encode path/query secara eksplisit. `whoami` hanya mengizinkan synthetic identity untuk 404 pada endpoint profile di Azure DevOps Server/on-premise; 401/403 dan status lain menjadi error, sedangkan on-premise validation juga menolak status non-2xx. Regression fixtures mencakup project path, continuation page, branch name dengan slash, identity success, dan 401/403 failure. P0-06 selesai pada boundary correctness yang ditetapkan; provider contract matrix lintas provider tetap menjadi pekerjaan P3-08.
 
 **Acceptance criteria:** Dua project dengan repository berbeda tidak saling tertukar; dua branch menghasilkan tree berbeda sesuai ref; 401/403 pada authenticate maupun whoami menjadi authentication failure typed; fallback 404 hanya berlaku pada on-premise contract yang terdokumentasi; fixture pagination dan empty-project cases tercakup; tidak ada repository yang hilang tanpa outcome.
 
 ### Item baru P0-07 — GitLab namespace dan tree completeness
 
-**Status:** `IN PROGRESS` — nested namespace, per-directory pagination, and continuation fallback implemented locally
+**Status:** `DONE` — merged via PR #34 (`f012e0df`); post-merge CI run `32667495205` passed
 **Dependensi:** P0-04, P1-06
 **Area:** `src/gitlab_api.rs`, provider mock tests
 
@@ -75,13 +75,13 @@ Pertahankan full nested namespace GitLab saat membentuk project identity dan iku
 
 ### Implementasi P0-07 (sub-bagian namespace dan tree completeness)
 
-GitLab project parsing sekarang memisahkan namespace dari nama repository pada slash terakhir, sehingga `group/subgroup/repository` tetap dapat digunakan sebagai project path penuh. Directory tree requests meneruskan branch yang di-encode, meminta `per_page=100`, dan mengikuti `x-next-page`; Link header `rel="next"` menjadi fallback bila tersedia. Stale, malformed, atau non-advancing continuation tidak menyebabkan loop. Regression fixtures mencakup nested namespace, dua halaman tree, encoded project path, branch query, provider header, Link fallback, serta stale/malformed page values. History path-based retrieval dan batas deleted-content tetap tidak diubah. Final P0-07 masih membutuhkan full quality gates dan review protected PR.
+GitLab project parsing sekarang memisahkan namespace dari nama repository pada slash terakhir, sehingga `group/subgroup/repository` tetap dapat digunakan sebagai project path penuh. Directory tree requests meneruskan branch yang di-encode, meminta `per_page=100`, dan mengikuti `x-next-page`; Link header `rel="next"` menjadi fallback bila tersedia. Stale, malformed, atau non-advancing continuation tidak menyebabkan loop. Regression fixtures mencakup nested namespace, dua halaman tree, encoded project path, branch query, provider header, Link fallback, serta stale/malformed page values. History path-based retrieval dan batas deleted-content tetap tidak diubah. P0-07 selesai melalui PR #34 (`f012e0df`) dengan post-merge CI run `32667495205` yang sukses.
 
 **Acceptance criteria:** `group/subgroup/repository` dapat di-address dengan benar; directory yang melampaui satu halaman seluruhnya dipindai; empty page dan malformed pagination header tidak menyebabkan loop; history deleted-path coverage tetap dibedakan dari deleted-content scanning.
 
 ### Item baru P1-09 — Cross-mode false-positive policy parity
 
-**Status:** `TODO`
+**Status:** `DONE` — merged via PR #35 (`0c3f04c1`); post-merge CI run `32669132214` passed
 **Dependensi:** P1-01, P2-03
 **Area:** `src/content_scanner.rs`, `src/dir_pipeline.rs`, `src/forge_scan.rs`, `src/main.rs`
 
@@ -89,6 +89,9 @@ Teruskan `--false-positive-keywords` melalui local directory dan forge workspace
 
 **Acceptance criteria:** Fixture yang sama menghasilkan suppression yang sama di URL, local, dan forge snapshot; tanpa keywords default behavior tidak berubah; exhaustive tetap superset normal; binary/archive/custom pattern paths tidak ikut terfilter secara tidak sengaja.
 
+### Implementasi P1-09
+
+`--false-positive-keywords` sekarang diparsing melalui satu helper canonical dan diteruskan ke local directory serta forge snapshot/history melalui immutable scan configuration. URL, local, dan forge memakai fixture sintetis yang sama pada policy normal dan exhaustive; binary/archive paths tetap menerima scanner tanpa filtering keyword text. PR #35 (`0c3f04c1`) dan post-merge CI run `32669132214` selesai sukses dengan 613 unit test Rust lulus.
 ### Item baru P1-10 — Provider-aware token target schema dan selectors
 
 **Status:** `TODO`
