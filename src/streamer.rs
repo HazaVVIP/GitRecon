@@ -5,7 +5,7 @@
 
 use futures::StreamExt;
 use lazy_static::lazy_static;
-use regex::Regex;
+use regex::{Regex, RegexSet};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -91,6 +91,7 @@ struct Pattern {
     id: &'static str,
     sev: &'static str,
     desc: &'static str,
+    source: &'static str,
     regex: Regex,
 }
 
@@ -100,6 +101,7 @@ macro_rules! pat {
             id: $id,
             sev: $sev,
             desc: $desc,
+            source: $rx,
             regex: Regex::new($rx).expect(concat!("bad regex: ", $rx)),
         }
     };
@@ -470,6 +472,11 @@ lazy_static! {
         pat!("ldap_credentials", "HIGH",     "LDAP/LDAPS Credentials",
              r"(?i)ldaps?://[^:@\s]+:[^@\s]{8,}@[^\s]+"),
     ];
+
+    // One automaton quickly identifies candidate patterns before the exact regex
+    // captures run. The full Pattern registry remains authoritative and ordered.
+    static ref PATTERN_SET: RegexSet = RegexSet::new(PATTERNS.iter().map(|pattern| pattern.source))
+        .expect("static detector pattern set must compile");
 
     static ref PLACEHOLDERS: Vec<&'static str> = vec![
         "your_", "YOUR_", "your-", "YOUR-",
@@ -2236,7 +2243,8 @@ fn scan_content_with_policy(
         let mut line_has_finding = false;
 
         // Static patterns
-        for pat in PATTERNS.iter() {
+        for pattern_index in PATTERN_SET.matches(line).iter() {
+            let pat = &PATTERNS[pattern_index];
             for m in pat.regex.find_iter(line) {
                 let val = m.as_str().to_string();
                 if !policy.include_placeholders && is_placeholder(&val) {
@@ -2808,7 +2816,8 @@ fn scan_minified_segments(
         if seg.is_empty() || seg.len() > 2000 || seg.len() < 10 {
             continue;
         }
-        for pat in PATTERNS.iter() {
+        for pattern_index in PATTERN_SET.matches(seg).iter() {
+            let pat = &PATTERNS[pattern_index];
             for m in pat.regex.find_iter(seg) {
                 let val = m.as_str().to_string();
                 if is_placeholder(&val) {

@@ -327,6 +327,10 @@ Pindahkan domain logic ke `src/lib.rs` atau core crate internal. `main.rs` harus
 
 Acquisition, cancellation re-check, typed object-source mapping, dan dispatch ke content processor dipindahkan ke `src/object_worker.rs`. Adaptive concurrency controller dan dynamic semaphore gate dipindahkan ke `src/scan_scheduler.rs`; aggregate `State` serta checkpoint/restore bookkeeping dipindahkan ke `src/scan_accumulator.rs`. `streamer` mempertahankan compatibility re-export dan scheduler call contract. Compatibility seam untuk `WorkerResult`, `SkipReason`, `FailureKind`, `process_blob_content`, dan `attach_source` menjaga checkpoint, reporting, serta semantics `--exhaustive` tetap tidak berubah. Pemisahan checkpoint adapter dan content detector masih menjadi pekerjaan berikutnya setelah boundary ownership memiliki coverage tersendiri.
 
+### Implementasi P2-02 (sub-bagian static pattern dispatch performance)
+
+Static detector registry kini memiliki `RegexSet` selector terkompilasi yang menentukan kandidat pattern sebelum exact regex capture berjalan pada setiap baris teks dan segmen minified. Seluruh `Pattern` tetap berada dalam registry yang sama dan exact regex tetap authoritative; selector ini hanya mengurangi evaluasi regex yang pasti tidak relevan, bukan memfilter hasil atau mengubah urutan pattern. Regression suite streamer tetap lulus lengkap, termasuk exhaustive-superset dan detector-specific coverage. Pada fixture lokal deterministic yang sama (80 files × 300 lines, 3 repetitions), median normal scan berubah dari `0.7347s` pada pre-RegexSet baseline menjadi `0.1590s` pada optimized build (sekitar 78.4% lebih rendah), sedangkan median exhaustive berubah dari `0.7226s` menjadi `0.1590s` (sekitar 78.0% lebih rendah). Angka tersebut hanya perbandingan same-host dan bukan klaim lintas mesin.
+
 Ekstrak domain berikut secara bertahap: `stream_types`, `scan_scheduler`, `content_scanner`, `scan_accumulator`, `stream_checkpoint`, `object_worker`, dan `scanner_factory`. Di `main.rs`, pisahkan command/flow untuk URL, local, targets, dan provider token.
 
 ### Acceptance criteria
