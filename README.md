@@ -76,7 +76,7 @@ gitrecon --dir ./project --no-scan-binaries
 # Verify an authenticated forge token and scan the current snapshot
 gitrecon --token "$GITHUB_TOKEN" --scan-scope snapshot --quiet --format sarif --output ./results
 
-# Scan bounded GitHub history; other providers return typed unsupported_capability
+# Scan bounded GitHub or GitLab history; unsupported providers return typed unsupported_capability
 gitrecon --token "$GITHUB_TOKEN" --scan-scope history --max-history 200 --quiet --format json --output ./results
 
 # Scan targets concurrently while preserving deterministic aggregate ordering
@@ -154,7 +154,7 @@ Replace the example quantifier with a valid regular-expression bound appropriate
 | `--false-positive-keywords LIST` | built-in list | Extend context keywords used for false-positive scoring |
 | `--max-blob-size MB` | `4` | Maximum individual blob or local file size |
 | `--max-history COMMITS` | `500` | Commit traversal depth; `0` uses the bounded provider maximum in history mode |
-| `--scan-scope SCOPE` | `snapshot` | Forge scope: snapshot scans the current branch; GitHub history is bounded, other providers report `unsupported_capability` |
+| `--scan-scope SCOPE` | `snapshot` | Forge scope: snapshot scans the current branch; GitHub and GitLab history are bounded, other providers report `unsupported_capability` |
 | `--entropy-threshold FLOAT` | `4.5` | High-entropy candidate threshold |
 | `--max-timeout SEC` | `60` | Maximum adaptive request timeout |
 | `--rate N` | — | Global request rate limit; `0` means unlimited and values must be finite |
@@ -169,6 +169,8 @@ Replace the example quantifier with a valid regular-expression bound appropriate
 | `--insecure` | disabled | Disable TLS verification; use only in controlled environments |
 
 Run `gitrecon --help` for the complete option list, including forge-specific URLs, proxy rotation, user-agent pools, rate limiting, checkpoint intervals, partial-exposure reporting, themes, and webhook controls.
+
+History mode is bounded by `--max-history` and keeps `snapshot` as the default. GitHub retrieves changed-file blob SHAs and can scan deleted blobs when the API exposes them. GitLab retrieves changed paths and fetches current content at each commit ref; deleted paths are counted and reported as history coverage, but deleted content is not scanned when GitLab provides no historical blob address. Other forge providers return typed `unsupported_capability` rather than silently producing an empty history result.
 
 ## Outputs
 

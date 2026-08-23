@@ -1155,7 +1155,9 @@ async fn scan_selected_forge_repositories(
         selected_repos,
         &workspace_lifecycle,
         scan_config,
-        |forge, repo, entry, _head_sha| async move { forge.get_blob_entry(&repo, &entry).await },
+        |forge, repo, entry, head_sha| async move {
+            forge.get_blob_entry_at(&repo, &entry, &head_sha).await
+        },
         started_at,
     )
     .await

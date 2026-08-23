@@ -5,7 +5,10 @@
 //! All requests are authenticated with `PRIVATE-TOKEN: <PAT>` and target
 //! `https://gitlab.com/api/v4` or self-hosted instances via --gitlab-url.
 
-use crate::forge::{EnumScope, Forge, Platform, RateLimitInfo, Repository, TreeEntry};
+use crate::forge::{
+    EnumScope, Forge, ForgeCapabilities, ForgeHistory, HistoryChangeStatus, HistoryEntry, Platform,
+    RateLimitInfo, Repository, TreeEntry,
+};
 use crate::http_client::{HttpClient, HttpConfig};
 use anyhow::Context;
 use async_trait::async_trait;
@@ -234,6 +237,43 @@ impl Forge for GitLabForgeClient {
 
     async fn get_blob(&self, repo: &Repository, sha: &str) -> anyhow::Result<Vec<u8>> {
         get_blob_content(&self.client, &self.api_base, &repo.owner, &repo.name, sha).await
+    }
+
+    async fn get_blob_entry_at(
+        &self,
+        repo: &Repository,
+        entry: &TreeEntry,
+        revision: &str,
+    ) -> anyhow::Result<Vec<u8>> {
+        get_file_content_at_ref(
+            &self.client,
+            &self.api_base,
+            &repo.owner,
+            &repo.name,
+            &entry.path,
+            revision,
+        )
+        .await
+    }
+
+    async fn get_history(
+        &self,
+        repo: &Repository,
+        branch: &str,
+        max_commits: usize,
+    ) -> anyhow::Result<ForgeHistory> {
+        get_history_at(self, &repo.owner, &repo.name, branch, max_commits).await
+    }
+
+    fn capabilities(&self) -> ForgeCapabilities {
+        ForgeCapabilities {
+            snapshot: true,
+            history: true,
+            branches: false,
+            tags: false,
+            commits: true,
+            deleted_blobs: false,
+        }
     }
 
     fn rate_limit_remaining(&self) -> Option<(u32, Duration)> {
@@ -528,6 +568,149 @@ pub async fn get_head_sha(
     sha.ok_or_else(|| anyhow::anyhow!("Missing commit id in response"))
 }
 
+const MAX_GITLAB_HISTORY_COMMITS: usize = 5_000;
+
+/// Fetch bounded commit history and changed paths from GitLab.
+async fn get_history_at(
+    client: &GitLabForgeClient,
+    owner: &str,
+    repo: &str,
+    branch: &str,
+    max_commits: usize,
+) -> anyhow::Result<ForgeHistory> {
+    let requested_limit = if max_commits == 0 {
+        MAX_GITLAB_HISTORY_COMMITS
+    } else {
+        max_commits.min(MAX_GITLAB_HISTORY_COMMITS)
+    };
+    let project_encoded = GitLabForgeClient::encode_path(&format!("{}/{}", owner, repo));
+    let branch_encoded = GitLabForgeClient::encode_path(branch);
+    let mut page = 1usize;
+    let mut history = ForgeHistory::default();
+
+    while history.commits_scanned < requested_limit {
+        let url = format!(
+            "{}/projects/{}/repository/commits?ref_name={}&per_page=100&page={}",
+            client.api_base, project_encoded, branch_encoded, page
+        );
+        let response = client.get_with_rate_limit(&url).await?;
+        if !response.ok() {
+            anyhow::bail!(
+                "GET history {} returned HTTP {}",
+                crate::validation::redact_url(&url),
+                response.status
+            );
+        }
+        let commits = serde_json::from_slice::<serde_json::Value>(&response.body)?;
+        let Some(commits) = commits.as_array() else {
+            anyhow::bail!("Expected JSON array from GitLab history endpoint");
+        };
+        if commits.is_empty() {
+            break;
+        }
+
+        for commit in commits {
+            if history.commits_scanned >= requested_limit {
+                history.truncated = true;
+                break;
+            }
+            let Some(commit_sha) = commit["id"].as_str() else {
+                continue;
+            };
+            let commit_sha_encoded = GitLabForgeClient::encode_path(commit_sha);
+            let detail_url = format!(
+                "{}/projects/{}/repository/commits/{}/diff",
+                client.api_base, project_encoded, commit_sha_encoded
+            );
+            let detail_response = client.get_with_rate_limit(&detail_url).await?;
+            if !detail_response.ok() {
+                anyhow::bail!(
+                    "GET commit diff {} returned HTTP {}",
+                    crate::validation::redact_url(&detail_url),
+                    detail_response.status
+                );
+            }
+            let diffs = serde_json::from_slice::<serde_json::Value>(&detail_response.body)?;
+            if let Some(files) = diffs.as_array() {
+                for file in files {
+                    let old_path = file["old_path"].as_str();
+                    let new_path = file["new_path"].as_str();
+                    let path = if file["deleted_file"].as_bool().unwrap_or(false) {
+                        old_path.or(new_path)
+                    } else {
+                        new_path.or(old_path)
+                    };
+                    let Some(path) = path else { continue };
+                    let status = if file["deleted_file"].as_bool().unwrap_or(false) {
+                        HistoryChangeStatus::Removed
+                    } else if file["renamed_file"].as_bool().unwrap_or(false) {
+                        HistoryChangeStatus::Renamed
+                    } else if file["new_file"].as_bool().unwrap_or(false) {
+                        HistoryChangeStatus::Added
+                    } else {
+                        HistoryChangeStatus::Modified
+                    };
+                    history.entries.push(HistoryEntry {
+                        commit_sha: commit_sha.to_string(),
+                        path: path.to_string(),
+                        status,
+                        blob_sha: None,
+                        previous_path: if file["renamed_file"].as_bool().unwrap_or(false) {
+                            old_path.map(str::to_string)
+                        } else {
+                            None
+                        },
+                        size: None,
+                    });
+                }
+            }
+            history.commits_scanned += 1;
+        }
+        if history.truncated {
+            break;
+        }
+        let next_page = response
+            .headers
+            .get("x-next-page")
+            .and_then(|value| value.parse::<usize>().ok());
+        match next_page {
+            Some(next) if next > page => page = next,
+            _ => break,
+        }
+    }
+    if max_commits > MAX_GITLAB_HISTORY_COMMITS {
+        history.truncated = true;
+    }
+    Ok(history)
+}
+
+/// Fetch a file’s raw content at an explicit GitLab branch or commit ref.
+async fn get_file_content_at_ref(
+    client: &HttpClient,
+    api_base: &str,
+    owner: &str,
+    repo: &str,
+    path: &str,
+    revision: &str,
+) -> anyhow::Result<Vec<u8>> {
+    let project_encoded = GitLabForgeClient::encode_path(&format!("{}/{}", owner, repo));
+    let path_encoded = GitLabForgeClient::encode_path(path);
+    let ref_encoded = GitLabForgeClient::encode_path(revision);
+    let url = format!(
+        "{}/projects/{}/repository/files/{}/raw?ref={}",
+        api_base, project_encoded, path_encoded, ref_encoded
+    );
+    let resp = client.get(&url).await;
+    if !resp.ok() {
+        anyhow::bail!(
+            "GET file {} returned HTTP {}",
+            crate::validation::redact_url(&url),
+            resp.status
+        );
+    }
+    Ok(resp.body.to_vec())
+}
+
 /// Fetch the raw (decoded) content of a blob by its SHA.
 ///
 /// Uses `GET /projects/:id/repository/files/:file_path/raw?ref=sha`.
@@ -699,6 +882,95 @@ mod tests {
             .unwrap();
         assert_eq!(content, b"fixture-value");
     }
+    #[tokio::test]
+    async fn mock_server_contract_scans_bounded_history_and_fetches_revision_content() {
+        use crate::forge::Forge;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let base_url = format!("http://{address}");
+        tokio::spawn(async move {
+            for _ in 0..4 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0u8; 2048];
+                let read = socket.read(&mut request).await.unwrap();
+                let request_line = String::from_utf8_lossy(&request[..read]);
+                assert!(request_line.starts_with("GET /projects/"));
+                let (content_type, body) = if request_line.contains("/repository/commits?") {
+                    (
+                        "application/json",
+                        r#"[{"id":"commit-one"},{"id":"commit-two"}]"#,
+                    )
+                } else if request_line.contains("commit-one/diff") {
+                    (
+                        "application/json",
+                        r#"[{"old_path":"config.env","new_path":"config.env","new_file":true,"renamed_file":false,"deleted_file":false}]"#,
+                    )
+                } else if request_line.contains("commit-two/diff") {
+                    (
+                        "application/json",
+                        r#"[{"old_path":"old.txt","new_path":"new.txt","new_file":false,"renamed_file":true,"deleted_file":false}]"#,
+                    )
+                } else if request_line.contains("/repository/files/") {
+                    ("text/plain", "fixture-history-content")
+                } else {
+                    panic!("unexpected GitLab history route: {request_line}");
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+
+        let (http_client, api_base) =
+            build_gitlab_client(HttpConfig::default(), "synthetic-token", Some(&base_url)).unwrap();
+        let forge = GitLabForgeClient::new(http_client, api_base);
+        assert!(forge.capabilities().history);
+        assert!(!forge.capabilities().deleted_blobs);
+
+        let history = get_history_at(&forge, "fixture", "repo", "main", 1)
+            .await
+            .unwrap();
+        assert_eq!(history.commits_scanned, 1);
+        assert!(history.truncated);
+        assert_eq!(history.entries.len(), 1);
+        assert_eq!(history.entries[0].commit_sha, "commit-one");
+        assert_eq!(history.entries[0].status, HistoryChangeStatus::Added);
+
+        let entry = TreeEntry {
+            path: "config.env".to_string(),
+            obj_type: "blob".to_string(),
+            sha: "unused-sha".to_string(),
+            size: None,
+            mode: None,
+        };
+        let content = forge
+            .get_blob_entry_at(
+                &Repository {
+                    full_name: "fixture/repo".to_string(),
+                    owner: "fixture".to_string(),
+                    name: "repo".to_string(),
+                    private: true,
+                    default_branch: "main".to_string(),
+                    clone_url: "https://gitlab.example/fixture/repo.git".to_string(),
+                    platform: Platform::GitLab,
+                    stars: None,
+                    forks: None,
+                    description: None,
+                    updated_at: None,
+                },
+                &entry,
+                "commit-one",
+            )
+            .await
+            .unwrap();
+        assert_eq!(content, b"fixture-history-content");
+    }
+
     #[tokio::test]
     async fn mock_server_contract_follows_gitlab_group_pagination() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};

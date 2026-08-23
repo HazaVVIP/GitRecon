@@ -566,10 +566,13 @@ async fn scan_history_repositories<F, Fut>(
             if is_deleted {
                 config.outcome_stats.lock().await.history_deleted_entries += 1;
             }
-            let Some(blob_sha) = entry.blob_sha.clone() else {
-                continue;
+            let view_key = match entry.blob_sha.as_ref() {
+                Some(blob_sha) => format!("{}:{}", entry.path, blob_sha),
+                None if is_deleted => continue,
+                // GitLab's diff API provides changed paths but not blob IDs. A
+                // commit/path key preserves every revision view for those entries.
+                None => format!("{}:commit:{}", entry.path, entry.commit_sha),
             };
-            let view_key = format!("{}:{}", entry.path, blob_sha);
             if !seen_views.insert(view_key) {
                 config
                     .outcome_stats
@@ -581,7 +584,13 @@ async fn scan_history_repositories<F, Fut>(
             let tree_entry = TreeEntry {
                 path: entry.path.clone(),
                 obj_type: "blob".to_string(),
-                sha: blob_sha,
+                // Path-based providers ignore this synthetic value in their
+                // get_blob_entry_at override; SHA-addressable providers always
+                // supply blob_sha above.
+                sha: entry
+                    .blob_sha
+                    .clone()
+                    .unwrap_or_else(|| format!("history:{}", entry.commit_sha)),
                 size: entry.size,
                 mode: None,
             };
@@ -970,6 +979,102 @@ mod tests {
     struct EmptyForge;
     struct ParityForge;
     struct HistoryForge;
+    struct PathHistoryForge;
+
+    #[async_trait::async_trait]
+    impl Forge for PathHistoryForge {
+        async fn authenticate(&mut self, _token: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn enumerate_repos(&self, _scope: EnumScope) -> anyhow::Result<Vec<Repository>> {
+            Ok(vec![fixture_repository()])
+        }
+
+        async fn get_tree(
+            &self,
+            _repo: &Repository,
+            _branch: &str,
+        ) -> anyhow::Result<Vec<TreeEntry>> {
+            Ok(Vec::new())
+        }
+
+        async fn get_blob(&self, _repo: &Repository, sha: &str) -> anyhow::Result<Vec<u8>> {
+            anyhow::bail!("path-based history mock must use revision fetch: {sha}")
+        }
+
+        async fn get_blob_entry_at(
+            &self,
+            _repo: &Repository,
+            entry: &TreeEntry,
+            revision: &str,
+        ) -> anyhow::Result<Vec<u8>> {
+            anyhow::ensure!(entry.path == "config.txt", "unexpected path");
+            anyhow::ensure!(revision.starts_with("commit-"), "unexpected revision");
+            Ok(b"CUSTOM_ABCD1234".to_vec())
+        }
+
+        async fn get_history(
+            &self,
+            _repo: &Repository,
+            _branch: &str,
+            max_commits: usize,
+        ) -> anyhow::Result<ForgeHistory> {
+            anyhow::ensure!(max_commits == 2, "unexpected history bound");
+            Ok(ForgeHistory {
+                commits_scanned: 2,
+                entries: vec![
+                    HistoryEntry {
+                        commit_sha: "commit-one".to_string(),
+                        path: "config.txt".to_string(),
+                        status: HistoryChangeStatus::Modified,
+                        blob_sha: None,
+                        previous_path: None,
+                        size: None,
+                    },
+                    HistoryEntry {
+                        commit_sha: "commit-two".to_string(),
+                        path: "config.txt".to_string(),
+                        status: HistoryChangeStatus::Modified,
+                        blob_sha: None,
+                        previous_path: None,
+                        size: None,
+                    },
+                ],
+                truncated: false,
+            })
+        }
+
+        fn capabilities(&self) -> ForgeCapabilities {
+            ForgeCapabilities {
+                snapshot: true,
+                history: true,
+                branches: false,
+                tags: false,
+                commits: true,
+                deleted_blobs: false,
+            }
+        }
+
+        fn rate_limit_remaining(&self) -> Option<(u32, std::time::Duration)> {
+            Some((999, std::time::Duration::from_secs(30)))
+        }
+
+        fn platform(&self) -> Platform {
+            Platform::GitLab
+        }
+
+        async fn get_head_sha(&self, _repo: &Repository, _branch: &str) -> anyhow::Result<String> {
+            Ok("path-history-head".to_string())
+        }
+
+        async fn whoami(&self) -> anyhow::Result<(String, String)> {
+            Ok((
+                "path-history-user".to_string(),
+                "Path History User".to_string(),
+            ))
+        }
+    }
 
     #[async_trait::async_trait]
     impl Forge for HistoryForge {
@@ -1333,6 +1438,73 @@ mod tests {
         assert_eq!(result.outcome_stats.history_entries_deduplicated, 1);
         assert_eq!(result.outcome_stats.history_deleted_entries, 1);
         assert!(result.outcome_stats.history_truncated);
+        assert_eq!(result.outcome_stats.unsupported_capability, None);
+    }
+
+    #[tokio::test]
+    async fn history_scope_scans_path_only_provider_entries_at_each_revision() {
+        let output = tempfile::tempdir().expect("create output directory");
+        let workspace = WorkspaceLifecycle::new(
+            output.path(),
+            "path-history-mock",
+            false,
+            "gitrecon_path_history_mock_scan",
+        );
+        let all_findings = Arc::new(Mutex::new(Vec::new()));
+        let outcome_stats = Arc::new(Mutex::new(ScanOutcomeStats::default()));
+        let result = run_repository_scan_loop(
+            Arc::new(PathHistoryForge),
+            &[fixture_repository()],
+            &workspace,
+            FileScanConfig {
+                workspace: PathBuf::new(),
+                repository_name: String::new(),
+                scan_scope: ForgeScanScope::History,
+                max_history: 2,
+                max_blob_bytes: 1024,
+                workers: 1,
+                scan_binaries: true,
+                exhaustive: true,
+                entropy_threshold: 4.5,
+                live: false,
+                pipe: false,
+                verbose: false,
+                max_findings: 0,
+                stop_on_critical: false,
+                extra_patterns: Arc::new(vec![DynPattern {
+                    id: "custom_path_history".to_string(),
+                    sev: "CRITICAL".to_string(),
+                    desc: "Custom path history token".to_string(),
+                    regex: regex::Regex::new(r"CUSTOM_[A-Z0-9]{8}").unwrap(),
+                }]),
+                stop_flag: Arc::new(AtomicBool::new(false)),
+                all_findings: all_findings.clone(),
+                tech_stack_set: Arc::new(Mutex::new(HashSet::new())),
+                blobs_scanned: Arc::new(AtomicUsize::new(0)),
+                blobs_failed: Arc::new(AtomicUsize::new(0)),
+                bytes_scanned: Arc::new(AtomicUsize::new(0)),
+                outcome_stats,
+            },
+            |forge, repo, entry, revision| async move {
+                forge.get_blob_entry_at(&repo, &entry, &revision).await
+            },
+            Instant::now(),
+        )
+        .await;
+
+        assert_eq!(result.findings.len(), 2);
+        assert_eq!(result.blobs_scanned, 2);
+        assert_eq!(result.blobs_failed, 0);
+        assert!(result
+            .findings
+            .iter()
+            .all(|finding| finding.pattern_id == "custom_path_history"));
+        assert!(result
+            .findings
+            .iter()
+            .all(|finding| finding.commit_sha1.is_some()));
+        assert_eq!(result.outcome_stats.history_entries_scanned, 2);
+        assert_eq!(result.outcome_stats.history_entries_deduplicated, 0);
         assert_eq!(result.outcome_stats.unsupported_capability, None);
     }
 

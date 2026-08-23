@@ -324,6 +324,19 @@ pub trait Forge: Send + Sync {
         self.get_blob(repo, &entry.sha).await
     }
 
+    /// Fetch a path-aware entry at an explicit revision for history scans.
+    ///
+    /// SHA-addressable providers can use the default entry fetcher; providers
+    /// whose raw-file API requires a path and ref may override this method.
+    async fn get_blob_entry_at(
+        &self,
+        repo: &Repository,
+        entry: &TreeEntry,
+        _revision: &str,
+    ) -> anyhow::Result<Vec<u8>> {
+        self.get_blob_entry(repo, entry).await
+    }
+
     /// Retrieve bounded commit history and changed paths.
     ///
     /// Providers without implemented history traversal must return a typed
