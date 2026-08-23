@@ -1523,6 +1523,12 @@ mod tests {
         assert_eq!(value["result"]["rate_limit"]["wait_ms"], 0);
         assert!(value["result"]["outcomes"].is_object());
         assert!(value["result"]["outcomes"]["failed_http_statuses"].is_object());
+        assert_eq!(value["result"]["outcomes"]["resource_peak_bytes"], 0);
+        assert_eq!(
+            value["result"]["outcomes"]["resource_denied_reservations"],
+            0
+        );
+        assert_eq!(value["result"]["outcomes"]["history_truncated"], false);
         let _ = std::fs::remove_file(path);
     }
 
@@ -1537,6 +1543,12 @@ mod tests {
         stream.rate_limit_allowed = 4;
         stream.rate_limit_dropped = 1;
         stream.rate_limit_wait_ms = 25;
+        stream.outcome_stats.resource_peak_bytes = 4096;
+        stream.outcome_stats.resource_denied_reservations = 2;
+        stream.outcome_stats.history_commits_scanned = 3;
+        stream.outcome_stats.history_entries_considered = 7;
+        stream.outcome_stats.history_entries_scanned = 5;
+        stream.outcome_stats.history_truncated = true;
         let path = std::env::temp_dir().join(format!(
             "gitrecon_token_metrics_report_{}.json",
             std::process::id()
@@ -1554,6 +1566,15 @@ mod tests {
         assert_eq!(value["result"]["rate_limit"]["allowed"], 4);
         assert_eq!(value["result"]["rate_limit"]["dropped"], 1);
         assert_eq!(value["result"]["rate_limit"]["wait_ms"], 25);
+        assert_eq!(value["result"]["outcomes"]["resource_peak_bytes"], 4096);
+        assert_eq!(
+            value["result"]["outcomes"]["resource_denied_reservations"],
+            2
+        );
+        assert_eq!(value["result"]["outcomes"]["history_commits_scanned"], 3);
+        assert_eq!(value["result"]["outcomes"]["history_entries_considered"], 7);
+        assert_eq!(value["result"]["outcomes"]["history_entries_scanned"], 5);
+        assert_eq!(value["result"]["outcomes"]["history_truncated"], true);
         let _ = std::fs::remove_file(path);
     }
 
