@@ -10,7 +10,7 @@ pub(crate) enum TargetStatus {
     Partial,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum TargetErrorCode {
     NoGitExposure,
@@ -21,6 +21,22 @@ pub(crate) enum TargetErrorCode {
     UnsupportedCapability,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ErrorStage {
+    Capability,
+    Authentication,
+    Transport,
+    Scan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ErrorMetadata {
+    pub(crate) code: TargetErrorCode,
+    pub(crate) stage: ErrorStage,
+    pub(crate) http_status: Option<u16>,
+    pub(crate) retryable: bool,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct ScanSummary {
     pub(crate) report_path: String,
@@ -28,26 +44,71 @@ pub(crate) struct ScanSummary {
     pub(crate) risk_score: u32,
 }
 
-pub(crate) fn classify_error(error: &str) -> TargetErrorCode {
+pub(crate) fn classify_error_details(error: &str) -> ErrorMetadata {
     let lower = error.to_ascii_lowercase();
-    if lower.contains("unsupported capability") || lower.contains("not available for this provider")
-    {
-        TargetErrorCode::UnsupportedCapability
-    } else if lower.contains("authentication")
+    let http_status = lower
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .windows(2)
+        .find_map(|parts| {
+            (parts[0] == "http")
+                .then(|| parts[1].parse::<u16>().ok())
+                .flatten()
+        });
+    let capability = lower.contains("unsupported capability")
+        || lower.contains("not available for this provider");
+    let authentication = lower.contains("authentication")
         || lower.contains("invalid or expired")
         || lower.contains("access denied")
-        || lower.contains("http 401")
-        || lower.contains("http 403")
-    {
-        TargetErrorCode::AuthenticationFailed
+        || matches!(http_status, Some(401 | 403));
+    let retryable = matches!(http_status, Some(408 | 425 | 429 | 500..=599));
+    let (code, stage) = if capability {
+        (
+            TargetErrorCode::UnsupportedCapability,
+            ErrorStage::Capability,
+        )
+    } else if authentication {
+        (
+            TargetErrorCode::AuthenticationFailed,
+            ErrorStage::Authentication,
+        )
+    } else if http_status.is_some() {
+        (TargetErrorCode::ScanFailed, ErrorStage::Transport)
     } else {
-        TargetErrorCode::ScanFailed
+        (TargetErrorCode::ScanFailed, ErrorStage::Scan)
+    };
+    ErrorMetadata {
+        code,
+        stage,
+        http_status,
+        retryable,
     }
+}
+
+pub(crate) fn classify_error(error: &str) -> TargetErrorCode {
+    classify_error_details(error).code
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_error, TargetErrorCode};
+    use super::{classify_error, classify_error_details, ErrorStage, TargetErrorCode};
+
+    #[test]
+    fn typed_metadata_carries_transport_retryability() {
+        let metadata = classify_error_details("GET blob returned HTTP 503");
+        assert_eq!(metadata.code, TargetErrorCode::ScanFailed);
+        assert_eq!(metadata.stage, ErrorStage::Transport);
+        assert_eq!(metadata.http_status, Some(503));
+        assert!(metadata.retryable);
+
+        let metadata = classify_error_details(
+            "Unsupported capability: history is not available for this provider",
+        );
+        assert_eq!(metadata.code, TargetErrorCode::UnsupportedCapability);
+        assert_eq!(metadata.stage, ErrorStage::Capability);
+        assert_eq!(metadata.http_status, None);
+        assert!(!metadata.retryable);
+    }
 
     #[test]
     fn classifies_authentication_failures() {

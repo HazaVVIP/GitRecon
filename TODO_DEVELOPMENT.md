@@ -376,9 +376,13 @@ Satukan retry, Retry-After, rate-limit header parsing, pagination primitives, UR
 
 ## P2-05 — Perkenalkan typed error taxonomy
 
-**Status:** `TODO`  
+**Status:** `IN PROGRESS`  
 **Dependensi:** P0-04, P2-04  
 **Area:** `src/outcome.rs`, `src/forge.rs`, `src/http_client.rs`, `src/mapper.rs`
+
+### Implementasi P2-05 (sub-bagian classification metadata)
+
+`outcome.rs` kini memiliki `ErrorMetadata` dan `ErrorStage` internal yang mengklasifikasikan capability, authentication, transport, dan scan errors, serta mengekstrak HTTP status dan retryability secara deterministic. `TargetErrorCode` tetap menjadi report contract yang sama dan `classify_error` mempertahankan behavior existing. Migrasi typed metadata ke provider/mapper error boundary, redacted target/source context, dan report serialization dilakukan bertahap setelah contract surface stabil.
 
 Buat error type yang membawa stage, provider, HTTP status, retryability, redacted target, and source context. `TargetErrorCode` menjadi mapping report boundary, bukan hasil parsing substring dari error message.
 
