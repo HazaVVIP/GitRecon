@@ -436,10 +436,13 @@ Audit setiap `#[allow(dead_code)]`, `#[allow(clippy::too_many_lines)]`, dan help
 # P3 — Production operations dan release governance
 
 ## P3-01 — Tambahkan GitHub Actions quality pipeline
-
-**Status:** `TODO`  
-**Dependensi:** P0-04  
+**Status:** `IN PROGRESS`
+**Dependensi:** P0-04
 **Area:** `.github/workflows/`
+
+### Implementasi P3-01 (sub-bagian core quality workflow)
+
+`.github/workflows/quality.yml` sekarang menjalankan fmt check, whitespace check, strict Clippy, all-target tests, release build, installer syntax, benchmark Python syntax, `cargo-audit`, dan deterministic remote-acquisition benchmark pada push/pull request ke `main`. Workflow memakai `permissions: contents: read`, concurrency cancellation, timeout, dan tidak membutuhkan live credentials atau target eksternal. Lockfile diperbarui secara targeted ke patched releases untuk `crossbeam-epoch`, `quinn-proto`, `rustls-webpki`, `anyhow`, dan `rand`; `cargo audit` kini hanya melaporkan warning unmaintained `number_prefix` dan exit sukses. Remaining work: shellcheck/toolchain policy, artifact checksum/provenance, dan branch protection.
 
 Buat workflow untuk fmt, Clippy, all-target tests, release build, `cargo-audit` atau `cargo-deny`, lockfile consistency, installer shellcheck/syntax, dan artifact checksum. Jalankan pada push/pull request ke `main`.
 

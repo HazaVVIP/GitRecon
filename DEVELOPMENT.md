@@ -31,7 +31,10 @@ cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-targets
 cargo build --release
+cargo audit
 ```
+
+The repository also runs the same core gates through `.github/workflows/quality.yml` on pushes and pull requests targeting `main`. The workflow uses stable Rust, denies Clippy warnings, runs all-target tests and a release build, checks installer and benchmark syntax, audits the lockfile with `cargo-audit`, executes the deterministic localhost remote-acquisition benchmark, and removes generated residues. It requires no live credentials or external target.
 
 Integration tests execute the compiled binary against temporary local fixtures. They cover local-directory reports, binary placeholder policy, mixed target aggregation, deterministic result ordering, custom checkpoint-directory resume discovery, CLI help coverage, and clean handling of invalid targets. Forge workspace tests additionally verify custom detector parity on text and archive content, binary opt-out wiring, and reconstructed-file counters. Adapter unit suites also use local TCP response servers to contract-test identity success, blob/file retrieval, path-aware Bitbucket retrieval, provider-specific HTTP-401/403 behavior, Azure identity fallback, and pagination for GitHub, GitLab, and Bitbucket without live credentials. Avoid tests that require external forge credentials or network availability.
 
