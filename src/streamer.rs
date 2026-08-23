@@ -3801,6 +3801,22 @@ fn scan_db_config_blocks_with_policy(
             r"(?i)(postgres|mysql|mongodb|redis|amqp)://[^:]+:([^@]+)@"
         ).unwrap();
     }
+    // Every detector below requires one of these literal markers. Avoid building a
+    // line-index vector for unrelated content, which is the common path for this
+    // supplemental detector. This is only an allocation prefilter; regex matching
+    // remains authoritative and all supported marker families are represented.
+    let has_db_marker = content.contains("PASSWORD")
+        || content.contains("SECRET_KEY")
+        || content.contains("DATABASE_URL")
+        || content.contains("password")
+        || content.contains("APP_KEY")
+        || content.contains("DB_")
+        || content.contains("Password")
+        || content.contains("://");
+    if !has_db_marker {
+        return Vec::new();
+    }
+
     let lines: Vec<&str> = content.lines().collect();
     let mut findings = Vec::new();
 
@@ -4142,6 +4158,31 @@ mod tests {
             findings[0].commit_sha1.as_deref(),
             Some("0123456789012345678901234567890123456789")
         );
+    }
+
+    #[test]
+    fn db_config_prefilter_preserves_supported_markers() {
+        let irrelevant = scan_db_config_blocks_with_policy(
+            "ordinary source text without configuration markers",
+            "fixture.txt",
+            "a".repeat(40).as_str(),
+            false,
+            &[],
+            true,
+        );
+        assert!(irrelevant.is_empty());
+
+        let database_url = scan_db_config_blocks_with_policy(
+            r#"DATABASE_URL = "postgres://fixture:synthetic_fixture_value@host/db""#,
+            "settings.rb",
+            "a".repeat(40).as_str(),
+            false,
+            &[],
+            true,
+        );
+        assert!(database_url
+            .iter()
+            .any(|finding| finding.pattern_id == "ruby_database_url"));
     }
 
     #[test]
