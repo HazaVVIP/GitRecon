@@ -144,6 +144,26 @@ mod tests {
 
     type HttpFixture = (u16, Vec<(String, String)>, Vec<u8>);
 
+    async fn spawn_http_without_content_length(body: Vec<u8>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 2048];
+            let read = socket.read(&mut request).await.unwrap();
+            assert!(String::from_utf8_lossy(&request[..read]).starts_with("GET /"));
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+            for chunk in body.chunks(8) {
+                socket.write_all(chunk).await.unwrap();
+                tokio::task::yield_now().await;
+            }
+        });
+        format!("http://{address}")
+    }
+
     async fn spawn_http_sequence(responses: Vec<HttpFixture>) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -411,7 +431,7 @@ mod tests {
 
         let oversized_url = spawn_http_sequence(vec![(200, vec![], vec![b'x'; 128])]).await;
         let oversized_config = HttpConfig {
-            max_size: 16,
+            max_response_size: 16,
             ..HttpConfig::default()
         };
         let oversized_client = HttpClient::new(oversized_config).unwrap();
@@ -429,6 +449,45 @@ mod tests {
             oversized_source.acquire("oversized-sha").await,
             Err(AcquisitionOutcome::Oversized)
         ));
+
+        let streamed_url = spawn_http_without_content_length(vec![b'y'; 128]).await;
+        let streamed_config = HttpConfig {
+            max_response_size: 16,
+            ..HttpConfig::default()
+        };
+        let streamed_client = HttpClient::new(streamed_config).unwrap();
+        let streamed_git_url = format!("{streamed_url}/.git/objects");
+        let streamed_source = source_config(
+            &streamed_client,
+            &streamed_git_url,
+            &pack_objects,
+            None,
+            16,
+            &cache_hits,
+            &cache_misses,
+        );
+        assert!(matches!(
+            streamed_source.acquire("streamed-oversized-sha").await,
+            Err(AcquisitionOutcome::Oversized)
+        ));
+
+        let (saved_sha, saved_object) = encoded_blob(b"save-without-scan");
+        let saved_url = spawn_http_sequence(vec![(200, vec![], saved_object)]).await;
+        let saved_client = HttpClient::new(HttpConfig::default()).unwrap();
+        let saved_git_url = format!("{saved_url}/.git/objects");
+        let saved_source = ObjectSource::new(ObjectSourceConfig {
+            client: &saved_client,
+            git_url: &saved_git_url,
+            pack_objects: &pack_objects,
+            cache: None,
+            max_blob_size: 1,
+            save_enabled: true,
+            cache_hits: &cache_hits,
+            cache_misses: &cache_misses,
+        });
+        let saved = saved_source.acquire(&saved_sha).await.unwrap();
+        assert_eq!(saved.source, ObjectSourceKind::LooseHttp);
+        assert!(saved.bytes.len() > 1);
     }
 
     #[test]

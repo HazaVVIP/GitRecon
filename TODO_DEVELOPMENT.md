@@ -94,7 +94,7 @@ Teruskan `--false-positive-keywords` melalui local directory dan forge workspace
 `--false-positive-keywords` sekarang diparsing melalui satu helper canonical dan diteruskan ke local directory serta forge snapshot/history melalui immutable scan configuration. URL, local, dan forge memakai fixture sintetis yang sama pada policy normal dan exhaustive; binary/archive paths tetap menerima scanner tanpa filtering keyword text. PR #35 (`0c3f04c1`) dan post-merge CI run `32669132214` selesai sukses dengan 613 unit test Rust lulus.
 ### Item baru P1-10 — Provider-aware token target schema dan selectors
 
-**Status:** `IN PROGRESS — schema, selectors, mixed-target dispatch, and JSON scope metadata implemented; provider fixture coverage and protected delivery pending`
+**Status:** `DONE — merged via PR #37 (`fb35e4ef`); post-merge CI `32671227971` succeeded`
 **Dependensi:** P0-05, P1-06
 **Area:** `src/targets.rs`, `src/main.rs`, provider adapters, report outcome
 
@@ -104,17 +104,21 @@ Perluas target-file token entry dengan provider discriminator yang backward-comp
 
 ### Implementasi P1-10 (sub-bagian schema dan selector contract)
 
-`Target::Token` sekarang menerima `provider` eksplisit (`github`, `gitlab`, `bitbucket`, `gitea`, atau `azure`) serta `selectors` exact/glob; field legacy `repos` tetap diterima dan digabung secara deterministic. Mixed target dispatch meneruskan target ke adapter provider yang dipilih, filter repository tidak pernah menghasilkan sukses kosong, dan token JSON report menyimpan provider serta selector scope tanpa nilai token. Pekerjaan lanjutan mencakup provider-specific fixture dispatch dan parity scope untuk format report non-JSON.
+`Target::Token` sekarang menerima `provider` eksplisit (`github`, `gitlab`, `bitbucket`, `gitea`, atau `azure`) serta `selectors` exact/glob; field legacy `repos` tetap diterima dan digabung secara deterministic. Mixed target dispatch meneruskan target ke adapter provider yang dipilih, filter repository tidak pernah menghasilkan sukses kosong, dan token JSON report menyimpan provider serta selector scope tanpa nilai token. Provider-specific fixture dispatch dan parity scope untuk format report non-JSON menjadi follow-up tersendiri pada gelombang report parity; P1-10 sendiri telah memenuhi contract schema, dispatch, selector, redaction, dan JSON scope.
 
 ### Item baru P1-11 — Bounded acquisition size
 
-**Status:** `TODO`
+**Status:** `IN PROGRESS — explicit response boundary and streaming regressions implemented; protected delivery pending`
 **Dependensi:** P1-07, P1-08
 **Area:** `src/http_client.rs`, `src/object_source.rs`, `src/object_worker.rs`
 
 Pisahkan batas ukuran response acquisition dari batas ukuran scan dan gunakan streaming body limit agar response oversized tidak selalu dialokasikan penuh terlebih dahulu. Pertahankan pack/cache/loose precedence dan typed `Oversized` telemetry.
 
 **Acceptance criteria:** Content-Length yang besar ditolak sebelum body penuh; response tanpa Content-Length tetap dibatasi saat streaming; save/non-save memiliki contract yang terdokumentasi; cache tidak menyimpan oversized atau invalid object; regression fixture mencakup truncation dan retry interaction.
+
+### Implementasi P1-11 (sub-bagian response boundary)
+
+`HttpConfig.max_size` sekarang bernama `max_response_size` untuk memisahkan batas akuisisi HTTP dari `--max-blob-size` sebagai batas scan per objek. Content-Length tetap dipreflight, response tanpa header dibaca chunk-by-chunk sampai batas, dan `AcquisitionOutcome::Oversized` dipertahankan sebagai outcome typed. Regression mencakup response oversized, stream tanpa Content-Length, retry/404, precedence pack-cache-loose, invalid cache fallback, serta save-mode acquire tanpa scan; typed size telemetry yang lebih kaya dan interaksi retry lanjutan tetap menjadi pekerjaan berikutnya.
 
 ### Item baru P1-12 — Archive format and invalid-reason depth
 

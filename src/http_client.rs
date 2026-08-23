@@ -250,7 +250,9 @@ pub struct HttpConfig {
     pub verify_ssl: bool,
     pub custom_ua: Option<String>,
     pub extra_headers: Vec<(String, String)>,
-    pub max_size: usize,
+    /// Maximum response bytes acquired from an HTTP body before it is rejected.
+    /// This is intentionally separate from per-blob scan limits.
+    pub max_response_size: usize,
     pub adaptive_timeout: bool,
     pub max_timeout: Duration,
     pub use_http2: bool,
@@ -272,7 +274,7 @@ impl Default for HttpConfig {
             verify_ssl: true, // BUG-HTTP-003: Default to SECURE (SSL verification enabled)
             custom_ua: None,
             extra_headers: vec![],
-            max_size: 100 * 1024 * 1024,
+            max_response_size: 100 * 1024 * 1024,
             adaptive_timeout: true,
             max_timeout: Duration::from_secs(60),
             use_http2: false,
@@ -793,7 +795,7 @@ impl HttpClient {
         // match on `reqwest::Error::status()` and TLS classification), so we surface
         // size-cap violations by returning `Ok(Response { status:0, error: Some(...) })`
         // — same shape used elsewhere for TLS/connection failures.
-        let max_size = self.cfg.max_size;
+        let max_size = self.cfg.max_response_size;
         if let Some(cl) = resp.content_length() {
             if cl as usize > max_size {
                 return Ok(Response {
