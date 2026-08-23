@@ -503,10 +503,13 @@ Tambahkan stage timing, request attempts, retry counts, acquisition source, skip
 - NDJSON/live mode tetap valid dan tidak rusak oleh metadata baru.
 
 ## P3-05 — Upgrade benchmark suite
-
-**Status:** `TODO`  
-**Dependensi:** P1-07, P1-08, P3-04  
+**Status:** `IN PROGRESS`
+**Dependensi:** P1-07, P1-08, P3-04
 **Area:** `tools/benchmark_local_scan.py`, `tools/benchmark_remote_acquisition.py`
+
+### Implementasi P3-05 (sub-bagian remote benchmark metadata)
+
+`tools/benchmark_remote_acquisition.py` kini mempertahankan output JSON lama sekaligus menambahkan metadata fixture (file, commit, byte), build profile eksplisit, host metadata non-sensitif, mean/median/min/max elapsed, population variance, dan relative spread. `--build-profile` membantu membedakan release, debug, dan custom binary dalam hasil benchmark; fixture tetap lokal, deterministic, dan tidak memerlukan credentials atau internet. Remaining work: throughput/peak RSS, retry/cache-hit scenarios, dan regression threshold multi-sample yang lebih kaya.
 
 Pertahankan local normal-versus-exhaustive benchmark, lalu tambah remote acquisition benchmark dengan deterministic fixture. Ukur throughput, cache hit rate, source distribution, retry behavior, typed outcomes, peak RSS, dan variance antar repetition. Output utama harus JSON.
 
