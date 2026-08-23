@@ -6,7 +6,7 @@
 
 ## Purpose
 
-GitRecon is a streaming Git exposure and secret-candidate scanner. It supports remote `.git` exposure detection, repository mapping and object reconstruction, local-directory scanning, multi-target orchestration, forge token workflows, binary/archive string scanning, and structured reports.
+GitRecon is a streaming Git exposure and secret-candidate scanner. It supports remote `.git` exposure detection, repository mapping and object reconstruction, local-directory scanning, multi-target orchestration, forge token workflows, binary/archive string scanning, and structured reports. The current capability matrix and limitations are maintained in [docs/limitations.md](docs/limitations.md).
 
 The project intentionally favors **offensive discovery effectiveness**. Normal scans suppress common template placeholders to reduce noise; `--exhaustive` retains placeholder-like candidates for investigative workflows. Object verification and local binary scanning are enabled by default, with explicit opt-out flags.
 
