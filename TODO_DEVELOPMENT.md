@@ -217,9 +217,9 @@ Forge workspace snapshots sekarang tidak lagi memfilter file binary berdasarkan 
 
 ## P1-05 — Tambahkan archive limits dan typed truncation outcomes
 
-**Status:** `TODO`  
-**Dependensi:** P1-02, P1-03  
-**Area:** `src/binary_scanner.rs`, `src/streamer.rs`, `src/reporter.rs`
+**Status:** `IN PROGRESS`
+**Dependensi:** P1-02, P1-03
+**Area:** `src/binary_scanner.rs`, `src/content_scanner.rs`, `src/streamer.rs`, `src/checkpoint.rs`, `src/reporter.rs`
 
 Pertahankan bounded extraction, tetapi ubah silent truncation menjadi telemetry. Tambahkan maximum nested archive depth, maximum extracted entries, per-entry bytes, total expanded bytes, and decompression ratio guard. Limit yang menghentikan coverage harus tampil pada report.
 
@@ -229,6 +229,10 @@ Pertahankan bounded extraction, tetapi ubah silent truncation menjadi telemetry.
 - ZIP/GZIP/SQLite malformed input tidak panic.
 - Report membedakan complete scan, truncated scan, oversized entry, invalid archive, dan decompression limit.
 - Exhaustive mode tidak menghapus limits resource; exhaustive berarti coverage policy, bukan unlimited memory.
+
+### Implementasi P1-05 (sub-bagian typed archive limits)
+
+ZIP/JAR extraction sekarang memiliki telemetry typed untuk batas jumlah entry, oversized per-file/total budget, dan nested archive depth. GZIP decompression membedakan payload malformed dari output yang melewati batas. `ContentScanner`, forge snapshot outcomes, terminal output, JSON reports, dan stream checkpoints mempertahankan `archive_truncated` secara additive. Regression tests menggunakan fixture kecil untuk entry-count, total/per-file size, malformed/oversized GZIP, nested-depth, checkpoint round-trip, dan provider/local scan paths. Pekerjaan yang tersisa adalah decompression-ratio guard eksplisit, klasifikasi invalid archive yang lebih rinci, dan meneruskan telemetry ke URL binary normalization agar semua pipeline memiliki outcome detail yang identik.
 
 ## P1-06 — Definisikan capability dan history mode untuk forge
 

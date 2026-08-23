@@ -535,6 +535,19 @@ impl Reporter {
                 "Object outcomes", skipped, failed
             );
         }
+        let archive_truncated = r.outcome_stats.truncated_total();
+        if archive_truncated > 0 {
+            println!(
+                "│  {:<16}: {} bounded extraction events",
+                "Archive limits", archive_truncated
+            );
+        }
+        if r.outcome_stats.archive_invalid > 0 {
+            println!(
+                "│  {:<16}: {} malformed archive inputs",
+                "Invalid archives", r.outcome_stats.archive_invalid
+            );
+        }
         // PERF-005: Display cache stats
         if r.cache_hits > 0 || r.cache_misses > 0 {
             let total_requests = r.cache_hits + r.cache_misses;

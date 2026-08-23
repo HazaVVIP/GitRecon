@@ -778,6 +778,8 @@ pub struct ScanOutcomeStats {
     pub skipped_oversized: usize,
     pub skipped_files: usize,
     pub failed_files: usize,
+    pub archive_truncated: usize,
+    pub archive_invalid: usize,
     pub failed_http_statuses: BTreeMap<String, usize>,
 }
 
@@ -796,6 +798,8 @@ impl ScanOutcomeStats {
             skipped_oversized: count_skip(SkipReason::Oversized),
             skipped_files: 0,
             failed_files: 0,
+            archive_truncated: state.archive_truncated,
+            archive_invalid: state.archive_invalid,
             failed_http_statuses,
         }
     }
@@ -810,6 +814,10 @@ impl ScanOutcomeStats {
 
     pub fn failed_total(&self) -> usize {
         self.failed_files + self.failed_http_statuses.values().sum::<usize>()
+    }
+
+    pub fn truncated_total(&self) -> usize {
+        self.archive_truncated
     }
 }
 
@@ -899,6 +907,8 @@ struct State {
     blobs_scanned: usize,
     blobs_failed: usize,
     bytes_scanned: usize,
+    archive_truncated: usize,
+    archive_invalid: usize,
     files_saved: usize,
     files_save_failed: usize,
     skipped_by_reason: HashMap<SkipReason, usize>,
@@ -947,6 +957,8 @@ impl State {
             blobs_scanned: self.blobs_scanned,
             blobs_failed: self.blobs_failed,
             bytes_scanned: self.bytes_scanned,
+            archive_truncated: self.archive_truncated,
+            archive_invalid: self.archive_invalid,
             files_saved: self.files_saved,
             files_save_failed: self.files_save_failed,
             skipped_stop_requested: self
@@ -1000,6 +1012,8 @@ impl State {
         self.blobs_scanned = snapshot.blobs_scanned;
         self.blobs_failed = snapshot.blobs_failed;
         self.bytes_scanned = snapshot.bytes_scanned;
+        self.archive_truncated = snapshot.archive_truncated;
+        self.archive_invalid = snapshot.archive_invalid;
         self.files_saved = snapshot.files_saved;
         self.files_save_failed = snapshot.files_save_failed;
 

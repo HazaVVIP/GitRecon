@@ -7,13 +7,15 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::binary_adapter::binary_findings_to_findings_with_patterns;
+use crate::binary_adapter::binary_tuples_to_findings;
 use crate::streamer::{self, DynPattern, Finding, StreamResult};
 
 #[derive(Debug)]
 pub(crate) struct ContentScanOutcome {
     pub(crate) findings: Vec<Finding>,
     pub(crate) bytes: usize,
+    pub(crate) archive_truncated: usize,
+    pub(crate) archive_invalid: usize,
     pub(crate) failed: bool,
     pub(crate) stopped: bool,
 }
@@ -23,6 +25,8 @@ impl ContentScanOutcome {
         Self {
             findings: Vec::new(),
             bytes: 0,
+            archive_truncated: 0,
+            archive_invalid: 0,
             failed: true,
             stopped: false,
         }
@@ -32,6 +36,8 @@ impl ContentScanOutcome {
         Self {
             findings: Vec::new(),
             bytes: 0,
+            archive_truncated: 0,
+            archive_invalid: 0,
             failed: false,
             stopped: true,
         }
@@ -41,6 +47,8 @@ impl ContentScanOutcome {
         Self {
             findings: Vec::new(),
             bytes: 0,
+            archive_truncated: 0,
+            archive_invalid: 0,
             failed: false,
             stopped: false,
         }
@@ -111,19 +119,29 @@ impl ContentScanner {
                 return ContentScanOutcome {
                     findings: Vec::new(),
                     bytes: data.len(),
+                    archive_truncated: 0,
+                    archive_invalid: 0,
                     failed: false,
                     stopped: false,
                 };
             }
-            return ContentScanOutcome {
-                findings: binary_findings_to_findings_with_patterns(
+            let (raw_findings, telemetry) =
+                crate::binary_scanner::scan_binary_blob_with_patterns_and_telemetry(
                     data,
                     logical_path,
                     self.max_blob_bytes,
+                    &self.extra_patterns,
+                );
+            return ContentScanOutcome {
+                findings: binary_tuples_to_findings(
+                    raw_findings,
+                    logical_path,
                     self.exhaustive,
                     &self.extra_patterns,
                 ),
                 bytes: data.len(),
+                archive_truncated: telemetry.truncation_total(),
+                archive_invalid: telemetry.archive_invalid,
                 failed: false,
                 stopped: false,
             };
@@ -134,6 +152,8 @@ impl ContentScanner {
         ContentScanOutcome {
             findings,
             bytes: data.len(),
+            archive_truncated: 0,
+            archive_invalid: 0,
             failed: false,
             stopped: false,
         }
@@ -164,6 +184,8 @@ pub(crate) struct ScanAccumulator {
     pub(crate) blobs_scanned: usize,
     pub(crate) blobs_failed: usize,
     pub(crate) bytes_scanned: usize,
+    pub(crate) archive_truncated: usize,
+    pub(crate) archive_invalid: usize,
 }
 
 impl ScanAccumulator {
@@ -175,6 +197,8 @@ impl ScanAccumulator {
             self.blobs_failed += 1;
             return;
         }
+        self.archive_truncated += outcome.archive_truncated;
+        self.archive_invalid += outcome.archive_invalid;
         if outcome.bytes > 0 {
             self.blobs_scanned += 1;
             self.bytes_scanned += outcome.bytes;
@@ -201,7 +225,11 @@ impl ScanAccumulator {
             cache_misses: 0,
             cache_stats: None,
             object_source_stats: crate::streamer::ObjectSourceStats::default(),
-            outcome_stats: crate::streamer::ScanOutcomeStats::default(),
+            outcome_stats: crate::streamer::ScanOutcomeStats {
+                archive_truncated: self.archive_truncated,
+                archive_invalid: self.archive_invalid,
+                ..Default::default()
+            },
             rate_limit_allowed: 0,
             rate_limit_dropped: 0,
             rate_limit_wait_ms: 0,

@@ -6,9 +6,9 @@ GitRecon is a high-performance Rust scanner for exposed Git repositories, local 
 
 ## Capabilities
 
-GitRecon provides a four-stage remote pipeline: exposure detection, Git metadata and object mapping, concurrent streaming analysis, and report generation. It also supports local-directory scanning, binary and archive string extraction, multiple forge APIs, bounded multi-target concurrency, checkpoint/resume, cache isolation, proxy and rate-control options, object-source metrics, typed scan outcomes, and JSON, SARIF, CSV, NDJSON, Markdown, and HTML output. Forge workspace snapshots now use the same binary/archive scanner as local content, including custom patterns and the `--no-scan-binaries` opt-out; forge-specific acquisition telemetry remains under active roadmap work.
+GitRecon provides a four-stage remote pipeline: exposure detection, Git metadata and object mapping, concurrent streaming analysis, and report generation. It also supports local-directory scanning, bounded binary/archive extraction with typed truncation outcomes, multiple forge APIs, bounded multi-target concurrency, checkpoint/resume, cache isolation, proxy and rate-control options, object-source metrics, typed scan outcomes, and JSON, SARIF, CSV, NDJSON, Markdown, and HTML output. Forge workspace snapshots now use the same binary/archive scanner as local content, including custom patterns and the `--no-scan-binaries` opt-out; provider cache/rate-limit acquisition telemetry remains an explicit roadmap boundary.
 
-The scanner is intentionally discovery-oriented. Normal mode filters common template placeholders to reduce noise. `--exhaustive` retains placeholder-like candidates for investigative workflows. Object verification and local binary scanning are enabled by default and can be disabled explicitly. Local, URL, and forge snapshot dispatch classify binary content by magic bytes first, then supported filename extension, and finally the null-byte heuristic for unknown binary data; therefore sparse GZIP and low-null archive content are not forced through the text path. Forge-specific acquisition telemetry remains a separate roadmap item.
+The scanner is intentionally discovery-oriented. Normal mode filters common template placeholders to reduce noise. `--exhaustive` retains placeholder-like candidates for investigative workflows. Object verification and local binary scanning are enabled by default and can be disabled explicitly. Local, URL, and forge snapshot dispatch classify binary content by magic bytes first, then supported filename extension, and finally the null-byte heuristic for unknown binary data; therefore sparse GZIP and low-null archive content are not forced through the text path. ZIP/JAR extraction is bounded by entry count, per-file size, total expanded size, and nested depth; GZIP output is bounded as well. When a limit prevents a content view from being inspected, reports expose `result.outcomes.archive_truncated` and terminal output shows an archive-limit line. Malformed archives are ignored safely and are not mislabeled as truncation.
 
 ## Installation
 
@@ -120,7 +120,7 @@ For custom detectors, `--patterns-help` prints the current schema. The file must
 }
 ```
 
-Replace the example quantifier with a valid regular-expression bound appropriate for the token format you are detecting. Custom patterns are validated before scanning and apply to text, printable binary strings, archive entries, decompressed GZIP content, SQLite strings, and ELF strings.
+Replace the example quantifier with a valid regular-expression bound appropriate for the token format you are detecting. Custom patterns are validated before scanning and apply to text, printable binary strings, archive entries, decompressed GZIP content, SQLite strings, and ELF strings. Archive limits remain active in normal and `--exhaustive` modes; exhaustive broadens finding retention but does not permit unbounded memory use.
 
 ## Important Options
 
@@ -168,7 +168,7 @@ Run `gitrecon --help` for the complete option list, including forge-specific URL
 
 ## Outputs
 
-Reports are written below the selected output directory. The default JSON report contains detection metadata, mapping information, findings, severity counts, risk score, scan statistics, technology fingerprints, object-source distribution, and typed skip/failure outcomes. `--save` writes reconstructed source under a target-specific directory. Treat reports and reconstructed source as sensitive because findings may contain plaintext credential material.
+Reports are written below the selected output directory. The default JSON report contains detection metadata, mapping information, findings, severity counts, risk score, scan statistics, technology fingerprints, object-source distribution, and typed skip/failure outcomes. For bounded archive scans, `result.outcomes.archive_truncated` records the number of archive/decompression/depth limit events; zero means no such limit event was observed, not that malformed input was forcefully expanded. `--save` writes reconstructed source under a target-specific directory. Treat reports and reconstructed source as sensitive because findings may contain plaintext credential material.
 
 ## Architecture
 

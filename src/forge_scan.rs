@@ -459,6 +459,11 @@ pub(crate) async fn scan_workspace_files(config: FileScanConfig) {
                 );
             }
         }
+        if outcome.archive_truncated > 0 || outcome.archive_invalid > 0 {
+            let mut stats = config.outcome_stats.lock().await;
+            stats.archive_truncated += outcome.archive_truncated;
+            stats.archive_invalid += outcome.archive_invalid;
+        }
         accumulator.absorb(outcome, technologies);
         let existing_findings = config.all_findings.lock().await.len();
         let local_limit_reached = config.max_findings > 0
