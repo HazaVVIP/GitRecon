@@ -455,11 +455,15 @@ Buat workflow untuk fmt, Clippy, all-target tests, release build, `cargo-audit` 
 
 ## P3-02 — Aktifkan branch protection dan release approval
 
-**Status:** `TODO`  
-**Dependensi:** P3-01  
+**Status:** `DONE`
+**Dependensi:** P3-01
 **Area:** GitHub repository settings
 
 Proteksi `main`, wajibkan required status checks, dan tetapkan release checklist yang membandingkan version metadata, source commit, tag, archive checksum, dan release asset. Release manual tetap boleh, tetapi harus mengacu pada artifact yang terverifikasi.
+
+### Implementasi P3-02
+
+Branch `main` kini mewajibkan pull request dengan minimal satu approval, required check `Rust and black-box quality gates` dalam mode strict/up-to-date, conversation resolution, dan admin enforcement. Force-push serta branch deletion dinonaktifkan. `install.sh` juga kini menolak release binary bila asset `SHA256SUMS`, entry checksum archive yang tepat, atau utilitas SHA-256 lokal tidak tersedia; verifikasi hanya membandingkan archive yang dipilih sehingga checksum entries untuk asset lain tidak menyebabkan false failure.
 
 ### Acceptance criteria
 

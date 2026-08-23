@@ -182,30 +182,33 @@ if [ -n "$RELEASE_TAG" ]; then
             exit 1
         fi
 
-        # Verify the release archive when a checksum utility and checksum asset exist.
-        if curl -fsSL "$CHECKSUM_URL" -o "$CHECKSUM_PATH" 2>/dev/null; then
-            if command_exists sha256sum; then
-                if ! (cd "$DOWNLOAD_DIR" && sha256sum -c SHA256SUMS >/dev/null); then
-                    error "SHA-256 verification failed for the downloaded release."
-                    rm -rf "$DOWNLOAD_DIR"
-                    exit 1
-                fi
-                success "SHA-256 verification passed"
-            elif command_exists shasum; then
-                EXPECTED_SHA="$(sed -n "s/^\\([a-fA-F0-9]*\\)[[:space:]]\\+${ARCHIVE_NAME}$/\\1/p" "$CHECKSUM_PATH")"
-                ACTUAL_SHA="$(shasum -a 256 "$ARCHIVE_PATH" | awk '{print $1}')"
-                if [ -z "$EXPECTED_SHA" ] || [ "$EXPECTED_SHA" != "$ACTUAL_SHA" ]; then
-                    error "SHA-256 verification failed for the downloaded release."
-                    rm -rf "$DOWNLOAD_DIR"
-                    exit 1
-                fi
-                success "SHA-256 verification passed"
-            else
-                warn "No SHA-256 utility found; continuing without local checksum verification."
-            fi
-        else
-            warn "Checksum asset unavailable; continuing after archive validation."
+        # Release binaries must pass an explicit checksum verification before extraction.
+        if ! curl -fsSL "$CHECKSUM_URL" -o "$CHECKSUM_PATH" 2>/dev/null; then
+            error "SHA-256 checksum asset unavailable; refusing to install an unverified release."
+            rm -rf "$DOWNLOAD_DIR"
+            exit 1
         fi
+        EXPECTED_SHA="$(sed -n "s/^\\([a-fA-F0-9]\\{64\\}\\)[[:space:]]\\+\\*\\?${ARCHIVE_NAME}$/\\1/p" "$CHECKSUM_PATH" | head -n 1)"
+        if [ -z "$EXPECTED_SHA" ]; then
+            error "SHA-256 checksum for ${ARCHIVE_NAME} is missing or malformed."
+            rm -rf "$DOWNLOAD_DIR"
+            exit 1
+        fi
+        if command_exists sha256sum; then
+            ACTUAL_SHA="$(sha256sum "$ARCHIVE_PATH" | awk '{print $1}')"
+        elif command_exists shasum; then
+            ACTUAL_SHA="$(shasum -a 256 "$ARCHIVE_PATH" | awk '{print $1}')"
+        else
+            error "No SHA-256 utility found; cannot verify the downloaded release."
+            rm -rf "$DOWNLOAD_DIR"
+            exit 1
+        fi
+        if [ "$EXPECTED_SHA" != "$ACTUAL_SHA" ]; then
+            error "SHA-256 verification failed for the downloaded release."
+            rm -rf "$DOWNLOAD_DIR"
+            exit 1
+        fi
+        success "SHA-256 verification passed"
 
         EXTRACT_DIR="${DOWNLOAD_DIR}/extract"
         mkdir -p "$EXTRACT_DIR"

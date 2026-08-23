@@ -20,7 +20,7 @@ Install the latest published release binary with one command:
 curl -sSf https://raw.githubusercontent.com/HazaVVIP/GitRecon/main/install.sh | bash
 ```
 
-The installer detects the operating system and CPU architecture, downloads the matching archive from [GitHub Releases](https://github.com/HazaVVIP/GitRecon/releases), verifies its SHA-256 checksum when a checksum utility is available, and installs `gitrecon` to `/usr/local/bin`. The published binary is currently available for Linux `x86_64`; when a compatible release asset is unavailable, the installer falls back to a source build and may install Rust and system build dependencies.
+The installer detects the operating system and CPU architecture, downloads the matching archive from [GitHub Releases](https://github.com/HazaVVIP/GitRecon/releases), requires a matching `SHA256SUMS` entry and a local SHA-256 utility before installing the binary, and installs `gitrecon` to `/usr/local/bin`. It refuses an unverified release archive instead of silently bypassing integrity verification. The published binary is currently available for Linux `x86_64`; when a compatible release asset is unavailable, the installer falls back to a source build and may install Rust and system build dependencies.
 
 After installation, verify the command and view the available options:
 
