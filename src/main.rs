@@ -1205,6 +1205,20 @@ fn prompt_save_choice(default: bool) -> bool {
     }
 }
 
+fn parse_false_positive_keywords(args: &Cli) -> Vec<String> {
+    args.false_positive_keywords
+        .as_deref()
+        .map(|keywords| {
+            keywords
+                .split(',')
+                .map(str::trim)
+                .filter(|keyword| !keyword.is_empty())
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn build_forge_file_scan_config(
     args: &Cli,
     verbose: bool,
@@ -1221,6 +1235,7 @@ fn build_forge_file_scan_config(
         scan_binaries: !args.no_scan_binaries,
         exhaustive: args.exhaustive,
         entropy_threshold: args.entropy_threshold,
+        false_positive_keywords: parse_false_positive_keywords(args),
         live: args.live,
         pipe: args.pipe,
         verbose,
@@ -2296,6 +2311,7 @@ async fn run_dir_scan(
         max_findings: args.max_findings,
         stop_on_critical: args.stop_on_critical,
         entropy_threshold: args.entropy_threshold,
+        false_positive_keywords: parse_false_positive_keywords(args),
         extra_patterns,
         verbose,
         emit_findings: args.live || args.pipe,
@@ -2588,16 +2604,7 @@ async fn main() {
     }
 
     // SCAN-001: Parse false-positive keywords from CLI flag
-    let false_positive_keywords: Vec<String> =
-        if let Some(ref keywords_str) = args.false_positive_keywords {
-            keywords_str
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect()
-        } else {
-            Vec::new()
-        };
+    let false_positive_keywords = parse_false_positive_keywords(&args);
 
     // DX-1: --patterns-help
     if args.patterns_help {
