@@ -276,7 +276,7 @@ Buat local HTTP fixture server untuk menguji pack, cache, loose object, invalid 
 
 ## P1-08 — Bangun global resource budget
 
-**Status:** `TODO`  
+**Status:** `IN PROGRESS`  
 **Dependensi:** P1-01, P1-05, P1-07  
 **Area:** `src/streamer.rs`, `src/pack_reader.rs`, `src/binary_scanner.rs`, `src/http_client.rs`
 
@@ -289,6 +289,10 @@ Buat local HTTP fixture server untuk menguji pack, cache, loose object, invalid 
 - Archive/decompression limits memakai budget yang sama.
 - Cancellation selalu me-release reservation.
 - Report menjelaskan objek yang dilewati karena memory budget, bukan menyamarkannya sebagai clean scan.
+
+### Implementasi P1-08 (sub-bagian shared object-scan budget)
+
+`ResourceBudget` sekarang menyediakan reservasi atomik lintas worker dengan RAII release yang aman terhadap early return dan cancellation. URL streamer mengganti raw blob budget guard dengan shared budget, mencatat peak bytes dan denied reservations, serta mengembalikan `skipped_resource_budget` typed ketika reservation gagal; checkpoint accumulator mempertahankan counter tersebut secara backward-compatible. Semantics existing tetap dipertahankan: `--mem-limit 0` berarti unlimited, batas `--max-blob-size` dan archive tetap aktif, dan `--exhaustive` tidak menonaktifkan resource limits. Integrasi acquisition buffer, pack storage, archive expansion, decompression, dan report accumulator masih menjadi pekerjaan lanjutan P1-08.
 
 ---
 

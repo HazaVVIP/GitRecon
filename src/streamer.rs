@@ -22,6 +22,7 @@ use crate::git_parser::ObjectParser;
 use crate::http_client::HttpClient;
 use crate::mapper::MapResult;
 use crate::object_source::ObjectSourceKind;
+use crate::resource_budget::{ResourceBudget, ResourceStage};
 use crate::scanner_policy::ScanPolicy;
 use crate::text_utils::truncate_utf8;
 
@@ -776,10 +777,13 @@ pub struct ScanOutcomeStats {
     pub skipped_invalid_object: usize,
     pub skipped_not_found: usize,
     pub skipped_oversized: usize,
+    pub skipped_resource_budget: usize,
     pub skipped_files: usize,
     pub failed_files: usize,
     pub archive_truncated: usize,
     pub archive_invalid: usize,
+    pub resource_peak_bytes: usize,
+    pub resource_denied_reservations: usize,
     pub scan_scope: Option<String>,
     pub capabilities: Option<crate::forge::ForgeCapabilities>,
     pub unsupported_capability: Option<String>,
@@ -805,10 +809,13 @@ impl ScanOutcomeStats {
             skipped_invalid_object: count_skip(SkipReason::InvalidObject),
             skipped_not_found: count_skip(SkipReason::NotFound),
             skipped_oversized: count_skip(SkipReason::Oversized),
+            skipped_resource_budget: count_skip(SkipReason::ResourceBudget),
             skipped_files: 0,
             failed_files: 0,
             archive_truncated: state.archive_truncated,
             archive_invalid: state.archive_invalid,
+            resource_peak_bytes: 0,
+            resource_denied_reservations: 0,
             scan_scope: None,
             capabilities: None,
             unsupported_capability: None,
@@ -999,6 +1006,11 @@ impl State {
                 .get(&SkipReason::Oversized)
                 .copied()
                 .unwrap_or_default(),
+            skipped_resource_budget: self
+                .skipped_by_reason
+                .get(&SkipReason::ResourceBudget)
+                .copied()
+                .unwrap_or_default(),
             failed_http_statuses,
             objects_pack: self
                 .objects_by_source
@@ -1040,6 +1052,7 @@ impl State {
             (SkipReason::InvalidObject, snapshot.skipped_invalid_object),
             (SkipReason::NotFound, snapshot.skipped_not_found),
             (SkipReason::Oversized, snapshot.skipped_oversized),
+            (SkipReason::ResourceBudget, snapshot.skipped_resource_budget),
         ]
         .into_iter()
         .filter(|(_, count)| *count > 0)
@@ -1064,6 +1077,7 @@ impl State {
 enum SkipReason {
     StopRequested,
     InvalidObject,
+    ResourceBudget,
     NotFound,
     Oversized,
 }
@@ -1096,56 +1110,6 @@ enum WorkerResult {
     Skipped {
         reason: SkipReason,
     },
-}
-
-// ════════════════════════════════════════════════
-// BUG-STAB-002: RAII Budget Guard
-// ════════════════════════════════════════════════
-
-/// RAII guard for memory budget tracking.
-///
-/// Reserves budget on creation and automatically releases it on drop,
-/// preventing budget leaks on early returns or panics.
-struct BudgetGuard {
-    bytes_in_flight: Arc<AtomicU64>,
-    reserved_bytes: usize,
-    mem_limit: usize,
-}
-
-impl BudgetGuard {
-    /// Try to reserve budget. Returns None if budget exhausted.
-    fn try_reserve(
-        bytes_in_flight: Arc<AtomicU64>,
-        blob_size: usize,
-        mem_limit: usize,
-    ) -> Option<Self> {
-        // BUG-STAB-001: Use AcqRel for success (write happens), Acquire for failure (no write)
-        match bytes_in_flight.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-            let new = current.saturating_add(blob_size as u64);
-            if new <= mem_limit as u64 {
-                Some(new) // Reserve budget: atomically update to new value
-            } else {
-                None // Budget exhausted: reject update
-            }
-        }) {
-            Ok(_) => Some(Self {
-                bytes_in_flight,
-                reserved_bytes: blob_size,
-                mem_limit,
-            }),
-            Err(_) => None,
-        }
-    }
-}
-
-impl Drop for BudgetGuard {
-    fn drop(&mut self) {
-        // BUG-STAB-001: Use Release ordering to ensure prior writes are visible
-        if self.mem_limit > 0 {
-            self.bytes_in_flight
-                .fetch_sub(self.reserved_bytes as u64, Ordering::Release);
-        }
-    }
 }
 
 // ════════════════════════════════════════════════
@@ -1695,7 +1659,7 @@ impl Streamer {
 
         let done_counter = Arc::new(AtomicUsize::new(processed_sha1s_set.len()));
         let stop_flag = Arc::new(AtomicBool::new(false));
-        let bytes_in_flight = Arc::new(AtomicU64::new(0));
+        let resource_budget = Arc::new(ResourceBudget::new(self.mem_limit));
 
         // R-1: Track processed SHA1s for checkpoint resume (BUG-CONC-002: use tokio::sync::Mutex for async context)
         // BUG-STAB-010: Fixed - Initialize tracker with already-processed SHA1s from checkpoint
@@ -1762,7 +1726,7 @@ impl Streamer {
                 let save_dir = save_dir_arc.clone();
                 let extra_patterns = extra_pat.clone();
                 let stop_flag = stop_flag.clone();
-                let bytes_in_flight = bytes_in_flight.clone();
+                let resource_budget = resource_budget.clone();
                 let cache = cache.clone();
                 let cache_hits = cache_hits.clone();
                 let cache_misses = cache_misses.clone();
@@ -1783,7 +1747,7 @@ impl Streamer {
                         extra_patterns,
                         stop_flag,
                         mem_limit,
-                        bytes_in_flight,
+                        resource_budget,
                         max_scan_bytes,
                         entropy_thresh,
                         verbose_flag,
@@ -2124,7 +2088,10 @@ impl Streamer {
             }
         }
 
-        let outcome_stats = ScanOutcomeStats::from_state(&state);
+        let mut outcome_stats = ScanOutcomeStats::from_state(&state);
+        let resource_stats = resource_budget.stats();
+        outcome_stats.resource_peak_bytes = resource_stats.peak_bytes;
+        outcome_stats.resource_denied_reservations = resource_stats.denied_reservations;
         let elapsed = t0.elapsed().as_secs_f64();
         let mut ts: Vec<_> = state.tech_stack.iter().cloned().collect();
         ts.sort();
@@ -2219,7 +2186,7 @@ fn process_blob_content(
     save_dir: Option<Arc<PathBuf>>,
     extra_patterns: Arc<Vec<DynPattern>>,
     mem_limit: usize,
-    bytes_in_flight: Arc<AtomicU64>,
+    resource_budget: Arc<ResourceBudget>,
     max_scan_bytes: usize,
     entropy_threshold: f64,
     verbose: bool,
@@ -2493,16 +2460,13 @@ fn process_blob_content(
             // BUG-STAB-001/STAB-002: Use RAII BudgetGuard for atomic budget reservation
             // This ensures budget is always released, even on early returns or panics.
             let _budget_guard =
-                match BudgetGuard::try_reserve(bytes_in_flight.clone(), blob_size, mem_limit) {
+                match resource_budget.try_reserve(ResourceStage::ObjectScan, blob_size) {
                     Some(guard) => guard,
                     None => {
-                        // Memory budget exhausted, skip this blob
-                        return WorkerResult::BlobScanned {
-                            findings: vec![],
-                            tech: vec![],
-                            bytes: raw_bytes,
-                            save_result,
-                            source: ObjectSourceKind::LooseHttp,
+                        // Memory budget exhausted: surface a typed skip instead
+                        // of presenting the object as successfully scanned.
+                        return WorkerResult::Skipped {
+                            reason: SkipReason::ResourceBudget,
                         };
                     }
                 };
@@ -2612,7 +2576,7 @@ async fn fetch_and_process(
     extra_patterns: Arc<Vec<DynPattern>>,
     stop_flag: Arc<AtomicBool>,
     mem_limit: usize,
-    bytes_in_flight: Arc<AtomicU64>,
+    resource_budget: Arc<ResourceBudget>,
     max_scan_bytes: usize,
     entropy_threshold: f64,
     verbose: bool,
@@ -2690,7 +2654,7 @@ async fn fetch_and_process(
             save_dir,
             extra_patterns,
             mem_limit,
-            bytes_in_flight,
+            resource_budget,
             max_scan_bytes,
             entropy_threshold,
             verbose,
@@ -6355,6 +6319,7 @@ mod tests {
         original.files_save_failed = 1;
         original.record_skip(SkipReason::NotFound);
         original.record_skip(SkipReason::Oversized);
+        original.record_skip(SkipReason::ResourceBudget);
         original.record_failure(FailureKind::HttpStatus(503));
         original.record_source(ObjectSourceKind::Pack);
         original.record_source(ObjectSourceKind::Cache);
@@ -6378,6 +6343,7 @@ mod tests {
         assert_eq!(resumed.files_saved, original.files_saved);
         assert_eq!(resumed.files_save_failed, original.files_save_failed);
         assert_eq!(resumed.skipped_by_reason, original.skipped_by_reason);
+        assert_eq!(snapshot.skipped_resource_budget, 1);
         assert_eq!(resumed.failed_by_kind, original.failed_by_kind);
         assert_eq!(resumed.objects_by_source, original.objects_by_source);
     }

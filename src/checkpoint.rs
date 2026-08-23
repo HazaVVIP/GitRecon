@@ -379,6 +379,8 @@ pub struct StreamAccumulatorCheckpoint {
     #[serde(default)]
     pub skipped_oversized: usize,
     #[serde(default)]
+    pub skipped_resource_budget: usize,
+    #[serde(default)]
     pub archive_truncated: usize,
     #[serde(default)]
     pub archive_invalid: usize,
@@ -1718,6 +1720,7 @@ mod tests {
                 skipped_invalid_object: 2,
                 skipped_not_found: 3,
                 skipped_oversized: 4,
+                skipped_resource_budget: 5,
                 archive_truncated: 6,
                 archive_invalid: 2,
                 failed_http_statuses,
@@ -1741,6 +1744,7 @@ mod tests {
         assert_eq!(accumulator.contributors["analyst@example.test"], "Analyst");
         assert_eq!(accumulator.failed_http_statuses[&503], 2);
         assert_eq!(accumulator.objects_cache, 3);
+        assert_eq!(accumulator.skipped_resource_budget, 5);
         assert_eq!(accumulator.archive_truncated, 6);
         assert_eq!(accumulator.archive_invalid, 2);
         assert_eq!(accumulator.rate_limit_wait_ms, 125);
