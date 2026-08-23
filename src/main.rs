@@ -2532,7 +2532,7 @@ fn build_plain_http_config(args: &Cli) -> anyhow::Result<HttpConfig> {
         verify_ssl: !args.insecure, // BUG-HTTP-003: Use insecure flag to control SSL verification
         custom_ua: None,
         extra_headers: vec![],
-        max_size: 100 * 1024 * 1024,
+        max_response_size: 100 * 1024 * 1024,
         adaptive_timeout: false,
         max_timeout: Duration::from_secs(args.max_timeout),
         use_http2: args.http2,
@@ -2997,7 +2997,7 @@ async fn main() {
             args.user_agent.clone()
         },
         extra_headers,
-        max_size: 100 * 1024 * 1024,
+        max_response_size: 100 * 1024 * 1024,
         adaptive_timeout: !args.no_adaptive_timeout,
         max_timeout: Duration::from_secs(args.max_timeout),
         use_http2: args.http2,

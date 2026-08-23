@@ -603,7 +603,7 @@ mod tests {
             verify_ssl: false,
             custom_ua: None,
             extra_headers: vec![],
-            max_size: 100 * 1024 * 1024,
+            max_response_size: 100 * 1024 * 1024,
             adaptive_timeout: false,
             max_timeout: Duration::from_secs(60),
             use_http2: false,
