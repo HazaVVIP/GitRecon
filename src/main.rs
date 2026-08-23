@@ -135,6 +135,7 @@ async fn run_url_target(context: UrlRunContext<'_>, url: String, fuzz: bool) -> 
                 risk_score: 0,
                 error_code: Some(TargetErrorCode::NoGitExposure),
                 error: Some("No .git exposure detected".to_string()),
+                error_metadata: None,
             };
         }
     };
@@ -155,6 +156,7 @@ async fn run_url_target(context: UrlRunContext<'_>, url: String, fuzz: bool) -> 
             risk_score: 0,
             error_code: Some(TargetErrorCode::ConfidenceBelowMinimum),
             error: Some(format!("Confidence below minimum: {}", dr.confidence)),
+            error_metadata: None,
         };
     }
     if verbose {
@@ -233,6 +235,7 @@ async fn run_url_target(context: UrlRunContext<'_>, url: String, fuzz: bool) -> 
             risk_score: 0,
             error_code: Some(TargetErrorCode::PartialExposure),
             error: Some("Git metadata is accessible but git objects are unavailable".to_string()),
+            error_metadata: None,
         };
     }
     // ── Analysis ─────────────────────────────────────────────────
@@ -358,6 +361,7 @@ async fn run_url_target(context: UrlRunContext<'_>, url: String, fuzz: bool) -> 
         risk_score: stream_r.risk_score(),
         error_code: None,
         error: None,
+        error_metadata: None,
     };
     // O-4: Webhook delivery
     deliver_report_webhook_if_configured(
@@ -512,6 +516,7 @@ async fn run_non_url_target(
                     risk_score: summary.risk_score,
                     error_code: None,
                     error: None,
+                    error_metadata: None,
                 },
                 Err(error) => TargetOutcome {
                     target: target_name,
@@ -522,6 +527,7 @@ async fn run_non_url_target(
                     risk_score: 0,
                     error_code: Some(classify_error(&error.to_string())),
                     error: Some(error.to_string()),
+                    error_metadata: None,
                 },
             }
         }
@@ -537,6 +543,7 @@ async fn run_non_url_target(
                     risk_score: summary.risk_score,
                     error_code: None,
                     error: None,
+                    error_metadata: None,
                 },
                 Err(error) => TargetOutcome {
                     target: target_name,
@@ -547,6 +554,7 @@ async fn run_non_url_target(
                     risk_score: 0,
                     error_code: Some(classify_error(&error.to_string())),
                     error: Some(error.to_string()),
+                    error_metadata: None,
                 },
             }
         }
@@ -559,6 +567,7 @@ async fn run_non_url_target(
             risk_score: 0,
             error_code: Some(TargetErrorCode::ScanFailed),
             error: Some("URL targets require sequential orchestration".to_string()),
+            error_metadata: None,
         },
     }
 }

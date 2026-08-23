@@ -21,7 +21,8 @@ pub(crate) enum TargetErrorCode {
     UnsupportedCapability,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum ErrorStage {
     Capability,
     Authentication,
@@ -29,7 +30,8 @@ pub(crate) enum ErrorStage {
     Scan,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) struct ErrorMetadata {
     pub(crate) code: TargetErrorCode,
     pub(crate) stage: ErrorStage,
@@ -176,6 +178,8 @@ pub(crate) struct TargetOutcome {
     pub(crate) risk_score: u32,
     pub(crate) error_code: Option<TargetErrorCode>,
     pub(crate) error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) error_metadata: Option<ErrorMetadata>,
 }
 
 impl TargetOutcome {
@@ -193,6 +197,7 @@ impl TargetOutcome {
             risk_score: summary.risk_score,
             error_code: None,
             error: None,
+            error_metadata: None,
         }
     }
 
@@ -202,6 +207,7 @@ impl TargetOutcome {
         error: impl Into<String>,
     ) -> Self {
         let error = error.into();
+        let error_metadata = classify_error_details(&error);
         Self {
             target: target.into(),
             target_type: target_type.into(),
@@ -209,15 +215,16 @@ impl TargetOutcome {
             report_path: None,
             findings_count: 0,
             risk_score: 0,
-            error_code: Some(classify_error(&error)),
+            error_code: Some(error_metadata.code.clone()),
             error: Some(error),
+            error_metadata: Some(error_metadata),
         }
     }
 }
 
 #[cfg(test)]
 mod outcome_factory_tests {
-    use super::{ScanSummary, TargetErrorCode, TargetOutcome, TargetStatus};
+    use super::{ErrorStage, ScanSummary, TargetErrorCode, TargetOutcome, TargetStatus};
 
     #[test]
     fn builds_success_outcome_from_summary() {
@@ -240,5 +247,21 @@ mod outcome_factory_tests {
             outcome.error_code,
             Some(TargetErrorCode::AuthenticationFailed)
         ));
+        let metadata = outcome.error_metadata.expect("failure metadata");
+        assert_eq!(metadata.stage, ErrorStage::Authentication);
+        assert_eq!(metadata.http_status, Some(401));
+        assert!(!metadata.retryable);
+    }
+
+    #[test]
+    fn success_outcome_omits_optional_error_metadata() {
+        let summary = ScanSummary {
+            report_path: String::new(),
+            findings_count: 0,
+            risk_score: 0,
+        };
+        let value =
+            serde_json::to_value(TargetOutcome::success("target", "DIR", &summary)).unwrap();
+        assert!(!value.as_object().unwrap().contains_key("error_metadata"));
     }
 }
