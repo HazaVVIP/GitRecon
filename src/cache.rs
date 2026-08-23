@@ -11,7 +11,7 @@
 use anyhow::{Context, Result};
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -112,8 +112,11 @@ impl ObjectCache {
             std::fs::create_dir_all(parent).context("Failed to create cache directory")?;
         }
 
-        // Create r2d2 pool with SQLite connection manager
-        let manager = SqliteConnectionManager::file(cache_path);
+        // Create r2d2 pool with SQLite connection manager. The busy timeout must
+        // be configured per pooled connection; setting it only on the bootstrap
+        // connection would leave concurrent writers vulnerable to SQLITE_BUSY.
+        let manager = SqliteConnectionManager::file(cache_path)
+            .with_init(|conn| conn.execute_batch("PRAGMA busy_timeout = 5000;"));
         let pool = Pool::builder()
             .max_size(15)
             .build(manager)
@@ -216,7 +219,7 @@ impl ObjectCache {
         // Everything wrapped in one transaction so put + size accounting + eviction
         // are all-or-nothing.
         let _ = (|| -> rusqlite::Result<()> {
-            let tx = conn.transaction()?;
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
             // If we're overwriting an existing entry, subtract its old size from the
             // running total before writing.
@@ -501,6 +504,8 @@ fn now_seconds() -> i64 {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
 
     #[test]
@@ -557,6 +562,30 @@ mod tests {
 
         let disabled = ObjectCache::new_at_path(temp.path().join("disabled.db"), 0, true).unwrap();
         assert!(!disabled.remove("entry").await.unwrap());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_puts_preserve_metadata() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache =
+            Arc::new(ObjectCache::new_at_path(temp.path().join("cache.db"), 0, false).unwrap());
+        let mut tasks = Vec::new();
+        for index in 0..32 {
+            let cache = Arc::clone(&cache);
+            tasks.push(tokio::spawn(async move {
+                let key = format!("entry-{index}");
+                let payload = format!("payload-{index}");
+                cache.put(&key, payload.as_bytes(), None).await;
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap();
+        }
+
+        let stats = cache.stats().await;
+        assert_eq!(stats.total_entries, 32);
+        let expected_bytes: i64 = (0..32).map(|i| format!("payload-{i}").len() as i64).sum();
+        assert_eq!(stats.total_bytes, expected_bytes);
     }
 
     #[test]
