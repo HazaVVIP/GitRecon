@@ -11,7 +11,7 @@
 use anyhow::{Context, Result};
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -113,7 +113,7 @@ impl ObjectCache {
         }
 
         // Create r2d2 pool with SQLite connection manager
-        let manager = SqliteConnectionManager::file(&cache_path);
+        let manager = SqliteConnectionManager::file(cache_path);
         let pool = Pool::builder()
             .max_size(15)
             .build(manager)
@@ -287,6 +287,40 @@ impl ObjectCache {
             tx.commit()?;
             Ok(())
         })();
+    }
+
+    /// Remove one cache entry and keep the running size metadata consistent.
+    pub async fn remove(&self, sha1: &str) -> Result<bool> {
+        if self.no_cache {
+            return Ok(false);
+        }
+        let mut conn = self
+            .pool
+            .get()
+            .context("Failed to get connection for cache removal")?;
+        let tx = conn
+            .transaction()
+            .context("Failed to start cache removal transaction")?;
+        let old_len: Option<i64> = tx
+            .query_row(
+                "SELECT LENGTH(content) FROM cache WHERE sha1 = ?1",
+                params![sha1],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(old_len) = old_len else {
+            tx.commit()
+                .context("Failed to commit no-op cache removal transaction")?;
+            return Ok(false);
+        };
+        tx.execute("DELETE FROM cache WHERE sha1 = ?1", params![sha1])?;
+        tx.execute(
+            "UPDATE cache_meta SET value = MAX(value - ?1, 0) WHERE key = 'total_bytes'",
+            params![old_len],
+        )?;
+        tx.commit()
+            .context("Failed to commit cache removal transaction")?;
+        Ok(true)
     }
 
     /// Clean up expired entries (TTL-based cleanup)
@@ -503,6 +537,26 @@ mod tests {
         assert_eq!(CacheStats::hit_rate(0, 100), 0.0);
         assert_eq!(CacheStats::hit_rate(50, 100), 50.0);
         assert_eq!(CacheStats::hit_rate(100, 100), 100.0);
+    }
+
+    #[tokio::test]
+    async fn remove_updates_metadata_and_is_idempotent() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = ObjectCache::new_at_path(temp.path().join("cache.db"), 0, false).unwrap();
+        cache.put("entry", b"payload", None).await;
+
+        let populated = cache.stats().await;
+        assert_eq!(populated.total_entries, 1);
+        assert_eq!(populated.total_bytes, 7);
+        assert!(cache.remove("entry").await.unwrap());
+
+        let empty = cache.stats().await;
+        assert_eq!(empty.total_entries, 0);
+        assert_eq!(empty.total_bytes, 0);
+        assert!(!cache.remove("entry").await.unwrap());
+
+        let disabled = ObjectCache::new_at_path(temp.path().join("disabled.db"), 0, true).unwrap();
+        assert!(!disabled.remove("entry").await.unwrap());
     }
 
     #[test]

@@ -395,11 +395,15 @@ Buat error type yang membawa stage, provider, HTTP status, retryability, redacte
 
 ## P2-06 — Perbaiki cache semantics dan lifecycle
 
-**Status:** `TODO`  
+**Status:** `IN PROGRESS`
 **Dependensi:** P1-07, P1-08  
-**Area:** `src/cache.rs`, README, DEVELOPMENT.md
+**Area:** `src/cache.rs`, `src/object_source.rs`, README, DEVELOPMENT.md
 
 Pilih dan implementasikan semantics yang benar-benar diinginkan: update access timestamp untuk LRU, atau ubah dokumentasi menjadi oldest-inserted eviction. Tambahkan cleanup policy, inspect/stats command, eviction telemetry, dan handling expired entry yang eksplisit.
+
+### Implementasi P2-06 (sub-bagian lifecycle dan integrity quarantine)
+
+Cache-enabled scan sekarang membersihkan entry TTL-expired pada awal scan, dengan TTL `0` tetap berarti permanent dan tidak ikut dibersihkan. Cache hit untuk namespace `raw-object-v1:<sha1>` wajib lolos parsing canonical loose Git object serta verifikasi SHA-1 sebelum digunakan; entry invalid/corrupt dihapus secara transactional dengan pembaruan `cache_meta.total_bytes`, lalu acquisition tetap jatuh ke loose HTTP. Object HTTP yang valid kembali di-cache, sehingga corruption tidak memblokir coverage dan source precedence tetap pack → valid cache → loose HTTP. Regression tests mencakup metadata removal/idempotence, cache hit canonical, quarantine, fallback, cache miss/hit accounting, dan re-admission object hasil recovery. Pekerjaan tersisa: menetapkan semantics eviction/access timestamp secara eksplisit, inspect/stats operator surface, eviction telemetry, serta stress test concurrency/invalidation.
 
 ### Acceptance criteria
 

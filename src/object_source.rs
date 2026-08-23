@@ -63,11 +63,16 @@ impl<'a> ObjectSource<'a> {
         let cache_key = format!("{CACHE_NAMESPACE}:{sha1}");
         if let Some(cache) = self.config.cache {
             if let Some(bytes) = cache.get(&cache_key).await {
-                self.config.cache_hits.fetch_add(1, Ordering::Relaxed);
-                return Ok(ObjectEnvelope {
-                    bytes,
-                    source: ObjectSourceKind::Cache,
-                });
+                if ObjectParser.parse(&bytes, sha1).is_some() {
+                    self.config.cache_hits.fetch_add(1, Ordering::Relaxed);
+                    return Ok(ObjectEnvelope {
+                        bytes,
+                        source: ObjectSourceKind::Cache,
+                    });
+                }
+                // Never let a stale or corrupted cache row hide a valid remote
+                // object. Remove it transactionally, then fall through to HTTP.
+                let _ = cache.remove(&cache_key).await;
             }
             self.config.cache_misses.fetch_add(1, Ordering::Relaxed);
         }
@@ -137,7 +142,9 @@ mod tests {
     use crate::git_parser::ObjectParser;
     use crate::http_client::{HttpClient, HttpConfig, RetryStrategy};
 
-    async fn spawn_http_sequence(responses: Vec<(u16, Vec<(String, String)>, Vec<u8>)>) -> String {
+    type HttpFixture = (u16, Vec<(String, String)>, Vec<u8>);
+
+    async fn spawn_http_sequence(responses: Vec<HttpFixture>) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         tokio::spawn(async move {
@@ -226,8 +233,9 @@ mod tests {
     async fn cache_source_wins_and_loose_success_is_cached() {
         let temp = tempdir().unwrap();
         let cache = ObjectCache::new_at_path(temp.path().join("cache.db"), 0, false).unwrap();
+        let (cache_sha, cache_bytes) = encoded_blob(b"cached-content");
         cache
-            .put("raw-object-v1:cache-sha", b"cached-content", None)
+            .put(&format!("raw-object-v1:{cache_sha}"), &cache_bytes, None)
             .await;
 
         let client = HttpClient::new(HttpConfig::default()).unwrap();
@@ -243,9 +251,9 @@ mod tests {
             &cache_hits,
             &cache_misses,
         );
-        let cached = source.acquire("cache-sha").await.unwrap();
+        let cached = source.acquire(&cache_sha).await.unwrap();
         assert_eq!(cached.source, ObjectSourceKind::Cache);
-        assert_eq!(cached.bytes, b"cached-content");
+        assert_eq!(cached.bytes, cache_bytes);
         assert_eq!(cache_hits.load(Ordering::Relaxed), 1);
         assert_eq!(cache_misses.load(Ordering::Relaxed), 0);
 
@@ -270,8 +278,6 @@ mod tests {
         assert_eq!(fetched.source, ObjectSourceKind::LooseHttp);
         assert_eq!(fetched.bytes.len(), encoded_len);
         assert_eq!(cache_misses.load(Ordering::Relaxed), 1);
-        drop(source);
-
         let cached_again = source_config(
             &client,
             &git_url,
@@ -287,6 +293,40 @@ mod tests {
         assert_eq!(cached_again.source, ObjectSourceKind::Cache);
         assert_eq!(cache_hits.load(Ordering::Relaxed), 1);
         assert_eq!(cache.stats().await.total_entries, 2);
+    }
+
+    #[tokio::test]
+    async fn corrupted_cache_entry_is_quarantined_before_http_fallback() {
+        let temp = tempdir().unwrap();
+        let cache = ObjectCache::new_at_path(temp.path().join("cache.db"), 0, false).unwrap();
+        let (sha1, valid_object) = encoded_blob(b"recovered-content");
+        let cache_key = format!("raw-object-v1:{sha1}");
+        cache.put(&cache_key, b"corrupted-cache-row", None).await;
+        let base_url = spawn_http_sequence(vec![(200, vec![], valid_object)]).await;
+        let client = HttpClient::new(HttpConfig::default()).unwrap();
+        let pack_objects = HashMap::new();
+        let cache_hits = AtomicUsize::new(0);
+        let cache_misses = AtomicUsize::new(0);
+        let git_url = format!("{base_url}/.git/objects");
+        let fetched = source_config(
+            &client,
+            &git_url,
+            &pack_objects,
+            Some(&cache),
+            1024,
+            &cache_hits,
+            &cache_misses,
+        )
+        .acquire(&sha1)
+        .await
+        .unwrap();
+
+        assert_eq!(fetched.source, ObjectSourceKind::LooseHttp);
+        assert_eq!(cache_hits.load(Ordering::Relaxed), 0);
+        assert_eq!(cache_misses.load(Ordering::Relaxed), 1);
+        assert_eq!(cache.stats().await.total_entries, 1);
+        let recovered = cache.get(&cache_key).await.expect("recovered cache row");
+        assert!(ObjectParser.parse(&recovered, &sha1).is_some());
     }
 
     #[tokio::test]
@@ -326,9 +366,11 @@ mod tests {
             (200, vec![], valid_object),
         ])
         .await;
-        let mut retry_config = HttpConfig::default();
-        retry_config.retries = 1;
-        retry_config.retry_strategy = RetryStrategy::Standard;
+        let retry_config = HttpConfig {
+            retries: 1,
+            retry_strategy: RetryStrategy::Standard,
+            ..HttpConfig::default()
+        };
         let client = HttpClient::new(retry_config).unwrap();
         let pack_objects = HashMap::new();
         let cache_hits = AtomicUsize::new(0);
@@ -368,8 +410,10 @@ mod tests {
         ));
 
         let oversized_url = spawn_http_sequence(vec![(200, vec![], vec![b'x'; 128])]).await;
-        let mut oversized_config = HttpConfig::default();
-        oversized_config.max_size = 16;
+        let oversized_config = HttpConfig {
+            max_size: 16,
+            ..HttpConfig::default()
+        };
         let oversized_client = HttpClient::new(oversized_config).unwrap();
         let oversized_git_url = format!("{oversized_url}/.git/objects");
         let oversized_source = source_config(
