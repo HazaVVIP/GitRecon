@@ -263,6 +263,13 @@ async fn run_url_target(context: UrlRunContext<'_>, url: String, fuzz: bool) -> 
         None
     };
 
+    // PERF-005: Reclaim expired entries before every enabled-cache scan.
+    if let Some(ref cache) = cache {
+        if let Err(error) = cache.cleanup_expired().await {
+            eprintln!("  ⚠   Failed to clean expired cache entries: {}", error);
+        }
+    }
+
     // PERF-005: Log cache status (BUG-ERR-009: now async)
     if verbose {
         if let Some(ref cache) = cache {

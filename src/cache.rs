@@ -290,7 +290,6 @@ impl ObjectCache {
     }
 
     /// Clean up expired entries (TTL-based cleanup)
-    #[allow(dead_code)]
     pub async fn cleanup_expired(&self) -> Result<usize> {
         // Sprint 3 (S3.5): permanent-TTL short-circuit — nothing to clean.
         if self.ttl_seconds == i64::MAX {
