@@ -1,11 +1,10 @@
 //! temp_cleanup.rs
 //! SEC-004: Temporary File Cleanup Race Conditions
 //!
-//! Provides RAII guards for temporary file/directory cleanup that:
+//! Provides an RAII guard for temporary directory cleanup that:
 //! 1. Automatically clean up on Drop (normal exit)
 //! 2. Clean up on signal interruption (SIGINT/SIGTERM) via GLOBAL_CLEANUP_PATHS registry
-//! 3. Support atomic checkpoint/resume operations
-//! 4. Handle nested cleanup scopes
+//! 3. Handle nested cleanup scopes
 //!
 //! Signal-time cleanup (Sprint 2, S2.6): Drop handlers do NOT run when the signal
 //! handler calls `std::process::exit`. To close that gap, every TempDirGuard registers
@@ -163,84 +162,6 @@ impl Drop for TempDirGuard {
     }
 }
 
-/// RAII guard for a temporary file.
-///
-/// Similar to TempDirGuard but for individual files.
-#[derive(Debug, Clone)]
-pub struct TempFileGuard {
-    path: Option<PathBuf>,
-}
-
-impl TempFileGuard {
-    /// Create a new guard for the given file path.
-    #[allow(dead_code)]
-    pub fn new(path: PathBuf) -> Self {
-        Self { path: Some(path) }
-    }
-
-    /// Get the path being guarded.
-    #[allow(dead_code)]
-    pub fn path(&self) -> Option<&Path> {
-        self.path.as_deref()
-    }
-
-    /// Release the guard without cleanup.
-    #[allow(dead_code)]
-    pub fn release(mut self) -> PathBuf {
-        self.path.take().unwrap_or_default()
-    }
-}
-
-impl Drop for TempFileGuard {
-    fn drop(&mut self) {
-        if let Some(path) = self.path.take() {
-            let _ = std::fs::remove_file(&path);
-        }
-    }
-}
-
-/// Atomic file operations for checkpoint/resume safety.
-///
-/// This module provides atomic write operations that are safe to use
-/// with checkpoint/resume functionality.
-pub mod atomic {
-    use std::io::Write;
-    use std::path::Path;
-
-    /// Atomically write data to a file.
-    ///
-    /// This writes to a temporary file and then renames it,
-    /// ensuring that the target file is either complete or not present.
-    ///
-    /// # Errors
-    /// Returns an error if the write or rename fails.
-    pub fn write_atomically<P: AsRef<Path>>(path: P, data: &[u8]) -> std::io::Result<()> {
-        let path = path.as_ref();
-        let temp_path = path.with_extension("tmp");
-
-        // Write to temp file
-        {
-            let mut file = std::fs::File::create(&temp_path)?;
-            file.write_all(data)?;
-            file.sync_all()?;
-        }
-
-        // Atomic rename
-        std::fs::rename(&temp_path, path)?;
-
-        Ok(())
-    }
-
-    /// Atomically write string data to a file.
-    ///
-    /// # Errors
-    /// Returns an error if the write or rename fails.
-    #[allow(dead_code)]
-    pub fn write_string_atomically<P: AsRef<Path>>(path: P, data: &str) -> std::io::Result<()> {
-        write_atomically(path, data.as_bytes())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -276,53 +197,6 @@ mod tests {
 
         // Manual cleanup
         std::fs::remove_dir_all(&temp_dir).unwrap();
-    }
-
-    #[test]
-    fn test_temp_file_guard_cleanup() {
-        let temp_file = std::env::temp_dir().join("gitrecon_test_file.tmp");
-        std::fs::write(&temp_file, b"test data").unwrap();
-        assert!(temp_file.exists());
-
-        {
-            let _guard = TempFileGuard::new(temp_file.clone());
-            assert!(temp_file.exists());
-        }
-
-        // File removed after drop
-        assert!(!temp_file.exists());
-    }
-
-    #[test]
-    fn test_atomic_write() {
-        let target = std::env::temp_dir().join("gitrecon_atomic_test.txt");
-        let data = b"atomic test data";
-
-        atomic::write_atomically(&target, data).unwrap();
-
-        // File exists with correct content
-        assert!(target.exists());
-        let content = std::fs::read(&target).unwrap();
-        assert_eq!(content, data);
-
-        // Cleanup
-        std::fs::remove_file(&target).unwrap();
-    }
-
-    #[test]
-    fn test_atomic_write_overwrite() {
-        let target = std::env::temp_dir().join("gitrecon_atomic_overwrite.txt");
-
-        // First write
-        atomic::write_atomically(&target, b"first").unwrap();
-        assert_eq!(std::fs::read_to_string(&target).unwrap(), "first");
-
-        // Overwrite
-        atomic::write_atomically(&target, b"second").unwrap();
-        assert_eq!(std::fs::read_to_string(&target).unwrap(), "second");
-
-        // Cleanup
-        std::fs::remove_file(&target).unwrap();
     }
 
     // ── Sprint 2 (S2.6) — signal-time cleanup ────────────────────────────────
