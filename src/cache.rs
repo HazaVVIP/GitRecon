@@ -12,7 +12,7 @@ use anyhow::{Context, Result};
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::{params, Connection};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Maximum cache size in bytes (1GB)
@@ -97,7 +97,15 @@ impl ObjectCache {
     /// * `ttl_seconds` - Time-to-live for cache entries in seconds (0 = no expiration)
     /// * `no_cache` - If true, bypass cache entirely (skip all cache operations)
     pub fn new(ttl_seconds: i64, no_cache: bool) -> Result<Self> {
-        let cache_path = cache_db_path();
+        Self::new_at_path(cache_db_path(), ttl_seconds, no_cache)
+    }
+
+    /// Create a cache backed by an explicit SQLite path.
+    ///
+    /// This is useful for deterministic tests and isolated scan jobs; the
+    /// production constructor above continues to use `~/.gitrecon/cache.db`.
+    pub fn new_at_path(path: impl AsRef<Path>, ttl_seconds: i64, no_cache: bool) -> Result<Self> {
+        let cache_path = path.as_ref();
 
         // Create cache directory if it doesn't exist
         if let Some(parent) = cache_path.parent() {

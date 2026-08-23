@@ -198,7 +198,7 @@ cargo test --all-targets
 cargo build --release
 ```
 
-The repository includes unit tests, forge identity, retrieval, forbidden/error, and path-aware Bitbucket contracts using local TCP response servers, pagination regression tests for GitHub, GitLab, and Bitbucket, checkpoint-directory resume coverage, CLI help coverage, and binary-level integration tests using temporary fixtures. Tests do not require live credentials or external network access.
+The repository includes unit tests, deterministic object-source acquisition contracts using local TCP response fixtures, forge identity/retrieval/forbidden/error contracts, path-aware Bitbucket contracts, pagination regression tests for GitHub, GitLab, and Bitbucket, checkpoint-directory resume coverage, CLI help coverage, and binary-level integration tests using temporary fixtures. Tests do not require live credentials or external network access. The remote acquisition benchmark can be run with `python3 tools/benchmark_remote_acquisition.py --binary target/release/gitrecon`; it emits JSON and serves the same kind of temporary Git fixture entirely on localhost.
 
 See [DEVELOPMENT.md](DEVELOPMENT.md) for production defaults, maintenance rules, architecture details, and the release checklist.
 

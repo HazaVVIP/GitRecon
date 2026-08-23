@@ -67,7 +67,14 @@ The following defaults are deliberate and should not be changed casually:
 
 ## Scanner Benchmarking
 
-The repository includes a black-box local-directory benchmark at `tools/benchmark_local_scan.py`. Run it against the optimized release binary with:
+The repository includes a black-box local-directory benchmark at `tools/benchmark_local_scan.py` and a deterministic remote-acquisition benchmark at `tools/benchmark_remote_acquisition.py`. The remote benchmark creates a temporary Git repository, serves it over localhost, runs the optimized binary, validates that object acquisition occurred, and emits JSON source/outcome metrics. Run it with:
+
+```bash
+cargo build --release
+python3 tools/benchmark_remote_acquisition.py --binary target/release/gitrecon --repetitions 3
+```
+
+The local-directory benchmark remains available at `tools/benchmark_local_scan.py`; run it against the optimized release binary with:
 
 ```bash
 cargo build --release

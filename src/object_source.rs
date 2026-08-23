@@ -75,6 +75,14 @@ impl<'a> ObjectSource<'a> {
         let url = format!("{}/{}", self.config.git_url, obj_path(sha1));
         let response = self.config.client.get(&url).await;
         if !response.ok() {
+            if response.status == 0
+                && response
+                    .error
+                    .as_deref()
+                    .is_some_and(|error| error.contains("max_size"))
+            {
+                return Err(AcquisitionOutcome::Oversized);
+            }
             return if response.status == 404 {
                 Err(AcquisitionOutcome::NotFound)
             } else {
@@ -116,10 +124,78 @@ impl<'a> ObjectSource<'a> {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::io::Write;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use flate2::{write::ZlibEncoder, Compression};
+    use tempfile::tempdir;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
     use super::{AcquisitionOutcome, ObjectSource, ObjectSourceConfig, ObjectSourceKind};
-    use crate::http_client::{HttpClient, HttpConfig};
+    use crate::cache::ObjectCache;
+    use crate::git_parser::ObjectParser;
+    use crate::http_client::{HttpClient, HttpConfig, RetryStrategy};
+
+    async fn spawn_http_sequence(responses: Vec<(u16, Vec<(String, String)>, Vec<u8>)>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            for (status, headers, body) in responses {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0u8; 2048];
+                let read = socket.read(&mut request).await.unwrap();
+                assert!(String::from_utf8_lossy(&request[..read]).starts_with("GET /"));
+                let reason = match status {
+                    200 => "OK",
+                    404 => "Not Found",
+                    429 => "Too Many Requests",
+                    _ => "Fixture",
+                };
+                let mut response = format!(
+                    "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n",
+                    body.len()
+                );
+                for (name, value) in headers {
+                    response.push_str(&format!("{name}: {value}\r\n"));
+                }
+                response.push_str("\r\n");
+                socket.write_all(response.as_bytes()).await.unwrap();
+                socket.write_all(&body).await.unwrap();
+            }
+        });
+        format!("http://{address}")
+    }
+
+    fn encoded_blob(content: &[u8]) -> (String, Vec<u8>) {
+        let sha1 = ObjectParser.sha1_of("blob", content);
+        let mut raw = format!("blob {}\x00", content.len()).into_bytes();
+        raw.extend_from_slice(content);
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&raw).unwrap();
+        (sha1, encoder.finish().unwrap())
+    }
+
+    fn source_config<'a>(
+        client: &'a HttpClient,
+        git_url: &'a str,
+        pack_objects: &'a HashMap<String, Vec<u8>>,
+        cache: Option<&'a ObjectCache>,
+        max_blob_size: usize,
+        cache_hits: &'a AtomicUsize,
+        cache_misses: &'a AtomicUsize,
+    ) -> ObjectSource<'a> {
+        ObjectSource::new(ObjectSourceConfig {
+            client,
+            git_url,
+            pack_objects,
+            cache,
+            max_blob_size,
+            save_enabled: false,
+            cache_hits,
+            cache_misses,
+        })
+    }
 
     #[tokio::test]
     async fn pack_source_wins_without_http() {
@@ -144,6 +220,171 @@ mod tests {
         assert_eq!(envelope.source, ObjectSourceKind::Pack);
         assert_eq!(cache_hits.load(Ordering::Relaxed), 0);
         assert_eq!(cache_misses.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn cache_source_wins_and_loose_success_is_cached() {
+        let temp = tempdir().unwrap();
+        let cache = ObjectCache::new_at_path(temp.path().join("cache.db"), 0, false).unwrap();
+        cache
+            .put("raw-object-v1:cache-sha", b"cached-content", None)
+            .await;
+
+        let client = HttpClient::new(HttpConfig::default()).unwrap();
+        let pack_objects = HashMap::new();
+        let cache_hits = AtomicUsize::new(0);
+        let cache_misses = AtomicUsize::new(0);
+        let source = source_config(
+            &client,
+            "http://127.0.0.1:1/.git/objects",
+            &pack_objects,
+            Some(&cache),
+            1024,
+            &cache_hits,
+            &cache_misses,
+        );
+        let cached = source.acquire("cache-sha").await.unwrap();
+        assert_eq!(cached.source, ObjectSourceKind::Cache);
+        assert_eq!(cached.bytes, b"cached-content");
+        assert_eq!(cache_hits.load(Ordering::Relaxed), 1);
+        assert_eq!(cache_misses.load(Ordering::Relaxed), 0);
+
+        let (sha1, encoded) = encoded_blob(b"loose-fixture");
+        let encoded_len = encoded.len();
+        let base_url = spawn_http_sequence(vec![(200, vec![], encoded)]).await;
+        let client = HttpClient::new(HttpConfig::default()).unwrap();
+        let cache_hits = AtomicUsize::new(0);
+        let cache_misses = AtomicUsize::new(0);
+        let pack_objects = HashMap::new();
+        let git_url = format!("{base_url}/.git/objects");
+        let source = source_config(
+            &client,
+            &git_url,
+            &pack_objects,
+            Some(&cache),
+            1024,
+            &cache_hits,
+            &cache_misses,
+        );
+        let fetched = source.acquire(&sha1).await.unwrap();
+        assert_eq!(fetched.source, ObjectSourceKind::LooseHttp);
+        assert_eq!(fetched.bytes.len(), encoded_len);
+        assert_eq!(cache_misses.load(Ordering::Relaxed), 1);
+        drop(source);
+
+        let cached_again = source_config(
+            &client,
+            &git_url,
+            &pack_objects,
+            Some(&cache),
+            1024,
+            &cache_hits,
+            &cache_misses,
+        )
+        .acquire(&sha1)
+        .await
+        .unwrap();
+        assert_eq!(cached_again.source, ObjectSourceKind::Cache);
+        assert_eq!(cache_hits.load(Ordering::Relaxed), 1);
+        assert_eq!(cache.stats().await.total_entries, 2);
+    }
+
+    #[tokio::test]
+    async fn invalid_loose_object_is_not_admitted_to_cache() {
+        let temp = tempdir().unwrap();
+        let cache = ObjectCache::new_at_path(temp.path().join("cache.db"), 0, false).unwrap();
+        let (sha1, _) = encoded_blob(b"expected-content");
+        let base_url = spawn_http_sequence(vec![(200, vec![], b"invalid-fixture".to_vec())]).await;
+        let client = HttpClient::new(HttpConfig::default()).unwrap();
+        let pack_objects = HashMap::new();
+        let cache_hits = AtomicUsize::new(0);
+        let cache_misses = AtomicUsize::new(0);
+        let git_url = format!("{base_url}/.git/objects");
+        let source = source_config(
+            &client,
+            &git_url,
+            &pack_objects,
+            Some(&cache),
+            1024,
+            &cache_hits,
+            &cache_misses,
+        );
+        let fetched = source.acquire(&sha1).await.unwrap();
+        assert_eq!(fetched.source, ObjectSourceKind::LooseHttp);
+        assert_eq!(cache.stats().await.total_entries, 0);
+    }
+
+    #[tokio::test]
+    async fn http_fixture_exposes_retry_not_found_and_oversized_outcomes() {
+        let (sha1, valid_object) = encoded_blob(b"retry-fixture");
+        let retry_url = spawn_http_sequence(vec![
+            (
+                429,
+                vec![("Retry-After".to_string(), "0".to_string())],
+                Vec::new(),
+            ),
+            (200, vec![], valid_object),
+        ])
+        .await;
+        let mut retry_config = HttpConfig::default();
+        retry_config.retries = 1;
+        retry_config.retry_strategy = RetryStrategy::Standard;
+        let client = HttpClient::new(retry_config).unwrap();
+        let pack_objects = HashMap::new();
+        let cache_hits = AtomicUsize::new(0);
+        let cache_misses = AtomicUsize::new(0);
+        let retry_git_url = format!("{retry_url}/.git/objects");
+        let source = source_config(
+            &client,
+            &retry_git_url,
+            &pack_objects,
+            None,
+            1024,
+            &cache_hits,
+            &cache_misses,
+        );
+        assert_eq!(
+            source.acquire(&sha1).await.unwrap().source,
+            ObjectSourceKind::LooseHttp
+        );
+        assert_eq!(client.retry_metrics.retry_429.load(Ordering::Relaxed), 1);
+        assert_eq!(client.retry_metrics.success.load(Ordering::Relaxed), 1);
+
+        let not_found_url = spawn_http_sequence(vec![(404, vec![], Vec::new())]).await;
+        let not_found_client = HttpClient::new(HttpConfig::default()).unwrap();
+        let not_found_git_url = format!("{not_found_url}/.git/objects");
+        let not_found_source = source_config(
+            &not_found_client,
+            &not_found_git_url,
+            &pack_objects,
+            None,
+            1024,
+            &cache_hits,
+            &cache_misses,
+        );
+        assert!(matches!(
+            not_found_source.acquire("missing-sha").await,
+            Err(AcquisitionOutcome::NotFound)
+        ));
+
+        let oversized_url = spawn_http_sequence(vec![(200, vec![], vec![b'x'; 128])]).await;
+        let mut oversized_config = HttpConfig::default();
+        oversized_config.max_size = 16;
+        let oversized_client = HttpClient::new(oversized_config).unwrap();
+        let oversized_git_url = format!("{oversized_url}/.git/objects");
+        let oversized_source = source_config(
+            &oversized_client,
+            &oversized_git_url,
+            &pack_objects,
+            None,
+            16,
+            &cache_hits,
+            &cache_misses,
+        );
+        assert!(matches!(
+            oversized_source.acquire("oversized-sha").await,
+            Err(AcquisitionOutcome::Oversized)
+        ));
     }
 
     #[test]

@@ -256,7 +256,7 @@ Dokumentasikan dan modelkan perbedaan `snapshot` versus `history` scan. Tambahka
 
 ## P1-07 — Bangun deterministic remote acquisition test harness
 
-**Status:** `TODO`  
+**Status:** `IN PROGRESS`  
 **Dependensi:** P1-01  
 **Area:** `tests/`, `src/object_source.rs`, `src/http_client.rs`, `tools/`
 
@@ -269,6 +269,10 @@ Buat local HTTP fixture server untuk menguji pack, cache, loose object, invalid 
 - Cache hit/miss serta source provenance muncul benar di JSON report.
 - Retry attempts, terminal failures, cancellation, and response caps dapat diverifikasi tanpa internet.
 - Benchmark dapat menghasilkan JSON output dan menjalankan fixture yang sama di CI.
+
+### Implementasi P1-07 (sub-bagian acquisition fixture dan metrics)
+
+`ObjectSource` sekarang memiliki contract coverage deterministic untuk precedence pack → cache → loose HTTP, cache write-back hanya untuk canonical Git object yang lolos verifikasi, invalid loose object yang tidak masuk cache, 429 retry, 404, dan response-size cap. `ObjectCache::new_at_path` memungkinkan SQLite fixture terisolasi tanpa mengubah lokasi cache produksi. `tools/benchmark_remote_acquisition.py` membuat repository Git sementara, menyajikannya melalui localhost, menjalankan release binary, memvalidasi object acquisition, dan menghasilkan JSON source/outcome/timing metrics. Harness tidak memakai network eksternal atau credential-shaped fixture. Pekerjaan tersisa adalah memperluas fixture black-box menjadi skenario pack/cache/cancellation/resume yang dapat dijalankan konsisten di CI.
 
 ## P1-08 — Bangun global resource budget
 
