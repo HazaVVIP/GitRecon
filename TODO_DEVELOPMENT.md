@@ -414,9 +414,13 @@ Cache-enabled scan sekarang membersihkan entry TTL-expired pada awal scan, denga
 
 ## P2-07 — Kurangi dead-code allowances dan hapus jalur obsolete
 
-**Status:** `TODO`  
-**Dependensi:** P2-01, P2-02  
+**Status:** `IN PROGRESS`
+**Dependensi:** P2-01, P2-02
 **Area:** seluruh `src/`
+
+### Implementasi P2-07 (sub-bagian shared helper)
+
+`CacheStats::hit_rate` sekarang dipakai langsung oleh reporter sehingga perhitungan hit-rate tidak diduplikasi dan suppression `dead_code` pada helper tersebut telah dihapus. Jalur scanner, binary dispatch, object verification, dan exhaustive policy tidak disentuh. Kandidat allowance lain tetap menunggu klasifikasi per-symbol serta regression coverage sebelum dihapus atau dimigrasikan.
 
 Audit setiap `#[allow(dead_code)]`, `#[allow(clippy::too_many_lines)]`, dan helper yang hanya tersisa dari pipeline lama. Migrasikan API yang masih relevan atau hapus code path yang tidak digunakan.
 

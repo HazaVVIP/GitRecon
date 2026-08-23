@@ -533,7 +533,6 @@ impl CacheStats {
     }
 
     /// Calculate hit rate from hits and total requests
-    #[allow(dead_code)]
     pub fn hit_rate(hits: u64, total: u64) -> f64 {
         if total == 0 {
             0.0

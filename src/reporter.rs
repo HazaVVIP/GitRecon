@@ -570,11 +570,7 @@ impl Reporter {
         // PERF-005: Display cache stats
         if r.cache_hits > 0 || r.cache_misses > 0 {
             let total_requests = r.cache_hits + r.cache_misses;
-            let hit_rate = if total_requests > 0 {
-                (r.cache_hits as f64 / total_requests as f64) * 100.0
-            } else {
-                0.0
-            };
+            let hit_rate = CacheStats::hit_rate(r.cache_hits as u64, total_requests as u64);
             println!(
                 "│  {:<16}: {}/{} ({:.1}%)",
                 "Cache hits", r.cache_hits, total_requests, hit_rate
