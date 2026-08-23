@@ -804,6 +804,80 @@ mod tests {
 
     struct EmptyForge;
 
+    struct ParityForge;
+
+    #[async_trait::async_trait]
+    impl Forge for ParityForge {
+        async fn authenticate(&mut self, _token: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn enumerate_repos(&self, _scope: EnumScope) -> anyhow::Result<Vec<Repository>> {
+            Ok(vec![fixture_repository()])
+        }
+
+        async fn get_tree(
+            &self,
+            _repo: &Repository,
+            branch: &str,
+        ) -> anyhow::Result<Vec<TreeEntry>> {
+            anyhow::ensure!(branch == "main", "unexpected branch");
+            Ok(vec![
+                TreeEntry {
+                    path: "config.txt".to_string(),
+                    obj_type: "blob".to_string(),
+                    sha: "text-sha".to_string(),
+                    size: Some(15),
+                    mode: Some("100644".to_string()),
+                },
+                TreeEntry {
+                    path: "fixture.zip".to_string(),
+                    obj_type: "blob".to_string(),
+                    sha: "archive-sha".to_string(),
+                    size: None,
+                    mode: Some("100644".to_string()),
+                },
+            ])
+        }
+
+        async fn get_blob(&self, _repo: &Repository, sha: &str) -> anyhow::Result<Vec<u8>> {
+            anyhow::bail!("get_blob should not be called for path-aware mock entry {sha}")
+        }
+
+        async fn get_blob_entry(
+            &self,
+            _repo: &Repository,
+            entry: &TreeEntry,
+        ) -> anyhow::Result<Vec<u8>> {
+            if entry.path == "config.txt" {
+                return Ok(b"CUSTOM_ABCD1234".to_vec());
+            }
+            let mut writer = ZipWriter::new(std::io::Cursor::new(Vec::new()));
+            writer
+                .start_file("nested/config.txt", SimpleFileOptions::default())
+                .unwrap();
+            writer.write_all(b"CUSTOM_ABCD1234").unwrap();
+            Ok(writer.finish().unwrap().into_inner())
+        }
+
+        fn rate_limit_remaining(&self) -> Option<(u32, std::time::Duration)> {
+            Some((999, std::time::Duration::from_secs(30)))
+        }
+
+        fn platform(&self) -> Platform {
+            Platform::Gitea
+        }
+
+        async fn get_head_sha(&self, _repo: &Repository, branch: &str) -> anyhow::Result<String> {
+            anyhow::ensure!(branch == "main", "unexpected branch");
+            Ok("abcdef0123456789abcdef0123456789abcdef01".to_string())
+        }
+
+        async fn whoami(&self) -> anyhow::Result<(String, String)> {
+            Ok(("fixture-user".to_string(), "Fixture User".to_string()))
+        }
+    }
+
     #[async_trait::async_trait]
     impl Forge for EmptyForge {
         async fn authenticate(&mut self, _token: &str) -> anyhow::Result<()> {
@@ -856,6 +930,73 @@ mod tests {
         assert_eq!(session.login, "empty");
         assert!(session.repositories.is_empty());
         assert_eq!(session.forge.platform(), Platform::GitHub);
+    }
+
+    #[tokio::test]
+    async fn provider_mock_repository_loop_scans_text_and_archive_parity() {
+        let output = tempfile::tempdir().expect("create output directory");
+        let workspace = WorkspaceLifecycle::new(
+            output.path(),
+            "provider-mock",
+            true,
+            "gitrecon_provider_mock_scan",
+        );
+        let all_findings = Arc::new(Mutex::new(Vec::new()));
+        let tech_stack_set = Arc::new(Mutex::new(HashSet::new()));
+        let blobs_scanned = Arc::new(AtomicUsize::new(0));
+        let blobs_failed = Arc::new(AtomicUsize::new(0));
+        let bytes_scanned = Arc::new(AtomicUsize::new(0));
+        let outcome_stats = Arc::new(Mutex::new(ScanOutcomeStats::default()));
+        let result = run_repository_scan_loop(
+            Arc::new(ParityForge),
+            &[fixture_repository()],
+            &workspace,
+            FileScanConfig {
+                workspace: PathBuf::new(),
+                repository_name: String::new(),
+                max_blob_bytes: 1024 * 1024,
+                workers: 2,
+                scan_binaries: true,
+                exhaustive: true,
+                entropy_threshold: 4.5,
+                live: false,
+                pipe: false,
+                verbose: false,
+                max_findings: 0,
+                stop_on_critical: false,
+                extra_patterns: Arc::new(vec![DynPattern {
+                    id: "custom_token".to_string(),
+                    sev: "CRITICAL".to_string(),
+                    desc: "Custom provider token".to_string(),
+                    regex: regex::Regex::new(r"CUSTOM_[A-Z0-9]{8}").unwrap(),
+                }]),
+                stop_flag: Arc::new(AtomicBool::new(false)),
+                all_findings: all_findings.clone(),
+                tech_stack_set,
+                blobs_scanned,
+                blobs_failed,
+                bytes_scanned,
+                outcome_stats,
+            },
+            |forge, repo, entry, _head_sha| async move {
+                forge.get_blob_entry(&repo, &entry).await
+            },
+            Instant::now(),
+        )
+        .await;
+
+        assert_eq!(result.findings.len(), 2);
+        assert!(result
+            .findings
+            .iter()
+            .all(|finding| finding.pattern_id == "custom_token"));
+        assert!(result
+            .findings
+            .iter()
+            .any(|finding| finding.context.contains("nested/config.txt")));
+        assert_eq!(result.object_source_stats.forge, 2);
+        assert_eq!(result.outcome_stats.failed_files, 0);
+        assert_eq!(result.outcome_stats.skipped_files, 0);
     }
 
     #[tokio::test]

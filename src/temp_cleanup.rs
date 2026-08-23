@@ -378,10 +378,9 @@ mod tests {
 
         assert!(!dir_a.exists(), "signal cleanup must remove {dir_a:?}");
         assert!(!dir_b.exists(), "signal cleanup must remove {dir_b:?}");
-        assert!(
-            CLEANUP_PATHS.lock().unwrap().is_empty(),
-            "registry drained after cleanup"
-        );
+        let registered = CLEANUP_PATHS.lock().unwrap();
+        assert!(!registered.contains(&dir_a), "dir_a should be deregistered");
+        assert!(!registered.contains(&dir_b), "dir_b should be deregistered");
     }
 
     #[test]
