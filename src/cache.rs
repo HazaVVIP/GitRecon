@@ -4,7 +4,7 @@
 //! SHA1→content cache with TTL to avoid re-fetching the same objects across scans.
 //! - Cache location: ~/.gitrecon/cache.db
 //! - TTL: 7 days (configurable via --cache-ttl)
-//! - Max size: 1GB with LRU eviction
+//! - Max size: 1GB with oldest-inserted eviction (accesses do not refresh order)
 //! - Cross-target cache sharing (same SHA1 from different targets cached once)
 //!   BUG-ERR-009: Convert to tokio::sync::Mutex for timeout support
 
@@ -257,7 +257,7 @@ impl ObjectCache {
                         .query_row(
                             "SELECT COALESCE(SUM(LENGTH(content)), 0) FROM (
                             SELECT content FROM cache
-                            ORDER BY created_at ASC
+                            ORDER BY created_at ASC, rowid ASC
                             LIMIT 100
                          )",
                             [],
@@ -271,8 +271,8 @@ impl ObjectCache {
                         "DELETE FROM cache
                          WHERE sha1 IN (
                              SELECT sha1 FROM cache
-                             ORDER BY created_at ASC
-                             LIMIT 100
+                         ORDER BY created_at ASC, rowid ASC
+                         LIMIT 100
                          )",
                         [],
                     )?;
