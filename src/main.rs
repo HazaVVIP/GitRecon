@@ -45,6 +45,7 @@ mod reporter;
 mod resource_budget;
 mod scanner_factory;
 mod scanner_policy;
+mod stream_types;
 mod streamer;
 mod target_utils;
 mod targets;

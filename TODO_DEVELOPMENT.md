@@ -300,9 +300,13 @@ Buat local HTTP fixture server untuk menguji pack, cache, loose object, invalid 
 
 ## P2-01 — Ekstrak core library dari binary-only crate
 
-**Status:** `TODO`  
+**Status:** `IN PROGRESS`  
 **Dependensi:** P0 selesai, P1-01 minimal tersedia  
 **Area:** `src/lib.rs`, `src/main.rs`, module tree
+
+### Implementasi P2-01 (sub-bagian stream domain models)
+
+Model `Finding`, `Contributor`, `StreamResult`, object-source metrics, outcome metrics, dan cache metrics dipindahkan ke `src/stream_types.rs`. `streamer` tetap me-re-export model tersebut, sehingga reporter, forge scan, dan callers existing tidak mengalami perubahan API atau output. Implementasi behavior-heavy dan orchestration masih berada pada boundary lama untuk menjaga kompatibilitas; pemecahan `main.rs`, worker pipeline, dan resource ownership dilanjutkan bertahap.
 
 Pindahkan domain logic ke `src/lib.rs` atau core crate internal. `main.rs` harus menjadi CLI adapter tipis yang menangani parse args, display, exit code, dan orchestration boundary.
 
