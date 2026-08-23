@@ -1,10 +1,10 @@
 # GitRecon Development TODO
 
-**Versi backlog:** setelah audit penuh v3.2.6  
-**Status baseline:** `main` bersih pada `bdcad7c0cf6fdb6586d131df75c993c8f92eea50`  
-**Prioritas utama:** correctness, feature parity, offensive coverage, lalu maintainability dan release governance
+**Versi backlog:** setelah audit penuh v3.2.6
+**Status baseline:** `origin/main` dan local `main` sinkron pada `e3c9b46b`; worktree bersih dan post-merge CI green
+**Prioritas utama:** provider correctness dan coverage integrity, feature parity lintas mode, offensive coverage, performance/resource control, lalu maintainability dan release governance
 
-Dokumen ini adalah backlog development resmi GitRecon. Item dikerjakan secara inkremental, satu paket perubahan pada satu waktu, dan setiap paket wajib mempertahankan kualitas build, test, serta perilaku offensive scanning yang sudah ada. `--exhaustive`, binary scanning default, object verification default, dan partial-exposure opt-in tidak boleh berubah secara tidak sengaja.
+Dokumen ini adalah backlog development resmi GitRecon. Item dikerjakan secara inkremental, satu paket perubahan pada satu waktu, dan setiap paket wajib mempertahankan kualitas build, test, serta perilaku offensive scanning yang sudah ada. `--exhaustive`, binary scanning default, object verification default, dan partial-exposure opt-in tidak boleh berubah secara tidak sengaja. Tidak boleh ada pagination loss, branch mis-selection, provider misattribution, atau silent filtering baru.
 
 ## Cara menggunakan backlog
 
@@ -34,12 +34,149 @@ Untuk perubahan behavior, acceptance test harus membuktikan bahwa mode normal te
 
 ---
 
+# Roadmap refresh setelah full functionality audit
+
+Audit penuh terhadap `origin/main` mengubah urutan kerja berikutnya. Implementasi baru harus dimulai dari correctness boundary provider, karena kesalahan scope atau branch dapat membuat hasil scan terlihat valid tetapi merepresentasikan content yang salah. Setelah boundary tersebut stabil, pekerjaan berlanjut ke policy parity, acquisition/archive depth, history/report parity, stage-aware performance, dan release engineering.
+
+| Gelombang baru | Fokus | Item utama | Status |
+|---|---|---|---|
+| A | Provider correctness dan coverage integrity | Azure project scoping, branch/ref, auth; GitLab nested namespace dan tree pagination | TODO |
+| B | Cross-mode operator control | False-positive keyword parity; provider-aware token target; repository/project selectors | TODO |
+| C | Acquisition dan content depth | Streaming size enforcement; typed invalid archive reasons; tar/compressed-tar; archive corpus | TODO |
+| D | History dan report parity | Provider history capability; deleted-content coverage; SARIF/NDJSON/CSV/Markdown/HTML metadata | TODO |
+| E | Performance dan resource control | Stage-aware budget; queue/concurrency telemetry; cold/warm cache benchmark; retry/transport consistency | TODO |
+| F | Release dan maintainability | Provider contract matrix; cross-platform CI; provenance/SBOM; incremental core extraction | TODO |
+
+## Acceptance contract untuk roadmap baru
+
+Setiap item baru wajib menyatakan scope provider/mode yang benar-benar diuji, termasuk perilaku unsupported. Pagination harus exhaust sampai provider menyatakan tidak ada halaman berikutnya atau limit typed tercapai. Branch/ref harus diteruskan secara eksplisit ke endpoint. Error authentication, invalid archive, resource denial, dan incomplete history harus terlihat pada outcome atau telemetry. Perubahan pada policy harus memiliki parity test URL, local, dan forge bila capability tersedia.
+
+### Item baru P0-06 — Azure DevOps provider correctness
+
+**Status:** `IN PROGRESS` — project scoping, continuation pagination, branch/ref propagation, and whoami error boundary implemented locally
+**Dependensi:** P0-04, P1-06
+**Area:** `src/azure_api.rs`, `src/forge_scan.rs`, provider mock tests
+
+Perbaiki enumerasi repository agar benar-benar project-scoped, teruskan branch/ref ke Items API, dan hilangkan synthetic identity fallback pada `whoami` untuk authentication failure; `authenticate` sudah menolak 401/403, tetapi fallback non-OK dan on-premise validation masih perlu dipersempit. Pertahankan pagination, redaction, retry telemetry, serta snapshot capability contract.
+
+### Implementasi P0-06 (sub-bagian Azure boundary correctness)
+
+Azure repository listing sekarang menggunakan project-scoped API base dan mengikuti `x-ms-continuationtoken` tanpa menggabungkan repository dari project lain. Azure Items traversal meneruskan branch melalui `versionDescriptor.version` dan `versionDescriptor.versionType=branch` pada setiap directory request serta meng-encode path/query secara eksplisit. `whoami` hanya mengizinkan synthetic identity untuk 404 pada endpoint profile di Azure DevOps Server/on-premise; 401/403 dan status lain menjadi error, sedangkan on-premise validation juga menolak status non-2xx. Regression fixtures mencakup project path, continuation page, branch name dengan slash, identity success, dan 401/403 failure. Full milestone masih membutuhkan provider-matrix coverage dan final full quality gates.
+
+**Acceptance criteria:** Dua project dengan repository berbeda tidak saling tertukar; dua branch menghasilkan tree berbeda sesuai ref; 401/403 pada authenticate maupun whoami menjadi authentication failure typed; fallback 404 hanya berlaku pada on-premise contract yang terdokumentasi; fixture pagination dan empty-project cases tercakup; tidak ada repository yang hilang tanpa outcome.
+
+### Item baru P0-07 — GitLab namespace dan tree completeness
+
+**Status:** `TODO`
+**Dependensi:** P0-04, P1-06
+**Area:** `src/gitlab_api.rs`, provider mock tests
+
+Pertahankan full nested namespace GitLab saat membentuk project identity dan ikuti pagination pada setiap directory tree request. History path-based behavior dan keterbatasan deleted blob harus tetap dilaporkan secara eksplisit.
+
+**Acceptance criteria:** `group/subgroup/repository` dapat di-address dengan benar; directory yang melampaui satu halaman seluruhnya dipindai; empty page dan malformed pagination header tidak menyebabkan loop; history deleted-path coverage tetap dibedakan dari deleted-content scanning.
+
+### Item baru P1-09 — Cross-mode false-positive policy parity
+
+**Status:** `TODO`
+**Dependensi:** P1-01, P2-03
+**Area:** `src/content_scanner.rs`, `src/dir_pipeline.rs`, `src/forge_scan.rs`, `src/main.rs`
+
+Teruskan `--false-positive-keywords` melalui local directory dan forge workspace scanner, bukan hanya URL object path. Gunakan immutable typed configuration dan pastikan normal/exhaustive semantics identik pada setiap mode.
+
+**Acceptance criteria:** Fixture yang sama menghasilkan suppression yang sama di URL, local, dan forge snapshot; tanpa keywords default behavior tidak berubah; exhaustive tetap superset normal; binary/archive/custom pattern paths tidak ikut terfilter secara tidak sengaja.
+
+### Item baru P1-10 — Provider-aware token target schema dan selectors
+
+**Status:** `TODO`
+**Dependensi:** P0-05, P1-06
+**Area:** `src/targets.rs`, `src/main.rs`, provider adapters, report outcome
+
+Perluas target-file token entry dengan provider discriminator yang backward-compatible terhadap GitHub shorthand. Tambahkan selector repository/project/group yang dapat dipakai dalam mode non-interactive dan menghasilkan scope report yang deterministic serta redacted.
+
+**Acceptance criteria:** Target file dapat mengekspresikan GitHub, GitLab, Bitbucket, Gitea, dan Azure secara eksplisit; token tidak muncul pada target label/error; selector exact dan glob tervalidasi; unsupported provider/selector menghasilkan error typed; selected scope tersimpan di report.
+
+### Item baru P1-11 — Bounded acquisition size
+
+**Status:** `TODO`
+**Dependensi:** P1-07, P1-08
+**Area:** `src/http_client.rs`, `src/object_source.rs`, `src/object_worker.rs`
+
+Pisahkan batas ukuran response acquisition dari batas ukuran scan dan gunakan streaming body limit agar response oversized tidak selalu dialokasikan penuh terlebih dahulu. Pertahankan pack/cache/loose precedence dan typed `Oversized` telemetry.
+
+**Acceptance criteria:** Content-Length yang besar ditolak sebelum body penuh; response tanpa Content-Length tetap dibatasi saat streaming; save/non-save memiliki contract yang terdokumentasi; cache tidak menyimpan oversized atau invalid object; regression fixture mencakup truncation dan retry interaction.
+
+### Item baru P1-12 — Archive format and invalid-reason depth
+
+**Status:** `TODO`
+**Dependensi:** P1-05, P1-08
+**Area:** `src/binary_scanner.rs`, `src/content_scanner.rs`, archive corpus tests
+
+Tambahkan typed invalid-archive reason dan perluas parity ke tar/compressed-tar bila dependency dan resource model mendukung. Raw printable-string fallback harus tetap tersedia ketika format parsing gagal; `--exhaustive` tidak menghapus archive limits.
+
+**Acceptance criteria:** Malformed, traversal, depth, entry-count, expansion-size, ratio, dan unsupported-format states dapat dibedakan; ZIP/JAR/GZIP behavior tidak regress; custom patterns tetap aktif pada archive views; corpus regression berjalan deterministic.
+
+### Item baru P2-08 — Report-format telemetry parity
+
+**Status:** `TODO`
+**Dependensi:** P3-04, P1-05
+**Area:** `src/reporter.rs`, schema tests, documentation
+
+Tambahkan additive scan-level metadata ke SARIF run properties dan format lain melalui contract yang tidak merusak consumer finding-only. NDJSON membutuhkan reserved metadata record; CSV membutuhkan envelope/sidecar yang terdokumentasi; Markdown/HTML mendapat summary operasional.
+
+**Acceptance criteria:** Existing finding fields dan row consumers tetap valid; telemetry memuat scope, capability, source, skip/failure/truncation, cache/retry/resource summary; schema tests mencakup setiap format; tidak ada secret plaintext tambahan.
+
+### Item baru P2-09 — Stage-aware resource and scheduler telemetry
+
+**Status:** `TODO`
+**Dependensi:** P1-08, P3-04, P3-05
+**Area:** `src/resource_budget.rs`, `src/scan_scheduler.rs`, `src/stream_types.rs`, benchmark tools
+
+Perluas resource stages dari ObjectScan ke acquisition, decompression/archive, file scan, workspace reconstruction, dan target fan-out. Expose configured/current/peak concurrency, queue wait, active permits, adjustment/throttle events, dan denied reservations.
+
+**Acceptance criteria:** Cancellation me-release reservation pada setiap stage; exhaustive tetap bounded; report membedakan resource denial dari clean result; benchmark dapat membandingkan throughput, peak RSS, queue wait, dan cache/retry behavior tanpa wall-clock threshold naif.
+
+### Item baru P2-10 — Shared date-aware transport parsing
+
+**Status:** `TODO`
+**Dependensi:** P0-04, P2-04
+**Area:** `src/provider_transport.rs`, `src/http_client.rs`, provider adapters
+
+Satukan parsing numeric dan HTTP-date `Retry-After` dengan clock-safe tests, sementara reset semantics tetap provider-specific. Retry telemetry harus membedakan status retryable, terminal failure, network error, dan exhausted retry.
+
+**Acceptance criteria:** Numeric/date header menghasilkan delay yang bounded dan deterministic; malformed date memakai fallback documented; semua built-in provider memakai helper yang sama kecuali override yang beralasan; existing retry policy tidak berubah tanpa test evidence.
+
+### Item baru P3-07 — Cross-platform quality matrix
+
+**Status:** `TODO`
+**Dependensi:** P3-01, P3-03
+**Area:** `.github/workflows/`, `Cargo.toml`, installer
+
+Tambahkan compile/test matrix untuk Linux x86_64, Linux ARM64, macOS, dan Windows-compatible paths sesuai dukungan aktual. Validasi SARIF, archive corpus, provider mocks, source fallback installer, dan lockfile di CI.
+
+### Item baru P3-08 — Provider contract test matrix
+
+**Status:** `TODO`
+**Dependensi:** P0-06, P0-07, P1-06
+**Area:** `tests/`, provider modules, mock server harness
+
+Bangun fixture contract reusable untuk auth, pagination, branch/ref, tree/blob, rate-limit, retry, unsupported capability, and deleted-content states pada seluruh provider. Tujuannya adalah parity yang dapat diukur, bukan menyamakan capability yang memang berbeda.
+
+### Item baru P3-09 — Reproducible release provenance
+
+**Status:** `TODO`
+**Dependensi:** P3-01, P3-02, P3-07
+**Area:** release workflow, `install.sh`, documentation
+
+Lengkapi multi-platform release dengan reproducible build metadata, SBOM/provenance, checksum verification, dan source-fallback contract. Release asset tidak boleh diterbitkan sebelum binary, source commit, platform tag, dan checksum dapat diaudit.
+
+---
+
 # P0 — Correctness sebelum fitur baru
 
 ## P0-01 — Lengkapi state checkpoint dan resume equivalence
 
 **Status:** `DONE` — commit `16ad6ade`
-**Dependensi:** tidak ada  
+**Dependensi:** tidak ada
 **Area:** `src/checkpoint.rs`, `src/streamer.rs`, `tests/checkpoint_resume.rs`
 
 Checkpoint saat ini memulihkan processed SHA dan findings, tetapi belum memulihkan seluruh aggregate state. Tambahkan snapshot accumulator yang mencakup contributors, technology stack, commit count, blobs scanned, bytes scanned, files saved, source distribution, skip/failure outcomes, cache/rate metrics yang relevan, cancellation state, dan coverage metadata. Naikkan schema version secara backward-compatible; checkpoint legacy tetap dapat dibaca dengan fallback yang terdokumentasi.
@@ -56,7 +193,7 @@ Checkpoint saat ini memulihkan processed SHA dan findings, tetapi belum memulihk
 ## P0-02 — Perbaiki object verification untuk bare/no-index repository
 
 **Status:** `DONE` — commit `f9b7d1c1`
-**Dependensi:** tidak ada  
+**Dependensi:** tidak ada
 **Area:** `src/mapper.rs`, `src/object_source.rs`, `tests/`
 
 Verification tidak boleh hanya bergantung pada `index_entries`. Candidate verification harus mencakup union object yang ditemukan dari index, commit graph, pack enumeration, refs, dan metadata. Bedakan `no_candidates`, `verified`, `partially_verified`, dan `verification_failed` secara typed agar bare repository tidak salah dianggap inaccessible.
@@ -73,7 +210,7 @@ Verification tidak boleh hanya bergantung pada `index_entries`. Candidate verifi
 ## P0-03 — Benahi kontrak `--dry-run` di seluruh mode
 
 **Status:** `DONE` — implementation validated locally; commit pending in current package
-**Dependensi:** tidak ada  
+**Dependensi:** tidak ada
 **Area:** `src/main.rs`, `src/url_pipeline.rs`, `src/dir_pipeline.rs`, `src/targets.rs`
 
 `--dry-run` saat ini efektif pada URL flow, tetapi directory mode tetap mengumpulkan dan memindai file. Tetapkan kontrak tunggal: dry-run hanya memvalidasi CLI, target, paths, patterns, dan konfigurasi; tidak melakukan network acquisition, file content read, detector execution, report scan result, atau webhook delivery.
@@ -94,7 +231,7 @@ Dry-run sekarang berhenti sebelum URL detection, repository reconnaissance, prov
 ## P0-04 — Validasi input numerik dan perbaiki semantics retry/HTTP
 
 **Status:** `DONE` — implementation validated locally; commit pending in current package
-**Dependensi:** tidak ada  
+**Dependensi:** tidak ada
 **Area:** `src/main.rs`, `src/http_client.rs`, `src/rate_limiter.rs`
 
 Tambahkan validator finite dan non-negative untuk `delay`, `jitter`, `entropy-threshold`, serta `rate` sesuai semantics masing-masing. Saat ini `--delay NaN` dan `--delay inf` dapat menyebabkan panic pada `Duration::from_secs_f64`. Selaraskan pula `--retries 0`, `Response::ok()`, dan retry metrics.
@@ -115,7 +252,7 @@ Tambahkan validator finite dan non-negative untuk `delay`, `jitter`, `entropy-th
 ## P0-05 — Ganti process exit pada helper reusable dengan typed errors
 
 **Status:** `DONE` — implementation validated locally; commit pending in current package
-**Dependensi:** P2-02 bila dilakukan bersamaan dengan core extraction  
+**Dependensi:** P2-02 bila dilakukan bersamaan dengan core extraction
 **Area:** `src/target_utils.rs`, `src/validation.rs`, `src/outcome.rs`
 
 `normalize_url` dan `parse_extra_headers` tidak boleh memanggil `std::process::exit` dari helper reusable. Kembalikan `Result` dengan error typed; hanya boundary CLI yang menentukan exit code. Pertahankan redaction pada URL, token, header, dan error message.
@@ -138,7 +275,7 @@ Tambahkan validator finite dan non-negative untuk `delay`, `jitter`, `entropy-th
 ## P1-01 — Ekstrak `ContentScanner` dan `ScanAccumulator`
 
 **Status:** `DONE` — implementation validated locally; commit pending in current package
-**Dependensi:** P0-01, P0-03  
+**Dependensi:** P0-01, P0-03
 **Area:** `src/streamer.rs`, `src/dir_pipeline.rs`, `src/forge_scan.rs`, `src/scanner_factory.rs`
 
 Buat scanner engine bersama yang menerima `ContentView` dan policy. `ContentView` minimal mencakup text, printable binary strings, SQLite content, archive entries, GZIP payload, ELF sections, commit message, dan tree metadata. `ScanAccumulator` harus menjadi satu-satunya pemilik aggregation logic untuk findings, contributors, tech stack, source, outcomes, bytes, limits, dan timing.
@@ -256,8 +393,8 @@ Dokumentasikan dan modelkan perbedaan `snapshot` versus `history` scan. Tambahka
 
 ## P1-07 — Bangun deterministic remote acquisition test harness
 
-**Status:** `IN PROGRESS`  
-**Dependensi:** P1-01  
+**Status:** `IN PROGRESS`
+**Dependensi:** P1-01
 **Area:** `tests/`, `src/object_source.rs`, `src/http_client.rs`, `tools/`
 
 Buat local HTTP fixture server untuk menguji pack, cache, loose object, invalid object, 404, oversized response, 429, 5xx, retry-after, and cancellation. Harness harus menghasilkan source/outcome metrics yang dapat dibandingkan secara deterministic.
@@ -276,8 +413,8 @@ Buat local HTTP fixture server untuk menguji pack, cache, loose object, invalid 
 
 ## P1-08 — Bangun global resource budget
 
-**Status:** `IN PROGRESS`  
-**Dependensi:** P1-01, P1-05, P1-07  
+**Status:** `IN PROGRESS`
+**Dependensi:** P1-01, P1-05, P1-07
 **Area:** `src/streamer.rs`, `src/pack_reader.rs`, `src/binary_scanner.rs`, `src/http_client.rs`
 
 `--mem-limit` harus mencakup acquisition buffer, pack bytes, inflated object, archive expansion, GZIP decompression, detector buffers, dan report accumulator. Buat `ResourceBudget` shared dengan reserve/release yang aman terhadap cancellation.
@@ -300,8 +437,8 @@ Buat local HTTP fixture server untuk menguji pack, cache, loose object, invalid 
 
 ## P2-01 — Ekstrak core library dari binary-only crate
 
-**Status:** `IN PROGRESS`  
-**Dependensi:** P0 selesai, P1-01 minimal tersedia  
+**Status:** `IN PROGRESS`
+**Dependensi:** P0 selesai, P1-01 minimal tersedia
 **Area:** `src/lib.rs`, `src/main.rs`, module tree
 
 ### Implementasi P2-01 (sub-bagian stream domain models)
@@ -319,8 +456,8 @@ Pindahkan domain logic ke `src/lib.rs` atau core crate internal. `main.rs` harus
 
 ## P2-02 — Pecah `streamer.rs` dan `main.rs` berdasarkan domain
 
-**Status:** `IN PROGRESS`  
-**Dependensi:** P1-01, P2-01  
+**Status:** `IN PROGRESS`
+**Dependensi:** P1-01, P2-01
 **Area:** `src/streamer.rs`, `src/main.rs`, `src/object_worker.rs`
 
 ### Implementasi P2-02 (sub-bagian object worker)
@@ -342,8 +479,8 @@ Ekstrak domain berikut secara bertahap: `stream_types`, `scan_scheduler`, `conte
 
 ## P2-03 — Ganti positional configuration constructor dengan typed config
 
-**Status:** `IN PROGRESS`  
-**Dependensi:** P1-01  
+**Status:** `IN PROGRESS`
+**Dependensi:** P1-01
 **Area:** `src/config.rs`, `src/scanner_factory.rs`, `src/streamer_config.rs`
 
 ### Implementasi P2-03 (sub-bagian StreamerConfig)
@@ -361,8 +498,8 @@ Ganti constructor dengan 16 positional arguments menjadi `ScanConfigBuilder` ata
 
 ## P2-04 — Ekstrak common provider transport
 
-**Status:** `IN PROGRESS`  
-**Dependensi:** P0-04, P2-01  
+**Status:** `IN PROGRESS`
+**Dependensi:** P0-04, P2-01
 **Area:** `src/http_client.rs`, `src/forge.rs`, `src/*_api.rs`, `src/provider_transport.rs`
 
 ### Implementasi P2-04 (sub-bagian wire-format parsers)
@@ -380,8 +517,8 @@ Satukan retry, Retry-After, rate-limit header parsing, pagination primitives, UR
 
 ## P2-05 — Perkenalkan typed error taxonomy
 
-**Status:** `IN PROGRESS`  
-**Dependensi:** P0-04, P2-04  
+**Status:** `IN PROGRESS`
+**Dependensi:** P0-04, P2-04
 **Area:** `src/outcome.rs`, `src/forge.rs`, `src/http_client.rs`, `src/mapper.rs`
 
 ### Implementasi P2-05 (sub-bagian classification metadata)
@@ -400,7 +537,7 @@ Buat error type yang membawa stage, provider, HTTP status, retryability, redacte
 ## P2-06 — Perbaiki cache semantics dan lifecycle
 
 **Status:** `IN PROGRESS`
-**Dependensi:** P1-07, P1-08  
+**Dependensi:** P1-07, P1-08
 **Area:** `src/cache.rs`, `src/object_source.rs`, README, DEVELOPMENT.md
 
 Pilih dan implementasikan semantics yang benar-benar diinginkan: update access timestamp untuk LRU, atau ubah dokumentasi menjadi oldest-inserted eviction. Tambahkan cleanup policy, inspect/stats command, eviction telemetry, dan handling expired entry yang eksplisit.
@@ -440,7 +577,7 @@ Audit setiap `#[allow(dead_code)]`, `#[allow(clippy::too_many_lines)]`, dan help
 # P3 — Production operations dan release governance
 
 ## P3-01 — Tambahkan GitHub Actions quality pipeline
-**Status:** `IN PROGRESS`
+**Status:** `DONE` — baseline quality workflow merged; cross-platform and extended contract gates moved to P3-07/P3-08
 **Dependensi:** P0-04
 **Area:** `.github/workflows/`
 
@@ -478,8 +615,8 @@ Branch `main` kini mewajibkan pull request dengan minimal satu approval, require
 
 ## P3-03 — Reproducible multi-platform release
 
-**Status:** `TODO`  
-**Dependensi:** P3-01, P3-02, P2-01  
+**Status:** `TODO`
+**Dependensi:** P3-01, P3-02, P2-01
 **Area:** release workflow, `install.sh`, documentation
 
 Perluas release setelah cross-platform support diuji: Linux x86_64 tetap dipertahankan, lalu evaluasi Linux ARM64, macOS, dan Windows. Tambahkan artifact provenance/SBOM dan installer behavior per platform.
