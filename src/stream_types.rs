@@ -53,6 +53,19 @@ pub struct StreamResult {
     pub rate_limit_allowed: usize,
     pub rate_limit_dropped: usize,
     pub rate_limit_wait_ms: u64,
+    /// HTTP retry telemetry when the scan owns a transport client.
+    pub retry_stats: Option<RetryReportStats>,
+}
+
+/// HTTP request and retry telemetry for a scan-owned transport client.
+#[derive(Debug, Default, Clone, serde::Serialize)]
+pub struct RetryReportStats {
+    pub attempts: usize,
+    pub retries: usize,
+    pub succeeded: usize,
+    pub failed: usize,
+    pub network_errors: usize,
+    pub status_counts: BTreeMap<String, usize>,
 }
 
 /// Object acquisition source metrics for processed blobs.

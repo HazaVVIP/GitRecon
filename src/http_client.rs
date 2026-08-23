@@ -7,6 +7,7 @@ use futures::StreamExt;
 use rand::seq::IndexedRandom;
 use rand::Rng;
 use reqwest::{Client, ClientBuilder, Proxy};
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -15,6 +16,7 @@ use tokio::time::sleep;
 
 // PERF-004: Use the dedicated rate limiter module
 use crate::rate_limiter::TokenBucket;
+use crate::stream_types::RetryReportStats;
 
 // E-4: Expanded USER_AGENTS to 25+ entries
 const USER_AGENTS: &[&str] = &[
@@ -159,6 +161,10 @@ fn classify_tls_error(err: &reqwest::Error) -> Option<TlsErrorType> {
 /// PERF-002: Retry metrics for status code aware retry tracking.
 #[derive(Debug)]
 pub struct RetryMetrics {
+    /// Number of wire-level requests attempted.
+    pub attempts: AtomicUsize,
+    /// Number of retry transitions after an initial attempt.
+    pub retries: AtomicUsize,
     /// Number of 404 responses (no retries)
     pub retry_404: AtomicUsize,
     /// Number of 403 responses (no retries)
@@ -184,6 +190,8 @@ pub struct RetryMetrics {
 impl Default for RetryMetrics {
     fn default() -> Self {
         Self {
+            attempts: AtomicUsize::new(0),
+            retries: AtomicUsize::new(0),
             retry_404: AtomicUsize::new(0),
             retry_403: AtomicUsize::new(0),
             retry_429: AtomicUsize::new(0),
@@ -201,6 +209,31 @@ impl Default for RetryMetrics {
 impl RetryMetrics {
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
+    }
+
+    pub fn snapshot(&self) -> RetryReportStats {
+        let mut status_counts = BTreeMap::new();
+        for (status, count) in [
+            ("403", self.retry_403.load(Ordering::Relaxed)),
+            ("404", self.retry_404.load(Ordering::Relaxed)),
+            ("429", self.retry_429.load(Ordering::Relaxed)),
+            ("500", self.retry_500.load(Ordering::Relaxed)),
+            ("502", self.retry_502.load(Ordering::Relaxed)),
+            ("503", self.retry_503.load(Ordering::Relaxed)),
+            ("504", self.retry_504.load(Ordering::Relaxed)),
+        ] {
+            if count > 0 {
+                status_counts.insert(status.to_string(), count);
+            }
+        }
+        RetryReportStats {
+            attempts: self.attempts.load(Ordering::Relaxed),
+            retries: self.retries.load(Ordering::Relaxed),
+            succeeded: self.success.load(Ordering::Relaxed),
+            failed: self.failed.load(Ordering::Relaxed),
+            network_errors: self.network_errors.load(Ordering::Relaxed),
+            status_counts,
+        }
     }
 }
 
@@ -435,6 +468,7 @@ impl HttpClient {
         let mut attempt = 0u32;
 
         loop {
+            self.retry_metrics.attempts.fetch_add(1, Ordering::Relaxed);
             match self.do_get(url).await {
                 Ok(r) => {
                     // PERF-002: Status-code-aware retry logic
@@ -462,6 +496,7 @@ impl HttpClient {
                             }
 
                             sleep(wait).await;
+                            self.retry_metrics.retries.fetch_add(1, Ordering::Relaxed);
                             attempt += 1;
                             continue;
                         }
@@ -474,6 +509,7 @@ impl HttpClient {
                             }
                             let backoff = Self::calculate_backoff(attempt, strategy);
                             sleep(backoff).await;
+                            self.retry_metrics.retries.fetch_add(1, Ordering::Relaxed);
                             attempt += 1;
                             continue;
                         }
@@ -485,6 +521,7 @@ impl HttpClient {
                             }
                             let backoff = Self::calculate_backoff(attempt, strategy);
                             sleep(backoff).await;
+                            self.retry_metrics.retries.fetch_add(1, Ordering::Relaxed);
                             attempt += 1;
                             continue;
                         }
@@ -496,6 +533,7 @@ impl HttpClient {
                             }
                             let backoff = Self::calculate_backoff(attempt, strategy);
                             sleep(backoff).await;
+                            self.retry_metrics.retries.fetch_add(1, Ordering::Relaxed);
                             attempt += 1;
                             continue;
                         }
@@ -507,6 +545,7 @@ impl HttpClient {
                             }
                             let backoff = Self::calculate_backoff(attempt, strategy);
                             sleep(backoff).await;
+                            self.retry_metrics.retries.fetch_add(1, Ordering::Relaxed);
                             attempt += 1;
                             continue;
                         }
@@ -533,6 +572,7 @@ impl HttpClient {
                                 }
                                 let backoff = Self::calculate_backoff(attempt, strategy);
                                 sleep(backoff).await;
+                                self.retry_metrics.retries.fetch_add(1, Ordering::Relaxed);
                                 attempt += 1;
                                 continue;
                             }
@@ -583,6 +623,7 @@ impl HttpClient {
                             if attempt < 1 {
                                 let backoff = Self::calculate_backoff(attempt, strategy);
                                 sleep(backoff).await;
+                                self.retry_metrics.retries.fetch_add(1, Ordering::Relaxed);
                                 attempt += 1;
                                 continue;
                             }
@@ -601,6 +642,7 @@ impl HttpClient {
                             if attempt < 1 {
                                 let backoff = Self::calculate_backoff(attempt, strategy);
                                 sleep(backoff).await;
+                                self.retry_metrics.retries.fetch_add(1, Ordering::Relaxed);
                                 attempt += 1;
                                 continue;
                             }
@@ -619,6 +661,7 @@ impl HttpClient {
                             if attempt < max_retries {
                                 let backoff = Self::calculate_backoff(attempt, strategy);
                                 sleep(backoff).await;
+                                self.retry_metrics.retries.fetch_add(1, Ordering::Relaxed);
                                 attempt += 1;
                                 continue;
                             }
@@ -827,6 +870,7 @@ impl HttpClient {
         let mut attempt = 0u32;
 
         loop {
+            self.retry_metrics.attempts.fetch_add(1, Ordering::Relaxed);
             match self.do_post(url, body, extra_headers).await {
                 Ok(r) => {
                     // BUG-HTTP-005: Status-code-aware retry logic for POST
@@ -854,6 +898,7 @@ impl HttpClient {
                             }
 
                             sleep(wait).await;
+                            self.retry_metrics.retries.fetch_add(1, Ordering::Relaxed);
                             attempt += 1;
                             continue;
                         }
@@ -875,6 +920,7 @@ impl HttpClient {
                             }
                             let backoff = Self::calculate_backoff(attempt, strategy);
                             sleep(backoff).await;
+                            self.retry_metrics.retries.fetch_add(1, Ordering::Relaxed);
                             attempt += 1;
                             continue;
                         }
@@ -900,6 +946,7 @@ impl HttpClient {
                                 }
                                 let backoff = Self::calculate_backoff(attempt, strategy);
                                 sleep(backoff).await;
+                                self.retry_metrics.retries.fetch_add(1, Ordering::Relaxed);
                                 attempt += 1;
                                 continue;
                             }
@@ -950,6 +997,7 @@ impl HttpClient {
                             if attempt < 1 {
                                 let backoff = Self::calculate_backoff(attempt, strategy);
                                 sleep(backoff).await;
+                                self.retry_metrics.retries.fetch_add(1, Ordering::Relaxed);
                                 attempt += 1;
                                 continue;
                             }
@@ -968,6 +1016,7 @@ impl HttpClient {
                             if attempt < 1 {
                                 let backoff = Self::calculate_backoff(attempt, strategy);
                                 sleep(backoff).await;
+                                self.retry_metrics.retries.fetch_add(1, Ordering::Relaxed);
                                 attempt += 1;
                                 continue;
                             }
@@ -986,6 +1035,7 @@ impl HttpClient {
                             if attempt < max_retries {
                                 let backoff = Self::calculate_backoff(attempt, strategy);
                                 sleep(backoff).await;
+                                self.retry_metrics.retries.fetch_add(1, Ordering::Relaxed);
                                 attempt += 1;
                                 continue;
                             }
@@ -1168,6 +1218,28 @@ mod tests {
             };
             assert!(!response.ok(), "expected HTTP {status} to be unsuccessful");
         }
+    }
+
+    #[test]
+    fn retry_metrics_snapshot_is_deterministic_and_complete() {
+        let metrics = RetryMetrics::default();
+        metrics.attempts.store(5, Ordering::Relaxed);
+        metrics.retries.store(2, Ordering::Relaxed);
+        metrics.success.store(3, Ordering::Relaxed);
+        metrics.failed.store(2, Ordering::Relaxed);
+        metrics.network_errors.store(1, Ordering::Relaxed);
+        metrics.retry_429.store(2, Ordering::Relaxed);
+        metrics.retry_503.store(1, Ordering::Relaxed);
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.attempts, 5);
+        assert_eq!(snapshot.retries, 2);
+        assert_eq!(snapshot.succeeded, 3);
+        assert_eq!(snapshot.failed, 2);
+        assert_eq!(snapshot.network_errors, 1);
+        assert_eq!(snapshot.status_counts.get("429"), Some(&2));
+        assert_eq!(snapshot.status_counts.get("503"), Some(&1));
+        assert!(!snapshot.status_counts.contains_key("404"));
     }
 
     #[test]

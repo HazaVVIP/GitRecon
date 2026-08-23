@@ -1624,6 +1624,7 @@ impl Streamer {
             rate_limit_allowed: rate_limit_allowed_final,
             rate_limit_dropped: rate_limit_dropped_final,
             rate_limit_wait_ms: rate_limit_wait_ms_final,
+            retry_stats: Some(self.client.retry_metrics.snapshot()),
         }
     }
 }
@@ -5766,6 +5767,7 @@ mod tests {
             rate_limit_allowed: 0,
             rate_limit_dropped: 0,
             rate_limit_wait_ms: 0,
+            retry_stats: None,
             cache_hits: 0,
             cache_misses: 0,
             cache_stats: None,
@@ -6525,6 +6527,7 @@ mod tests {
             rate_limit_allowed: 0,
             rate_limit_dropped: 0,
             rate_limit_wait_ms: 0,
+            retry_stats: None,
             cache_hits: 0,
             cache_misses: 0,
             cache_stats: None,

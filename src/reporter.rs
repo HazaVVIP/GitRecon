@@ -883,6 +883,7 @@ impl Reporter {
                     "dropped": s.rate_limit_dropped,
                     "wait_ms": s.rate_limit_wait_ms,
                 },
+                "retry": s.retry_stats,
                 "object_sources":  s.object_source_stats,
                 "outcomes":        s.outcome_stats,
                 "findings":        s.findings.iter().map(|f| f.to_dict()).collect::<Vec<_>>(),
@@ -938,6 +939,7 @@ impl Reporter {
                     "dropped": stream_r.rate_limit_dropped,
                     "wait_ms": stream_r.rate_limit_wait_ms,
                 },
+                "retry": stream_r.retry_stats,
                 "object_sources":  stream_r.object_source_stats,
                 "outcomes":        stream_r.outcome_stats,
                 "findings":        stream_r.findings.iter().map(|f| f.to_dict()).collect::<Vec<_>>(),
@@ -1393,6 +1395,7 @@ impl Reporter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stream_types::RetryReportStats;
     use crate::streamer::{Finding, StreamResult};
     use std::path::PathBuf;
 
@@ -1483,6 +1486,7 @@ mod tests {
             rate_limit_allowed: 0,
             rate_limit_dropped: 0,
             rate_limit_wait_ms: 0,
+            retry_stats: None,
             cache_hits: 0,
             cache_misses: 0,
             cache_stats: None,
@@ -1521,6 +1525,7 @@ mod tests {
         assert_eq!(value["result"]["rate_limit"]["allowed"], 0);
         assert_eq!(value["result"]["rate_limit"]["dropped"], 0);
         assert_eq!(value["result"]["rate_limit"]["wait_ms"], 0);
+        assert!(value["result"]["retry"].is_null());
         assert!(value["result"]["outcomes"].is_object());
         assert!(value["result"]["outcomes"]["failed_http_statuses"].is_object());
         assert_eq!(value["result"]["outcomes"]["resource_peak_bytes"], 0);
@@ -1543,6 +1548,14 @@ mod tests {
         stream.rate_limit_allowed = 4;
         stream.rate_limit_dropped = 1;
         stream.rate_limit_wait_ms = 25;
+        stream.retry_stats = Some(RetryReportStats {
+            attempts: 5,
+            retries: 2,
+            succeeded: 3,
+            failed: 2,
+            network_errors: 1,
+            status_counts: std::collections::BTreeMap::from([("429".to_string(), 2)]),
+        });
         stream.outcome_stats.resource_peak_bytes = 4096;
         stream.outcome_stats.resource_denied_reservations = 2;
         stream.outcome_stats.history_commits_scanned = 3;
@@ -1566,6 +1579,12 @@ mod tests {
         assert_eq!(value["result"]["rate_limit"]["allowed"], 4);
         assert_eq!(value["result"]["rate_limit"]["dropped"], 1);
         assert_eq!(value["result"]["rate_limit"]["wait_ms"], 25);
+        assert_eq!(value["result"]["retry"]["attempts"], 5);
+        assert_eq!(value["result"]["retry"]["retries"], 2);
+        assert_eq!(value["result"]["retry"]["succeeded"], 3);
+        assert_eq!(value["result"]["retry"]["failed"], 2);
+        assert_eq!(value["result"]["retry"]["network_errors"], 1);
+        assert_eq!(value["result"]["retry"]["status_counts"]["429"], 2);
         assert_eq!(value["result"]["outcomes"]["resource_peak_bytes"], 4096);
         assert_eq!(
             value["result"]["outcomes"]["resource_denied_reservations"],

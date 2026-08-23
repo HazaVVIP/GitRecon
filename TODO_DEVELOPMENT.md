@@ -495,7 +495,7 @@ Perluas release setelah cross-platform support diuji: Linux x86_64 tetap diperta
 
 ### Implementasi P3-04 (sub-bagian operational report telemetry)
 
-URL dan token JSON reports kini secara additive menyertakan `files_saved`, `files_save_failed`, object cache `hits`/`misses`/`stats`, serta rate-limit `allowed`/`dropped`/`wait_ms`, sementara object-source dan typed outcome metrics yang sudah ada tetap dipertahankan. Regression tests memverifikasi kedua report paths, field zero-value, serta resource-budget dan history-coverage counters tanpa mengubah findings. Remaining work: stage timing, request-attempt/retry counters, dan queue/concurrency metrics yang lebih granular.
+URL dan token JSON reports kini secara additive menyertakan `files_saved`, `files_save_failed`, object cache `hits`/`misses`/`stats`, rate-limit `allowed`/`dropped`/`wait_ms`, serta optional `retry` telemetry (`attempts`, `retries`, success/failure, network errors, dan status counts). Retry snapshot dipopulasi pada URL scan yang memiliki transport client; local dan forge results tetap eksplisit `null` sampai aggregation provider-neutral tersedia. Object-source dan typed outcome metrics yang sudah ada tetap dipertahankan. Regression tests memverifikasi kedua report paths, field zero-value, resource-budget, history-coverage, dan retry snapshot tanpa mengubah findings. Remaining work: stage timing dan queue/concurrency metrics yang lebih granular.
 
 Tambahkan stage timing, request attempts, retry counts, acquisition source, skip/failure reason, truncation, memory-budget events, coverage limits, dan queue/concurrency metrics ke JSON report secara additive. Pastikan findings tetap menjadi fokus utama dan telemetry tidak membocorkan secret.
 
