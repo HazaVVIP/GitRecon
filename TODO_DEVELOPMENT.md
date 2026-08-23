@@ -325,7 +325,7 @@ Pindahkan domain logic ke `src/lib.rs` atau core crate internal. `main.rs` harus
 
 ### Implementasi P2-02 (sub-bagian object worker)
 
-Acquisition, cancellation re-check, typed object-source mapping, dan dispatch ke content processor dipindahkan ke `src/object_worker.rs`. `streamer` mempertahankan compatibility seam untuk `WorkerResult`, `SkipReason`, `FailureKind`, `process_blob_content`, dan `attach_source`, sehingga scheduler, checkpoint, reporting, dan semantics `--exhaustive` tetap tidak berubah. Ekstraksi berikutnya mencakup scheduler, accumulator, dan checkpoint adapter setelah boundary ownership memiliki coverage tersendiri.
+Acquisition, cancellation re-check, typed object-source mapping, dan dispatch ke content processor dipindahkan ke `src/object_worker.rs`. Adaptive concurrency controller dan dynamic semaphore gate dipindahkan ke `src/scan_scheduler.rs`; `streamer` mempertahankan compatibility re-export dan scheduler call contract. Compatibility seam untuk `WorkerResult`, `SkipReason`, `FailureKind`, `process_blob_content`, dan `attach_source` menjaga checkpoint, reporting, serta semantics `--exhaustive` tetap tidak berubah. Ekstraksi berikutnya mencakup accumulator dan checkpoint adapter setelah boundary ownership memiliki coverage tersendiri.
 
 Ekstrak domain berikut secara bertahap: `stream_types`, `scan_scheduler`, `content_scanner`, `scan_accumulator`, `stream_checkpoint`, `object_worker`, dan `scanner_factory`. Di `main.rs`, pisahkan command/flow untuk URL, local, targets, dan provider token.
 

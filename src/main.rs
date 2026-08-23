@@ -44,6 +44,7 @@ mod pack_reader; // Sprint 5 (S5.1): pack file parser + delta resolver
 mod rate_limiter; // PERF-004: Token bucket rate limiter
 mod reporter;
 mod resource_budget;
+mod scan_scheduler;
 mod scanner_factory;
 mod scanner_policy;
 mod stream_types;

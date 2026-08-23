@@ -8,15 +8,15 @@ use lazy_static::lazy_static;
 use regex::Regex;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{fence, AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
-use tokio::sync::{Mutex as TokioMutex, Notify, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::Mutex as TokioMutex;
 
 use crate::binary_scanner;
-use crate::checkpoint::{
-    self, AdaptiveConcurrencyState, Checkpoint, CheckpointPhase, StreamCheckpoint,
-};
+#[cfg(test)]
+use crate::checkpoint::AdaptiveConcurrencyState;
+use crate::checkpoint::{self, Checkpoint, CheckpointPhase, StreamCheckpoint};
 use crate::content_scanner::ContentScanner;
 use crate::git_parser::ObjectParser;
 use crate::http_client::HttpClient;
@@ -1020,283 +1020,7 @@ pub(crate) enum WorkerResult {
     },
 }
 
-// ════════════════════════════════════════════════
-// PERF-003: Adaptive Concurrency Control
-// ════════════════════════════════════════════════
-
-const MIN_ADAPTIVE_WORKERS: usize = 5;
-const MAX_ADAPTIVE_WORKERS: usize = 200;
-const ADAPTIVE_ADJUSTMENT_INTERVAL: usize = 100; // Adjust every N blobs
-const THROTTLE_ERROR_RATE: f64 = 0.10; // Decrease workers when error rate > 10%
-const HEADROOM_ERROR_RATE: f64 = 0.02; // Increase workers when error rate < 2%
-                                       // BUG-STAB-007: Cooldown to prevent rapid sequential adjustments from compounding
-const ADJUSTMENT_COOLDOWN_BLOBS: usize = 50; // Minimum blobs between adjustments
-
-/// PERF-003: Adaptive concurrency controller
-///
-/// Tracks request/error rates and adjusts worker count based on server response.
-/// - Decreases workers on >10% error rate (throttling detected)
-/// - Increases workers on <2% error rate (headroom available)
-/// - Bounds: min 5 workers, max 200 workers
-///
-/// Thread-safe: All mutable fields use AtomicU64 for lock-free concurrent access.
-/// BUG-CONC-001: Fixed to use AtomicU64 with AcqRel ordering for proper synchronization.
-#[derive(Debug, Clone)]
-pub struct AdaptiveConcurrency {
-    /// Current worker count (atomic for concurrent reads in current_workers())
-    current_workers: Arc<AtomicU64>,
-    /// Initial worker count (from --workers flag) - read-only after init
-    initial_workers: u64,
-    /// Requests in current window (atomic for concurrent increments)
-    window_requests: Arc<AtomicU64>,
-    /// Errors in current window (atomic for concurrent increments)
-    window_errors: Arc<AtomicU64>,
-    /// Blob count when last adjustment was made (atomic for concurrent access)
-    last_adjustment_index: Arc<AtomicU64>,
-    /// BUG-STAB-007: Blob count when last decrease was made (for cooldown/hysteresis)
-    last_decrease_index: Arc<AtomicU64>,
-    /// Enable verbose logging
-    verbose: bool,
-}
-
-impl AdaptiveConcurrency {
-    /// Create new adaptive concurrency controller
-    /// BUG-STAB-007: Added last_decrease_index for cooldown tracking
-    pub fn new(initial_workers: usize, verbose: bool) -> Self {
-        Self {
-            current_workers: Arc::new(AtomicU64::new(initial_workers as u64)),
-            initial_workers: initial_workers as u64,
-            window_requests: Arc::new(AtomicU64::new(0)),
-            window_errors: Arc::new(AtomicU64::new(0)),
-            last_adjustment_index: Arc::new(AtomicU64::new(0)),
-            last_decrease_index: Arc::new(AtomicU64::new(0)),
-            verbose,
-        }
-    }
-
-    /// Restore from checkpoint state
-    /// BUG-STAB-005: Fixed - Validate and clamp current_workers to valid range
-    /// BUG-STAB-007: Added last_decrease_index restoration
-    pub fn from_checkpoint(state: AdaptiveConcurrencyState, verbose: bool) -> Self {
-        // BUG-STAB-005: Validate current_workers is within safe range
-        let validated_workers = state
-            .current_workers
-            .clamp(MIN_ADAPTIVE_WORKERS, MAX_ADAPTIVE_WORKERS);
-        Self {
-            current_workers: Arc::new(AtomicU64::new(validated_workers as u64)),
-            initial_workers: state.initial_workers as u64,
-            window_requests: Arc::new(AtomicU64::new(state.window_requests as u64)),
-            window_errors: Arc::new(AtomicU64::new(state.window_errors as u64)),
-            last_adjustment_index: Arc::new(AtomicU64::new(state.last_adjustment_index as u64)),
-            // BUG-STAB-007: Initialize last_decrease_index from last_adjustment for safety
-            last_decrease_index: Arc::new(AtomicU64::new(state.last_adjustment_index as u64)),
-            verbose,
-        }
-    }
-
-    /// Export state for checkpoint
-    pub fn to_checkpoint_state(&self) -> AdaptiveConcurrencyState {
-        AdaptiveConcurrencyState {
-            current_workers: self.current_workers.load(Ordering::Acquire) as usize,
-            initial_workers: self.initial_workers as usize,
-            window_requests: self.window_requests.load(Ordering::Acquire) as usize,
-            window_errors: self.window_errors.load(Ordering::Acquire) as usize,
-            last_adjustment_index: self.last_adjustment_index.load(Ordering::Acquire) as usize,
-        }
-    }
-
-    /// Record a successful request (lock-free, concurrent)
-    /// BUG-CONC-001: Uses AcqRel for proper synchronization
-    pub fn record_success(&self) {
-        self.window_requests.fetch_add(1, Ordering::AcqRel);
-    }
-
-    /// Record a failed request (lock-free, concurrent)
-    /// BUG-CONC-001: Uses AcqRel for proper synchronization
-    pub fn record_error(&self) {
-        self.window_requests.fetch_add(1, Ordering::AcqRel);
-        self.window_errors.fetch_add(1, Ordering::AcqRel);
-    }
-
-    /// Get current worker count (lock-free, concurrent)
-    /// BUG-CONC-001: Uses Acquire for proper synchronization
-    pub fn current_workers(&self) -> usize {
-        self.current_workers.load(Ordering::Acquire) as usize
-    }
-
-    /// Check if adjustment is needed (every ADAPTIVE_ADJUSTMENT_INTERVAL blobs)
-    /// BUG-CONC-001: Uses Acquire for proper synchronization
-    pub fn should_adjust(&self, blobs_processed: usize) -> bool {
-        let last_adj = self.last_adjustment_index.load(Ordering::Acquire);
-        blobs_processed as u64 >= last_adj + ADAPTIVE_ADJUSTMENT_INTERVAL as u64
-    }
-
-    /// Adjust worker count based on error rate
-    /// Returns the new worker count (may be unchanged)
-    /// BUG-CONC-001: Uses AcqRel for mutations, adds fence on decrease path
-    /// BUG-STAB-006: Fixed - Uses exponential decay instead of hard reset to preserve error context
-    pub fn adjust(&self, blobs_processed: usize) -> usize {
-        // BUG-CONC-001: Update last adjustment index with Release ordering
-        self.last_adjustment_index
-            .store(blobs_processed as u64, Ordering::Release);
-
-        // BUG-STAB-006: Use exponential decay instead of hard reset to preserve error context
-        // Decay factor: keep 20% of previous window for smoothing (EMA with alpha=0.8)
-        const DECAY_FACTOR: f64 = 0.2;
-
-        // Atomically snapshot current counters
-        let window_requests = self.window_requests.load(Ordering::Acquire);
-        let window_errors = self.window_errors.load(Ordering::Acquire);
-
-        // Apply decay: keep 20% of previous values, reset to 20% of current
-        let decayed_requests = (window_requests as f64 * DECAY_FACTOR) as u64;
-        let decayed_errors = (window_errors as f64 * DECAY_FACTOR) as u64;
-
-        // Reset counters to decayed values (preserves some context for next adjustment)
-        self.window_requests
-            .store(decayed_requests, Ordering::Release);
-        self.window_errors.store(decayed_errors, Ordering::Release);
-
-        if window_requests == 0 {
-            return self.current_workers.load(Ordering::Acquire) as usize;
-        }
-
-        let error_rate = window_errors as f64 / window_requests as f64;
-        let old_workers = self.current_workers.load(Ordering::Acquire) as usize;
-        let mut new_workers = old_workers;
-
-        // BUG-STAB-007: Check cooldown before decreasing workers to prevent rapid consecutive decreases
-        let last_decrease = self.last_decrease_index.load(Ordering::Acquire);
-        let in_cooldown =
-            (blobs_processed as u64) < (last_decrease + ADJUSTMENT_COOLDOWN_BLOBS as u64);
-
-        // Decrease on throttling detection (>10% error rate)
-        if error_rate > THROTTLE_ERROR_RATE && !in_cooldown {
-            // Reduce by 50%, minimum MIN_ADAPTIVE_WORKERS
-            new_workers = (old_workers / 2).max(MIN_ADAPTIVE_WORKERS);
-            // BUG-CONC-001: Add atomic fence before decrease to ensure all prior work completes
-            fence(Ordering::Acquire);
-            self.current_workers
-                .store(new_workers as u64, Ordering::Release);
-            // BUG-CONC-001: Add atomic fence after decrease to ensure new value is visible
-            fence(Ordering::Release);
-            // BUG-STAB-007: Update last_decrease_index to enforce cooldown
-            self.last_decrease_index
-                .store(blobs_processed as u64, Ordering::Release);
-            if self.verbose {
-                eprintln!(
-                    "  [ADAPTIVE] Throttling detected ({:.1}% errors). Decreasing workers: {} → {} (cooldown active for next {} blobs)",
-                    error_rate * 100.0,
-                    old_workers,
-                    new_workers,
-                    ADJUSTMENT_COOLDOWN_BLOBS
-                );
-            }
-        }
-        // Increase on headroom availability (<2% error rate, minimum sample size)
-        else if error_rate < HEADROOM_ERROR_RATE && window_requests >= 50 {
-            // Increase by 10%, up to initial_workers, max MAX_ADAPTIVE_WORKERS
-            let increase = (self.initial_workers / 10).max(1) as usize;
-            let target = (self.initial_workers as usize).min(MAX_ADAPTIVE_WORKERS);
-            new_workers = (old_workers + increase).min(target);
-            // BUG-CONC-001: Use Release ordering for store
-            self.current_workers
-                .store(new_workers as u64, Ordering::Release);
-            // Only log if workers actually increased
-            if self.verbose && new_workers != old_workers {
-                eprintln!(
-                    "  [ADAPTIVE] Headroom available ({:.1}% errors). Increasing workers: {} → {}",
-                    error_rate * 100.0,
-                    old_workers,
-                    new_workers
-                );
-            }
-        }
-        // Log steady state
-        else if self.verbose && window_requests >= 50 {
-            eprintln!(
-                "  [ADAPTIVE] Steady state ({:.1}% errors, {} requests). Workers: {}",
-                error_rate * 100.0,
-                window_requests,
-                old_workers
-            );
-        }
-
-        new_workers
-    }
-}
-
-#[derive(Clone)]
-struct AdaptiveConcurrencyGate {
-    inner: Arc<AdaptiveConcurrencyGateInner>,
-}
-
-struct AdaptiveConcurrencyGateInner {
-    semaphore: Arc<Semaphore>,
-    limit: AtomicUsize,
-    active: AtomicUsize,
-    notify: Notify,
-}
-
-struct AdaptiveConcurrencyPermit {
-    inner: Arc<AdaptiveConcurrencyGateInner>,
-    _permit: OwnedSemaphorePermit,
-}
-
-impl AdaptiveConcurrencyGate {
-    fn new(max_permits: usize) -> Self {
-        let max_permits = max_permits.max(1);
-        Self {
-            inner: Arc::new(AdaptiveConcurrencyGateInner {
-                semaphore: Arc::new(Semaphore::new(max_permits)),
-                limit: AtomicUsize::new(max_permits),
-                active: AtomicUsize::new(0),
-                notify: Notify::new(),
-            }),
-        }
-    }
-
-    async fn acquire(&self) -> AdaptiveConcurrencyPermit {
-        loop {
-            let permit = self
-                .inner
-                .semaphore
-                .clone()
-                .acquire_owned()
-                .await
-                .expect("adaptive concurrency semaphore cannot be closed");
-            let active = self.inner.active.fetch_add(1, Ordering::AcqRel) + 1;
-            if active <= self.inner.limit.load(Ordering::Acquire) {
-                return AdaptiveConcurrencyPermit {
-                    inner: self.inner.clone(),
-                    _permit: permit,
-                };
-            }
-
-            let notified = self.inner.notify.notified();
-            self.inner.active.fetch_sub(1, Ordering::AcqRel);
-            drop(permit);
-            notified.await;
-        }
-    }
-
-    fn set_limit(&self, limit: usize) {
-        self.inner.limit.store(limit.max(1), Ordering::Release);
-        self.inner.notify.notify_waiters();
-    }
-
-    #[cfg(test)]
-    fn current_limit(&self) -> usize {
-        self.inner.limit.load(Ordering::Acquire)
-    }
-}
-
-impl Drop for AdaptiveConcurrencyPermit {
-    fn drop(&mut self) {
-        self.inner.active.fetch_sub(1, Ordering::AcqRel);
-        self.inner.notify.notify_one();
-    }
-}
+pub(crate) use crate::scan_scheduler::{AdaptiveConcurrency, AdaptiveConcurrencyGate};
 
 // ════════════════════════════════════════════════
 // MAIN STREAMER
@@ -1916,8 +1640,8 @@ impl Streamer {
                         eprintln!(
                             "  [R] Adaptive state: {} workers, {} req, {} err in window",
                             ac.current_workers(),
-                            ac.window_requests.load(Ordering::Relaxed),
-                            ac.window_errors.load(Ordering::Relaxed)
+                            ac.window_counts().0,
+                            ac.window_counts().1
                         );
                     }
                 }
