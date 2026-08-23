@@ -5,7 +5,10 @@
 //! All requests are authenticated with `Authorization: token <PAT>` and target
 //! `https://api.github.com`.
 
-use crate::forge::{EnumScope, Forge, Platform, RateLimitInfo, Repository, TreeEntry};
+use crate::forge::{
+    EnumScope, Forge, ForgeHistory, HistoryChangeStatus, HistoryEntry, Platform, RateLimitInfo,
+    Repository, TreeEntry,
+};
 use crate::http_client::{HttpClient, HttpConfig};
 use anyhow::Context;
 use async_trait::async_trait;
@@ -258,6 +261,23 @@ impl Forge for GitHubForgeClient {
 
     async fn get_blob(&self, repo: &Repository, sha: &str) -> anyhow::Result<Vec<u8>> {
         get_blob_content(&self.client, &repo.owner, &repo.name, sha).await
+    }
+
+    async fn get_history(
+        &self,
+        repo: &Repository,
+        branch: &str,
+        max_commits: usize,
+    ) -> anyhow::Result<ForgeHistory> {
+        get_history_at(
+            &self.client,
+            GH_API,
+            &repo.owner,
+            &repo.name,
+            branch,
+            max_commits,
+        )
+        .await
     }
 
     fn rate_limit_remaining(&self) -> Option<(u32, Duration)> {
@@ -656,6 +676,99 @@ async fn walk_tree_recursive(
     Ok(all)
 }
 
+const MAX_GITHUB_HISTORY_COMMITS: usize = 5_000;
+
+/// Fetch bounded commit history and changed paths from GitHub.
+async fn get_history_at(
+    client: &HttpClient,
+    api_base: &str,
+    owner: &str,
+    repo: &str,
+    branch: &str,
+    max_commits: usize,
+) -> anyhow::Result<ForgeHistory> {
+    let requested_limit = if max_commits == 0 {
+        MAX_GITHUB_HISTORY_COMMITS
+    } else {
+        max_commits.min(MAX_GITHUB_HISTORY_COMMITS)
+    };
+    let mut current_url = format!(
+        "{}/repos/{}/{}/commits?sha={}&per_page=100",
+        api_base, owner, repo, branch
+    );
+    let mut history = ForgeHistory::default();
+
+    loop {
+        let response = client.get(&current_url).await;
+        if !response.ok() {
+            anyhow::bail!(
+                "GET history {} returned HTTP {}",
+                crate::validation::redact_url(&current_url),
+                response.status
+            );
+        }
+        let commits = serde_json::from_slice::<serde_json::Value>(&response.body)?;
+        let Some(commits) = commits.as_array() else {
+            anyhow::bail!("Expected JSON array from GitHub history endpoint");
+        };
+        for commit in commits {
+            if history.commits_scanned >= requested_limit {
+                history.truncated = true;
+                break;
+            }
+            let Some(commit_sha) = commit["sha"].as_str() else {
+                continue;
+            };
+            let detail_url = format!(
+                "{}/repos/{}/{}/commits/{}",
+                api_base, owner, repo, commit_sha
+            );
+            let detail_response = client.get(&detail_url).await;
+            if !detail_response.ok() {
+                anyhow::bail!(
+                    "GET commit {} returned HTTP {}",
+                    crate::validation::redact_url(&detail_url),
+                    detail_response.status
+                );
+            }
+            let detail = serde_json::from_slice::<serde_json::Value>(&detail_response.body)?;
+            if let Some(files) = detail["files"].as_array() {
+                for file in files {
+                    let Some(path) = file["filename"].as_str() else {
+                        continue;
+                    };
+                    history.entries.push(HistoryEntry {
+                        commit_sha: commit_sha.to_string(),
+                        path: path.to_string(),
+                        status: HistoryChangeStatus::from_provider_status(
+                            file["status"].as_str().unwrap_or("unknown"),
+                        ),
+                        blob_sha: file["sha"].as_str().map(str::to_string),
+                        previous_path: file["previous_filename"].as_str().map(str::to_string),
+                        size: file["size"].as_u64(),
+                    });
+                }
+            }
+            history.commits_scanned += 1;
+        }
+        if history.truncated {
+            break;
+        }
+        match response
+            .headers
+            .get("link")
+            .and_then(|h| parse_next_link(h))
+        {
+            Some(next) => current_url = next,
+            None => break,
+        }
+    }
+    if max_commits > MAX_GITHUB_HISTORY_COMMITS {
+        history.truncated = true;
+    }
+    Ok(history)
+}
+
 /// Fetch the raw (decoded) content of a blob by its SHA.
 ///
 /// Uses `GET /repos/{owner}/{repo}/git/blobs/{sha}`.
@@ -878,6 +991,48 @@ mod tests {
             .unwrap();
         assert_eq!(content, b"fixture-value");
     }
+    #[tokio::test]
+    async fn mock_server_contract_parses_bounded_github_history() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let base_url = format!("http://{address}");
+        let commits_body = r#"[{"sha":"commit-one"},{"sha":"commit-two"}]"#;
+        let detail_body = r#"{"files":[{"filename":"config.txt","status":"modified","sha":"blob-one","size":42},{"filename":"old.txt","status":"renamed","previous_filename":"older.txt"}]}"#;
+        tokio::spawn(async move {
+            for body in [commits_body, detail_body] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0u8; 2048];
+                let _ = socket.read(&mut request).await;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+
+        let client = build_github_client(HttpConfig::default(), "synthetic-token").unwrap();
+        let history = get_history_at(&client, &base_url, "fixture", "repo", "main", 1)
+            .await
+            .unwrap();
+        assert_eq!(history.commits_scanned, 1);
+        assert!(history.truncated);
+        assert_eq!(history.entries.len(), 2);
+        assert_eq!(history.entries[0].path, "config.txt");
+        assert_eq!(history.entries[0].status, HistoryChangeStatus::Modified);
+        assert_eq!(history.entries[0].blob_sha.as_deref(), Some("blob-one"));
+        assert_eq!(history.entries[0].size, Some(42));
+        assert_eq!(history.entries[1].status, HistoryChangeStatus::Renamed);
+        assert_eq!(
+            history.entries[1].previous_path.as_deref(),
+            Some("older.txt")
+        );
+    }
+
     #[tokio::test]
     async fn mock_server_contract_follows_github_repository_pagination() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};

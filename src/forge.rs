@@ -217,6 +217,52 @@ impl Default for ForgeCapabilities {
     }
 }
 
+/// Change classification for a path observed in provider history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoryChangeStatus {
+    Added,
+    Modified,
+    Removed,
+    Renamed,
+    Copied,
+    Changed,
+    Unknown,
+}
+
+impl HistoryChangeStatus {
+    pub fn from_provider_status(status: &str) -> Self {
+        match status {
+            "added" => Self::Added,
+            "modified" => Self::Modified,
+            "removed" => Self::Removed,
+            "renamed" => Self::Renamed,
+            "copied" => Self::Copied,
+            "changed" => Self::Changed,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+/// One provider history file change with optional current blob content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryEntry {
+    pub commit_sha: String,
+    pub path: String,
+    pub status: HistoryChangeStatus,
+    pub blob_sha: Option<String>,
+    pub previous_path: Option<String>,
+    pub size: Option<u64>,
+}
+
+/// Bounded history retrieval result and coverage signal.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForgeHistory {
+    pub commits_scanned: usize,
+    pub entries: Vec<HistoryEntry>,
+    pub truncated: bool,
+}
+
 // ════════════════════════════════════════════════
 // FORGE TRAIT
 // ════════════════════════════════════════════════
@@ -276,6 +322,19 @@ pub trait Forge: Send + Sync {
         entry: &TreeEntry,
     ) -> anyhow::Result<Vec<u8>> {
         self.get_blob(repo, &entry.sha).await
+    }
+
+    /// Retrieve bounded commit history and changed paths.
+    ///
+    /// Providers without implemented history traversal must return a typed
+    /// unsupported-capability error instead of silently returning an empty scan.
+    async fn get_history(
+        &self,
+        _repo: &Repository,
+        _branch: &str,
+        _max_commits: usize,
+    ) -> anyhow::Result<ForgeHistory> {
+        anyhow::bail!("Unsupported capability: forge history retrieval is not implemented")
     }
 
     /// Get current rate limit status.
@@ -433,6 +492,32 @@ mod tests {
         }
 
         headers
+    }
+
+    #[test]
+    fn forge_scope_and_capability_defaults_are_stable() {
+        assert_eq!(ForgeScanScope::Snapshot.as_str(), "snapshot");
+        assert_eq!(ForgeScanScope::History.as_str(), "history");
+        let capabilities = ForgeCapabilities::default();
+        assert!(capabilities.snapshot);
+        assert!(!capabilities.history);
+        assert!(!capabilities.deleted_blobs);
+    }
+
+    #[test]
+    fn history_status_mapping_preserves_unknown_values() {
+        assert_eq!(
+            HistoryChangeStatus::from_provider_status("modified"),
+            HistoryChangeStatus::Modified
+        );
+        assert_eq!(
+            HistoryChangeStatus::from_provider_status("removed"),
+            HistoryChangeStatus::Removed
+        );
+        assert_eq!(
+            HistoryChangeStatus::from_provider_status("provider-specific"),
+            HistoryChangeStatus::Unknown
+        );
     }
 
     #[test]
