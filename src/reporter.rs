@@ -506,6 +506,9 @@ impl Reporter {
     pub fn print_stream_done(&self, r: &StreamResult) {
         println!(); // newline after progress bar
         println!("│  {:<16}: {}", "Blobs scanned", r.blobs_scanned);
+        if r.blobs_failed > 0 {
+            println!("│  {:<16}: {}", "Blobs failed", r.blobs_failed);
+        }
         println!("│  {:<16}: {} KB", "Data processed", r.bytes_scanned / 1024);
         if r.files_saved > 0 || r.files_save_failed > 0 {
             println!(

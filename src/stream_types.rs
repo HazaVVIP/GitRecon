@@ -36,12 +36,10 @@ pub struct StreamResult {
     pub tech_stack: Vec<String>,
     pub commit_count: usize,
     pub blobs_scanned: usize,
-    #[allow(dead_code)]
     pub blobs_failed: usize,
     pub bytes_scanned: usize,
     pub elapsed_s: f64,
     pub files_saved: usize,
-    #[allow(dead_code)]
     pub files_save_failed: usize,
     /// PERF-005: Cache metrics
     pub cache_hits: usize,
