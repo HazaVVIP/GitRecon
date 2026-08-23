@@ -101,7 +101,7 @@ The benchmark creates temporary, non-sensitive fixtures and reports normal versu
 
 ## Release Checklist
 
-Before publishing a release, confirm that the version in `Cargo.toml`, the crate-level CLI description, and README metadata agree. Run formatting, Clippy, all tests, and a release build. Review `git status --short` for generated files, temporary scripts, credentials, and unexpected binaries. Confirm that reports handle operational metadata according to the selected output mode, webhook validation remains enabled by default, and no test depends on an external account or service.
+Before publishing a release, confirm that the version in `Cargo.toml`, the crate-level CLI description, and README metadata agree. Run formatting, Clippy, all tests, and a release build. Generate `SHA256SUMS` for every release archive and verify each selected archive against its exact checksum entry before publication. The installer must fail closed when the checksum asset, matching entry, or local SHA-256 utility is unavailable. Review `git status --short` for generated files, temporary scripts, credentials, and unexpected binaries. Confirm that reports handle operational metadata according to the selected output mode, webhook validation remains enabled by default, and no test depends on an external account or service.
 
 Release artifacts should contain source, `Cargo.toml`, `Cargo.lock`, `README.md`, `DEVELOPMENT.md`, `LICENSE`, `src/`, `tests/`, and the reproducible benchmark under `tools/`. Build output under `target/` is local and must not be committed.
 
