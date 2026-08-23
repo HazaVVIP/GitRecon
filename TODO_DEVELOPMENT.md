@@ -513,7 +513,7 @@ Tambahkan stage timing, request attempts, retry counts, acquisition source, skip
 
 ### Implementasi P3-05 (sub-bagian remote benchmark metadata)
 
-`tools/benchmark_remote_acquisition.py` kini mempertahankan output JSON lama sekaligus menambahkan metadata fixture (file, commit, byte), build profile eksplisit, host metadata non-sensitif, mean/median/min/max elapsed, population variance, relative spread, serta per-sample dan summary `peak_rss_bytes` dari child process. `--build-profile` membantu membedakan release, debug, dan custom binary dalam hasil benchmark; fixture tetap lokal, deterministic, dan tidak memerlukan credentials atau internet. Remaining work: throughput, retry/cache-hit scenarios, dan regression threshold multi-sample yang lebih kaya.
+`tools/benchmark_remote_acquisition.py` kini mempertahankan output JSON lama sekaligus menambahkan metadata fixture (file, commit, byte), build profile eksplisit, host metadata non-sensitif, mean/median/min/max elapsed, population variance, relative spread, per-sample dan summary `peak_rss_bytes` dari child process, throughput bytes/blobs per second, serta report-derived cache dan retry telemetry. `--build-profile` membantu membedakan release, debug, dan custom binary dalam hasil benchmark; fixture tetap lokal, deterministic, dan tidak memerlukan credentials atau internet. Remaining work: retry/cache-hit scenarios yang terisolasi dan regression threshold multi-sample yang lebih kaya.
 
 Pertahankan local normal-versus-exhaustive benchmark, lalu tambah remote acquisition benchmark dengan deterministic fixture. Ukur throughput, cache hit rate, source distribution, retry behavior, typed outcomes, peak RSS, dan variance antar repetition. Output utama harus JSON.
 
