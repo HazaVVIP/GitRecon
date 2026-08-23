@@ -338,9 +338,13 @@ Ekstrak domain berikut secara bertahap: `stream_types`, `scan_scheduler`, `conte
 
 ## P2-03 — Ganti positional configuration constructor dengan typed config
 
-**Status:** `TODO`  
+**Status:** `IN PROGRESS`  
 **Dependensi:** P1-01  
-**Area:** `src/config.rs`, `src/scanner_factory.rs`
+**Area:** `src/config.rs`, `src/scanner_factory.rs`, `src/streamer_config.rs`
+
+### Implementasi P2-03 (sub-bagian StreamerConfig)
+
+Constructor `Streamer::new` tidak lagi menerima daftar positional arguments yang panjang. `src/streamer_config.rs` menyediakan typed boundary yang dibangun canonical dari `ScanConfig`, sedangkan `scanner_factory` menjadi satu-satunya adapter mapping. Unit conversion, checkpoint snapshot, runtime policy, cache, custom patterns, dan false-positive keywords tetap dipetakan secara eksplisit. Pekerjaan lanjutan adalah mengelompokkan input CLI mentah ke builder tervalidasi di `config.rs` sehingga invalid invariants ditolak sebelum orchestration.
 
 Ganti constructor dengan 16 positional arguments menjadi `ScanConfigBuilder` atau typed `ScanConfigInput`. Kelompokkan policy, resource, transport, output, and checkpoint settings. Validasi invariants saat construction sehingga core menerima konfigurasi yang sudah valid.
 

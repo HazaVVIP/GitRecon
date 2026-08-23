@@ -50,6 +50,7 @@ mod scanner_factory;
 mod scanner_policy;
 mod stream_types;
 mod streamer;
+mod streamer_config;
 mod target_utils;
 mod targets;
 mod temp_cleanup; // SEC-004: Temp file cleanup

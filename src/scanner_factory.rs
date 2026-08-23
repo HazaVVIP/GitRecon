@@ -5,10 +5,10 @@
 
 use std::sync::Arc;
 
-use crate::checkpoint::ScanConfigSnapshot;
 use crate::config::ScanConfig;
 use crate::http_client::HttpClient;
 use crate::streamer::{DynPattern, Streamer};
+use crate::streamer_config::StreamerConfig;
 
 pub(crate) fn build_streamer(
     client: HttpClient,
@@ -19,24 +19,13 @@ pub(crate) fn build_streamer(
     cache: Option<Arc<crate::cache::ObjectCache>>,
     false_positive_keywords: Vec<String>,
 ) -> Streamer {
-    Streamer::new(
+    Streamer::new(StreamerConfig::from_scan_config(
         client,
-        config.workers,
-        config.mem_limit,
+        config,
         verbose,
-        config.max_findings,
-        config.stop_on_critical,
         extra_patterns,
-        config.max_blob_size,
-        config.entropy_threshold,
-        config.live,
-        config.adaptive_workers,
-        config.resume,
-        config.checkpoint_interval,
         target_url,
         cache,
         false_positive_keywords,
-        config.exhaustive,
-        ScanConfigSnapshot::from_config(config),
-    )
+    ))
 }
