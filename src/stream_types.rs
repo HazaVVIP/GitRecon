@@ -50,11 +50,8 @@ pub struct StreamResult {
     /// Object processing outcome metrics.
     pub outcome_stats: ScanOutcomeStats,
     /// PERF-004: Rate limit metrics
-    #[allow(dead_code)]
     pub rate_limit_allowed: usize,
-    #[allow(dead_code)]
     pub rate_limit_dropped: usize,
-    #[allow(dead_code)]
     pub rate_limit_wait_ms: u64,
 }
 

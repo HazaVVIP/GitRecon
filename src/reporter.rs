@@ -593,6 +593,12 @@ impl Reporter {
                 }
             }
         }
+        if r.rate_limit_allowed > 0 || r.rate_limit_dropped > 0 || r.rate_limit_wait_ms > 0 {
+            println!(
+                "│  {:<16}: allowed={} dropped={} wait={}ms",
+                "Rate limit", r.rate_limit_allowed, r.rate_limit_dropped, r.rate_limit_wait_ms
+            );
+        }
         println!("│");
     }
 
