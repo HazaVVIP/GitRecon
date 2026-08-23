@@ -235,6 +235,39 @@ impl Reporter {
         (total, by_category)
     }
 
+    fn telemetry_value(stream: &StreamResult) -> serde_json::Value {
+        serde_json::json!({
+            "schema_version": 1,
+            "findings_total": stream.findings.len(),
+            "blobs_scanned": stream.blobs_scanned,
+            "blobs_failed": stream.blobs_failed,
+            "bytes_scanned": stream.bytes_scanned,
+            "elapsed_s": (stream.elapsed_s * 100.0).round() / 100.0,
+            "tech_stack": stream.tech_stack,
+            "files_saved": stream.files_saved,
+            "files_save_failed": stream.files_save_failed,
+            "object_sources": stream.object_source_stats,
+            "cache": {
+                "hits": stream.cache_hits,
+                "misses": stream.cache_misses,
+                "stats": stream.cache_stats,
+            },
+            "rate_limit": {
+                "allowed": stream.rate_limit_allowed,
+                "dropped": stream.rate_limit_dropped,
+                "wait_ms": stream.rate_limit_wait_ms,
+            },
+            "retry": stream.retry_stats,
+            "outcomes": stream.outcome_stats,
+        })
+    }
+
+    fn telemetry_markdown(stream: &StreamResult) -> String {
+        let value = Self::telemetry_value(stream);
+        let serialized = serde_json::to_string(&value).unwrap_or_else(|_| "{}".to_string());
+        format!("| Scan telemetry | `{}` |\\n", md_cell_escape(&serialized))
+    }
+
     pub fn new(no_color: bool, theme: &ui::theme::Theme) -> Self {
         if no_color {
             colored::control::set_override(false);
@@ -1115,10 +1148,14 @@ impl Reporter {
             })
             .collect();
 
+        let telemetry = stream_r
+            .map(Self::telemetry_value)
+            .unwrap_or_else(|| serde_json::json!({"schema_version": 1}));
         let sarif = serde_json::json!({
             "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
             "version": "2.1.0",
             "runs": [{
+                "properties": {"gitrecon": telemetry},
                 "tool": {
                     "driver": {
                         "name": "GitRecon",
@@ -1169,7 +1206,23 @@ impl Reporter {
                 ));
             }
         }
-        write_report_secure(path, out.as_bytes())
+        write_report_secure(path, out.as_bytes())?;
+        if let Some(s) = stream_r {
+            Self::save_csv_sidecar(path, s)?;
+        }
+        Ok(())
+    }
+
+    fn save_csv_sidecar(path: &str, stream: &StreamResult) -> std::io::Result<()> {
+        let sidecar_path = format!("{path}.meta.json");
+        let metadata = serde_json::json!({
+            "_gitrecon": {
+                "record_type": "metadata",
+                "telemetry": Self::telemetry_value(stream),
+            }
+        });
+        let body = serde_json::to_string_pretty(&metadata).map_err(std::io::Error::other)?;
+        write_report_secure(sidecar_path, body.as_bytes())
     }
 
     // O-3: NDJSON output format
@@ -1178,6 +1231,16 @@ impl Reporter {
         std::fs::create_dir_all(parent)?;
         let mut out = String::new();
         if let Some(s) = stream_r {
+            let metadata = serde_json::json!({
+                "_gitrecon": {
+                    "record_type": "metadata",
+                    "telemetry": Self::telemetry_value(s),
+                }
+            });
+            if let Ok(line) = serde_json::to_string(&metadata) {
+                out.push_str(&line);
+                out.push('\n');
+            }
             for f in &s.findings {
                 if let Ok(line) = serde_json::to_string(&f.to_dict()) {
                     out.push_str(&line);
@@ -1204,6 +1267,12 @@ impl Reporter {
             "# GitRecon Report\n\n**Target:** {}\n\n",
             md_cell_escape(target)
         );
+        if let Some(s) = stream_r {
+            out.push_str("## Scan metadata\n\n");
+            out.push_str("| Metric | Value |\n|--------|-------|\n");
+            out.push_str(&Self::telemetry_markdown(s));
+            out.push('\n');
+        }
         out.push_str("| Severity | Type | File | Line | AI | Match |\n");
         out.push_str("|----------|------|------|------|----|-------|\n");
         if let Some(s) = stream_r {
@@ -1284,6 +1353,14 @@ impl Reporter {
                 ));
             }
         }
+        let metadata = stream_r
+            .map(|stream| {
+                let value = Self::telemetry_value(stream);
+                let body =
+                    serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{}".to_string());
+                html_escape(&body)
+            })
+            .unwrap_or_default();
         let html = format!(
             r#"<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>GitRecon Report</title>
@@ -1291,10 +1368,12 @@ impl Reporter {
 </head><body>
 <h1>GitRecon Report</h1>
 <p><strong>Target:</strong> {}</p>
+<section><h2>Scan metadata</h2><pre>{}</pre></section>
 <table><thead><tr><th>Severity</th><th>Type</th><th>File</th><th>Line</th><th>AI</th><th>Match</th></tr></thead>
 <tbody>{}</tbody></table>
 </body></html>"#,
             html_escape(target),
+            metadata,
             rows
         );
         write_report_secure(path, html.as_bytes())
@@ -1637,6 +1716,77 @@ mod tests {
             .expect("save markdown");
         rep.save_html(&html_str, "target", Some(&stream))
             .expect("save html");
+    }
+
+    #[test]
+    fn non_json_formats_include_additive_telemetry() {
+        let rep = Reporter::new(true, &ui::theme::Theme::default());
+        let mut stream = unicode_stream_result();
+        stream
+            .outcome_stats
+            .archive_invalid_reasons
+            .insert("depth".into(), 2);
+        stream.cache_hits = 3;
+        stream.blobs_failed = 1;
+        let tmp =
+            std::env::temp_dir().join(format!("gitrecon_telemetry_formats_{}", std::process::id()));
+        let _guard = TempDirGuard::new(tmp.clone());
+
+        let sarif_path = tmp.join("report.sarif");
+        let ndjson_path = tmp.join("report.ndjson");
+        let csv_path = tmp.join("report.csv");
+        let md_path = tmp.join("report.md");
+        let html_path = tmp.join("report.html");
+        rep.save_sarif(&sarif_path.to_string_lossy(), "target", Some(&stream))
+            .expect("save SARIF");
+        rep.save_ndjson(&ndjson_path.to_string_lossy(), Some(&stream))
+            .expect("save NDJSON");
+        rep.save_csv(&csv_path.to_string_lossy(), Some(&stream))
+            .expect("save CSV");
+        rep.save_markdown(&md_path.to_string_lossy(), "target", Some(&stream))
+            .expect("save Markdown");
+        rep.save_html(&html_path.to_string_lossy(), "target", Some(&stream))
+            .expect("save HTML");
+
+        let sarif: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&sarif_path).unwrap()).unwrap();
+        assert_eq!(
+            sarif["runs"][0]["properties"]["gitrecon"]["cache"]["hits"],
+            3
+        );
+        assert_eq!(
+            sarif["runs"][0]["properties"]["gitrecon"]["outcomes"]["archive_invalid_reasons"]
+                ["depth"],
+            2
+        );
+
+        let first_ndjson = std::fs::read_to_string(&ndjson_path)
+            .unwrap()
+            .lines()
+            .next()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .unwrap();
+        assert_eq!(first_ndjson["_gitrecon"]["record_type"], "metadata");
+        assert_eq!(first_ndjson["_gitrecon"]["telemetry"]["blobs_failed"], 1);
+
+        let csv = std::fs::read_to_string(&csv_path).unwrap();
+        assert!(csv
+            .lines()
+            .next()
+            .unwrap()
+            .starts_with("file,line,severity"));
+        let csv_meta: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(format!("{}.meta.json", csv_path.to_string_lossy())).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(csv_meta["_gitrecon"]["telemetry"]["cache"]["hits"], 3);
+
+        let markdown = std::fs::read_to_string(&md_path).unwrap();
+        assert!(markdown.contains("## Scan metadata"));
+        assert!(markdown.contains("archive_invalid_reasons"));
+        let html = std::fs::read_to_string(&html_path).unwrap();
+        assert!(html.contains("<section><h2>Scan metadata</h2>"));
+        assert!(html.contains("archive_invalid_reasons"));
     }
 
     #[test]
