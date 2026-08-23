@@ -10,6 +10,8 @@ use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
+use crate::stream_types::RetryReportStats;
+
 // ════════════════════════════════════════════════
 // PLATFORM ENUMERATION
 // ════════════════════════════════════════════════
@@ -378,6 +380,12 @@ pub trait Forge: Send + Sync {
     /// implemented and covered by provider-mock tests.
     fn capabilities(&self) -> ForgeCapabilities {
         ForgeCapabilities::snapshot_only()
+    }
+
+    /// Snapshot transport retry metrics when this provider owns an HTTP client.
+    /// Custom Forge implementations may retain the default `None`.
+    fn retry_stats(&self) -> Option<RetryReportStats> {
+        None
     }
 
     /// Get the platform identifier.

@@ -186,6 +186,10 @@ impl Forge for GiteaForgeClient {
         get_blob_content(&self.client, &self.api_base, &repo.owner, &repo.name, sha).await
     }
 
+    fn retry_stats(&self) -> Option<crate::stream_types::RetryReportStats> {
+        Some(self.client.retry_metrics.snapshot())
+    }
+
     fn rate_limit_remaining(&self) -> Option<(u32, Duration)> {
         self.rate_limit_remaining.lock().ok().and_then(|guard| {
             guard.as_ref().map(|(remaining, reset)| {

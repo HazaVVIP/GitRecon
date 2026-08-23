@@ -774,6 +774,7 @@ where
     )
     .await;
     result.outcome_stats = scan_config.outcome_stats.lock().await.clone();
+    result.retry_stats = forge.retry_stats();
     result
 }
 
