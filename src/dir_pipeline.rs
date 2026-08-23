@@ -28,6 +28,7 @@ pub(crate) struct LocalScanConfig {
     pub(crate) max_findings: usize,
     pub(crate) stop_on_critical: bool,
     pub(crate) entropy_threshold: f64,
+    pub(crate) false_positive_keywords: Vec<String>,
     pub(crate) extra_patterns: Vec<DynPattern>,
     pub(crate) verbose: bool,
     pub(crate) emit_findings: bool,
@@ -45,6 +46,7 @@ pub(crate) async fn scan_local_files(config: LocalScanConfig) -> StreamResult {
         max_findings,
         stop_on_critical,
         entropy_threshold,
+        false_positive_keywords,
         extra_patterns,
         verbose,
         emit_findings,
@@ -63,6 +65,7 @@ pub(crate) async fn scan_local_files(config: LocalScanConfig) -> StreamResult {
         .map(|path| {
             let stop = stop_flag.clone();
             let scanner = scanner.clone();
+            let false_positive_keywords = false_positive_keywords.clone();
             let root = root.clone();
             let display_root = display_root.clone();
             async move {
@@ -90,7 +93,7 @@ pub(crate) async fn scan_local_files(config: LocalScanConfig) -> StreamResult {
                 } else {
                     source
                 };
-                let outcome = scanner.scan(&data, &scan_path, is_binary);
+                let outcome = scanner.scan(&data, &scan_path, is_binary, &false_positive_keywords);
                 let mut technologies = Vec::new();
                 if !is_binary {
                     detect_tech_from_path(&relative_path, &mut technologies);
@@ -161,5 +164,52 @@ fn detect_tech_from_path(path: &str, output: &mut Vec<String>) {
         if signals.iter().any(|signal| path.contains(signal)) {
             output.push((*technology).to_string());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{scan_local_files, LocalScanConfig};
+    use std::fs;
+    use std::path::PathBuf;
+
+    #[tokio::test]
+    async fn local_scan_forwards_custom_false_positive_keywords() {
+        let root = std::env::temp_dir().join(format!(
+            "gitrecon-local-keyword-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("test root should be creatable");
+        let file = root.join("config.env");
+        fs::write(
+            &file,
+            b"api_key = \"synthetic_value_123456\" # internal-fixture",
+        )
+        .expect("test fixture should be writable");
+
+        let result = scan_local_files(LocalScanConfig {
+            candidates: vec![PathBuf::from(&file)],
+            root: root.clone(),
+            display_root: root.to_string_lossy().into_owned(),
+            max_blob_bytes: 1024,
+            workers: 1,
+            no_scan_binaries: false,
+            exhaustive: false,
+            max_findings: 0,
+            stop_on_critical: false,
+            entropy_threshold: 4.5,
+            false_positive_keywords: vec!["internal-fixture".to_string()],
+            extra_patterns: Vec::new(),
+            verbose: false,
+            emit_findings: false,
+        })
+        .await;
+
+        assert_eq!(result.findings.len(), 1);
+        assert_eq!(result.findings[0].pattern_id, "api_key");
+        assert_eq!(result.findings[0].severity, "MEDIUM");
+        assert!(result.findings[0].confidence_adjustment.is_some());
+        fs::remove_dir_all(root).expect("test root should be removable");
     }
 }

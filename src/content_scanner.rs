@@ -107,6 +107,7 @@ impl ContentScanner {
         data: &[u8],
         logical_path: &str,
         is_binary: bool,
+        false_positive_keywords: &[String],
     ) -> ContentScanOutcome {
         if data.is_empty() {
             return ContentScanOutcome::empty();
@@ -148,7 +149,8 @@ impl ContentScanner {
         }
 
         let text = String::from_utf8_lossy(data);
-        let findings = self.scan_text_object(&text, logical_path, "", false, &[]);
+        let findings =
+            self.scan_text_object(&text, logical_path, "", false, false_positive_keywords);
         ContentScanOutcome {
             findings,
             bytes: data.len(),
@@ -251,11 +253,34 @@ mod tests {
         let normal = ContentScanner::new(patterns.clone(), false, 4.5, 1024, true);
         let exhaustive = ContentScanner::new(patterns, true, 4.5, 1024, true);
         let data = b"api_key=your_api_key_here_value_123";
-        assert!(normal.scan(data, "config.env", false).findings.is_empty());
-        assert!(!exhaustive
-            .scan(data, "config.env", false)
+        assert!(normal
+            .scan(data, "config.env", false, &[])
             .findings
             .is_empty());
+        assert!(!exhaustive
+            .scan(data, "config.env", false, &[])
+            .findings
+            .is_empty());
+    }
+
+    #[test]
+    fn custom_false_positive_keywords_apply_to_normal_and_exhaustive_text_scans() {
+        let normal = ContentScanner::new(Arc::new(Vec::new()), false, 4.5, 1024, true);
+        let exhaustive = ContentScanner::new(Arc::new(Vec::new()), true, 4.5, 1024, true);
+        let keywords = vec!["internal-fixture".to_string()];
+        let data = b"api_key = \"synthetic_value_123456\" # internal-fixture";
+
+        for findings in [
+            normal.scan(data, "config.env", false, &keywords).findings,
+            exhaustive
+                .scan(data, "config.env", false, &keywords)
+                .findings,
+        ] {
+            assert_eq!(findings.len(), 1);
+            assert_eq!(findings[0].pattern_id, "api_key");
+            assert_eq!(findings[0].severity, "MEDIUM");
+            assert!(findings[0].confidence_adjustment.is_some());
+        }
     }
 
     #[test]
@@ -285,7 +310,7 @@ mod tests {
             regex: Regex::new("CUSTOM_[A-Z0-9]{4}").unwrap(),
         };
         let scanner = ContentScanner::new(Arc::new(vec![pattern]), false, 4.5, 1024, true);
-        let outcome = scanner.scan(b"\0\0CUSTOM_AB12\0", "fixture.bin", true);
+        let outcome = scanner.scan(b"\0\0CUSTOM_AB12\0", "fixture.bin", true, &[]);
         assert_eq!(outcome.findings.len(), 1);
         assert_eq!(outcome.findings[0].pattern_id, "custom_binary");
         assert_eq!(outcome.findings[0].severity, "CRITICAL");
@@ -295,7 +320,7 @@ mod tests {
     #[test]
     fn binary_scanner_can_be_disabled_without_losing_byte_accounting() {
         let scanner = ContentScanner::new(Arc::new(Vec::new()), false, 4.5, 1024, false);
-        let outcome = scanner.scan(b"binary bytes", "fixture.bin", true);
+        let outcome = scanner.scan(b"binary bytes", "fixture.bin", true, &[]);
         assert!(!outcome.failed);
         assert_eq!(outcome.bytes, 12);
         assert!(outcome.findings.is_empty());
@@ -323,7 +348,7 @@ mod tests {
     #[test]
     fn accumulator_reduces_findings_tech_and_bytes() {
         let scanner = ContentScanner::new(Arc::new(Vec::new()), false, 4.5, 1024, true);
-        let outcome = scanner.scan(b"ordinary text", "fixture.txt", false);
+        let outcome = scanner.scan(b"ordinary text", "fixture.txt", false, &[]);
         let mut accumulator = ScanAccumulator::default();
         accumulator.absorb(outcome, vec!["Rust".to_string()]);
         let result = accumulator.into_stream_result(std::time::Instant::now());

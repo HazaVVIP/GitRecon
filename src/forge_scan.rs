@@ -360,6 +360,7 @@ pub(crate) struct FileScanConfig {
     pub(crate) scan_binaries: bool,
     pub(crate) exhaustive: bool,
     pub(crate) entropy_threshold: f64,
+    pub(crate) false_positive_keywords: Vec<String>,
     pub(crate) live: bool,
     pub(crate) pipe: bool,
     pub(crate) verbose: bool,
@@ -410,9 +411,11 @@ pub(crate) async fn scan_workspace_files(config: FileScanConfig) {
     }
 
     let mut accumulator = ScanAccumulator::default();
+    let false_positive_keywords = config.false_positive_keywords.clone();
     let file_stream = futures::stream::iter(candidates)
         .map(|path| {
             let stop_flag = config.stop_flag.clone();
+            let false_positive_keywords = false_positive_keywords.clone();
             let outcome_stats = config.outcome_stats.clone();
             let scanner = scanner.clone();
             let workspace = config.workspace.clone();
@@ -440,7 +443,7 @@ pub(crate) async fn scan_workspace_files(config: FileScanConfig) {
                 let source = format!("{}/{}", repository_name, relative_path);
                 let dispatch = binary_scanner::classify_binary(&data, &source, 8192, 10);
                 let is_binary = dispatch.is_binary();
-                let outcome = scanner.scan(&data, &source, is_binary);
+                let outcome = scanner.scan(&data, &source, is_binary, &false_positive_keywords);
                 let mut technologies = Vec::new();
                 if !is_binary {
                     crate::detect_tech_from_path(&relative_path, &mut technologies);
@@ -619,7 +622,12 @@ async fn scan_history_repositories<F, Fut>(
                 repo.full_name, entry.commit_sha, entry.path
             );
             let dispatch = binary_scanner::classify_binary(&data, &source, 8192, 10);
-            let mut outcome = scanner.scan(&data, &source, dispatch.is_binary());
+            let mut outcome = scanner.scan(
+                &data,
+                &source,
+                dispatch.is_binary(),
+                &config.false_positive_keywords,
+            );
             for finding in &mut outcome.findings {
                 finding.commit_sha1 = Some(entry.commit_sha.clone());
                 finding.is_deleted = is_deleted;
@@ -902,6 +910,7 @@ mod tests {
             scan_binaries: true,
             exhaustive: true,
             entropy_threshold: 4.5,
+            false_positive_keywords: Vec::new(),
             live: false,
             pipe: false,
             verbose: false,
@@ -1325,6 +1334,7 @@ mod tests {
                 scan_binaries: true,
                 exhaustive: true,
                 entropy_threshold: 4.5,
+                false_positive_keywords: Vec::new(),
                 live: false,
                 pipe: false,
                 verbose: false,
@@ -1395,6 +1405,7 @@ mod tests {
                 scan_binaries: true,
                 exhaustive: true,
                 entropy_threshold: 4.5,
+                false_positive_keywords: Vec::new(),
                 live: false,
                 pipe: false,
                 verbose: false,
@@ -1468,6 +1479,7 @@ mod tests {
                 scan_binaries: true,
                 exhaustive: true,
                 entropy_threshold: 4.5,
+                false_positive_keywords: Vec::new(),
                 live: false,
                 pipe: false,
                 verbose: false,
@@ -1532,6 +1544,7 @@ mod tests {
                 scan_binaries: true,
                 exhaustive: true,
                 entropy_threshold: 4.5,
+                false_positive_keywords: Vec::new(),
                 live: false,
                 pipe: false,
                 verbose: false,
@@ -1602,5 +1615,67 @@ mod tests {
                 bytes_scanned: 12,
             }
         );
+    }
+}
+
+#[cfg(test)]
+mod keyword_policy_tests {
+    use super::{scan_workspace_files, FileScanConfig};
+    use crate::streamer::ScanOutcomeStats;
+    use std::collections::HashSet;
+    use std::fs;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    #[tokio::test]
+    async fn forge_workspace_scan_forwards_custom_false_positive_keywords() {
+        let workspace = std::env::temp_dir().join(format!(
+            "gitrecon-forge-keyword-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&workspace);
+        fs::create_dir_all(&workspace).expect("test workspace should be creatable");
+        fs::write(
+            workspace.join("config.env"),
+            b"api_key = \"synthetic_value_123456\" # internal-fixture",
+        )
+        .expect("test fixture should be writable");
+
+        let all_findings = Arc::new(Mutex::new(Vec::new()));
+        scan_workspace_files(FileScanConfig {
+            workspace: workspace.clone(),
+            repository_name: "acme/example".to_string(),
+            scan_scope: crate::forge::ForgeScanScope::Snapshot,
+            max_history: 500,
+            max_blob_bytes: 1024,
+            workers: 1,
+            scan_binaries: true,
+            exhaustive: false,
+            entropy_threshold: 4.5,
+            false_positive_keywords: vec!["internal-fixture".to_string()],
+            live: false,
+            pipe: false,
+            verbose: false,
+            max_findings: 0,
+            stop_on_critical: false,
+            extra_patterns: Arc::new(Vec::new()),
+            stop_flag: Arc::new(AtomicBool::new(false)),
+            all_findings: all_findings.clone(),
+            tech_stack_set: Arc::new(Mutex::new(HashSet::new())),
+            blobs_scanned: Arc::new(AtomicUsize::new(0)),
+            blobs_failed: Arc::new(AtomicUsize::new(0)),
+            bytes_scanned: Arc::new(AtomicUsize::new(0)),
+            outcome_stats: Arc::new(Mutex::new(ScanOutcomeStats::default())),
+        })
+        .await;
+
+        let findings = all_findings.lock().await;
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].pattern_id, "api_key");
+        assert_eq!(findings[0].severity, "MEDIUM");
+        assert!(findings[0].confidence_adjustment.is_some());
+        drop(findings);
+        fs::remove_dir_all(workspace).expect("test workspace should be removable");
     }
 }
