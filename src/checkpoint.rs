@@ -385,6 +385,8 @@ pub struct StreamAccumulatorCheckpoint {
     #[serde(default)]
     pub archive_invalid: usize,
     #[serde(default)]
+    pub archive_invalid_reasons: BTreeMap<String, usize>,
+    #[serde(default)]
     pub failed_http_statuses: BTreeMap<u16, usize>,
     #[serde(default)]
     pub objects_pack: usize,
@@ -1723,6 +1725,7 @@ mod tests {
                 skipped_resource_budget: 5,
                 archive_truncated: 6,
                 archive_invalid: 2,
+                archive_invalid_reasons: BTreeMap::new(),
                 failed_http_statuses,
                 objects_pack: 2,
                 objects_cache: 3,

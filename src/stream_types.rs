@@ -89,6 +89,7 @@ pub struct ScanOutcomeStats {
     pub failed_files: usize,
     pub archive_truncated: usize,
     pub archive_invalid: usize,
+    pub archive_invalid_reasons: BTreeMap<String, usize>,
     pub resource_peak_bytes: usize,
     pub resource_denied_reservations: usize,
     pub scan_scope: Option<String>,

@@ -21,6 +21,7 @@ pub(crate) struct State {
     pub(crate) bytes_scanned: usize,
     pub(crate) archive_truncated: usize,
     pub(crate) archive_invalid: usize,
+    pub(crate) archive_invalid_reasons: BTreeMap<String, usize>,
     pub(crate) files_saved: usize,
     pub(crate) files_save_failed: usize,
     pub(crate) skipped_by_reason: HashMap<SkipReason, usize>,
@@ -71,6 +72,7 @@ impl State {
             bytes_scanned: self.bytes_scanned,
             archive_truncated: self.archive_truncated,
             archive_invalid: self.archive_invalid,
+            archive_invalid_reasons: self.archive_invalid_reasons.clone(),
             files_saved: self.files_saved,
             files_save_failed: self.files_save_failed,
             skipped_stop_requested: self
@@ -131,6 +133,7 @@ impl State {
         self.bytes_scanned = snapshot.bytes_scanned;
         self.archive_truncated = snapshot.archive_truncated;
         self.archive_invalid = snapshot.archive_invalid;
+        self.archive_invalid_reasons = snapshot.archive_invalid_reasons;
         self.files_saved = snapshot.files_saved;
         self.files_save_failed = snapshot.files_save_failed;
 
