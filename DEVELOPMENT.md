@@ -83,7 +83,7 @@ gitrecon --cache-stats --no-cache --pipe
 
 ## Scanner Benchmarking
 
-The repository includes a black-box local-directory benchmark at `tools/benchmark_local_scan.py` and a deterministic remote-acquisition benchmark at `tools/benchmark_remote_acquisition.py`. The remote benchmark creates a temporary Git repository, serves it over localhost, runs the optimized binary, validates that object acquisition occurred, and emits JSON source/outcome metrics. Its JSON includes fixture file/commit/byte metadata, build profile, non-sensitive host OS/architecture/Python/CPU metadata, per-run source/outcome samples, and median/mean/min/max elapsed time with population variance and relative spread. A one-sample run reports zero variance by definition. Run it with:
+The repository includes a black-box local-directory benchmark at `tools/benchmark_local_scan.py` and a deterministic remote-acquisition benchmark at `tools/benchmark_remote_acquisition.py`. The remote benchmark creates a temporary Git repository, serves it over localhost, runs the optimized binary, validates that object acquisition occurred, and emits JSON source/outcome metrics. Its JSON includes fixture file/commit/byte metadata, build profile, non-sensitive host OS/architecture/Python/CPU metadata, per-run source/outcome samples, per-sample and summary `peak_rss_bytes`, and median/mean/min/max elapsed time with population variance and relative spread. Peak RSS is sampled from the child process on Linux and is `null` when `/proc` is unavailable. A one-sample run reports zero variance by definition. Run it with:
 
 ```bash
 cargo build --release
