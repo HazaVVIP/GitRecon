@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import platform
 import statistics
 import subprocess
 import tempfile
@@ -28,7 +30,7 @@ class QuietHandler(SimpleHTTPRequestHandler):
         return
 
 
-def build_fixture(root: Path) -> Path:
+def build_fixture(root: Path) -> tuple[Path, dict[str, int]]:
     repository = root / "fixture-repository"
     repository.mkdir()
     subprocess.run(
@@ -64,7 +66,7 @@ def build_fixture(root: Path) -> Path:
         ],
         check=True,
     )
-    return repository
+    return repository, {"files": 1, "commits": 1, "bytes": len(content.encode("utf-8"))}
 
 
 def report_file(output: Path) -> Path:
@@ -128,6 +130,12 @@ def run_once(binary: Path, target: str) -> dict[str, Any]:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, default=Path("target/release/gitrecon"))
+    parser.add_argument(
+        "--build-profile",
+        choices=("release", "debug", "custom"),
+        default="release",
+        help="Profile used to build the benchmark binary (default: release)",
+    )
     parser.add_argument("--repetitions", type=int, default=3)
     args = parser.parse_args()
     if args.repetitions < 1:
@@ -137,7 +145,7 @@ def main() -> None:
 
     with tempfile.TemporaryDirectory(prefix="gitrecon-remote-bench-fixture-") as fixture_dir:
         root = Path(fixture_dir)
-        build_fixture(root)
+        _, fixture_metadata = build_fixture(root)
         handler = lambda *handler_args, **handler_kwargs: QuietHandler(
             *handler_args, directory=str(root), **handler_kwargs
         )
@@ -152,18 +160,35 @@ def main() -> None:
             thread.join(timeout=5)
             server.server_close()
 
+    elapsed_values = [sample["elapsed_s"] for sample in samples]
+    median_elapsed = statistics.median(elapsed_values)
     print(
         json.dumps(
             {
-                "fixture": "temporary single-commit Git repository over localhost HTTP",
+                "fixture": {
+                    "description": "temporary single-commit Git repository over localhost HTTP",
+                    **fixture_metadata,
+                },
+                "build_profile": args.build_profile,
+                "host": {
+                    "os": platform.system(),
+                    "architecture": platform.machine(),
+                    "python": platform.python_version(),
+                    "cpu_count": os.cpu_count(),
+                },
                 "repetitions": args.repetitions,
                 "samples": samples,
                 "summary": {
-                    "median_elapsed_s": statistics.median(
-                        sample["elapsed_s"] for sample in samples
+                    "median_elapsed_s": median_elapsed,
+                    "mean_elapsed_s": statistics.mean(elapsed_values),
+                    "min_elapsed_s": min(elapsed_values),
+                    "max_elapsed_s": max(elapsed_values),
+                    "elapsed_variance_s2": statistics.pvariance(elapsed_values),
+                    "relative_spread": (
+                        (max(elapsed_values) - min(elapsed_values)) / median_elapsed
+                        if median_elapsed
+                        else 0.0
                     ),
-                    "min_elapsed_s": min(sample["elapsed_s"] for sample in samples),
-                    "max_elapsed_s": max(sample["elapsed_s"] for sample in samples),
                 },
             },
             sort_keys=True,
