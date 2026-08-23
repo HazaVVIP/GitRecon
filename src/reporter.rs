@@ -871,6 +871,18 @@ impl Reporter {
                 "blobs_scanned":   s.blobs_scanned,
                 "bytes_scanned":   s.bytes_scanned,
                 "elapsed_s":       (s.elapsed_s * 100.0).round() / 100.0,
+                "files_saved":     s.files_saved,
+                "files_save_failed": s.files_save_failed,
+                "cache": {
+                    "hits": s.cache_hits,
+                    "misses": s.cache_misses,
+                    "stats": s.cache_stats,
+                },
+                "rate_limit": {
+                    "allowed": s.rate_limit_allowed,
+                    "dropped": s.rate_limit_dropped,
+                    "wait_ms": s.rate_limit_wait_ms,
+                },
                 "object_sources":  s.object_source_stats,
                 "outcomes":        s.outcome_stats,
                 "findings":        s.findings.iter().map(|f| f.to_dict()).collect::<Vec<_>>(),
@@ -914,6 +926,18 @@ impl Reporter {
                 "blobs_scanned":   stream_r.blobs_scanned,
                 "bytes_scanned":   stream_r.bytes_scanned,
                 "elapsed_s":       (stream_r.elapsed_s * 100.0).round() / 100.0,
+                "files_saved":     stream_r.files_saved,
+                "files_save_failed": stream_r.files_save_failed,
+                "cache": {
+                    "hits": stream_r.cache_hits,
+                    "misses": stream_r.cache_misses,
+                    "stats": stream_r.cache_stats,
+                },
+                "rate_limit": {
+                    "allowed": stream_r.rate_limit_allowed,
+                    "dropped": stream_r.rate_limit_dropped,
+                    "wait_ms": stream_r.rate_limit_wait_ms,
+                },
                 "object_sources":  stream_r.object_source_stats,
                 "outcomes":        stream_r.outcome_stats,
                 "findings":        stream_r.findings.iter().map(|f| f.to_dict()).collect::<Vec<_>>(),
@@ -1489,8 +1513,47 @@ mod tests {
         let value: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(value["result"]["object_sources"]["pack"], 0);
+        assert_eq!(value["result"]["files_saved"], 0);
+        assert_eq!(value["result"]["files_save_failed"], 0);
+        assert_eq!(value["result"]["cache"]["hits"], 0);
+        assert_eq!(value["result"]["cache"]["misses"], 0);
+        assert!(value["result"]["cache"]["stats"].is_null());
+        assert_eq!(value["result"]["rate_limit"]["allowed"], 0);
+        assert_eq!(value["result"]["rate_limit"]["dropped"], 0);
+        assert_eq!(value["result"]["rate_limit"]["wait_ms"], 0);
         assert!(value["result"]["outcomes"].is_object());
         assert!(value["result"]["outcomes"]["failed_http_statuses"].is_object());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn save_token_json_includes_operational_telemetry() {
+        let rep = Reporter::new(true, &ui::theme::Theme::default());
+        let mut stream = unicode_stream_result();
+        stream.files_saved = 2;
+        stream.files_save_failed = 1;
+        stream.cache_hits = 3;
+        stream.cache_misses = 1;
+        stream.rate_limit_allowed = 4;
+        stream.rate_limit_dropped = 1;
+        stream.rate_limit_wait_ms = 25;
+        let path = std::env::temp_dir().join(format!(
+            "gitrecon_token_metrics_report_{}.json",
+            std::process::id()
+        ));
+        let path_str = path.to_string_lossy().to_string();
+
+        rep.save_token_report(&path_str, "fixture-user", 1, &stream)
+            .expect("save token JSON report");
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(value["result"]["files_saved"], 2);
+        assert_eq!(value["result"]["files_save_failed"], 1);
+        assert_eq!(value["result"]["cache"]["hits"], 3);
+        assert_eq!(value["result"]["cache"]["misses"], 1);
+        assert_eq!(value["result"]["rate_limit"]["allowed"], 4);
+        assert_eq!(value["result"]["rate_limit"]["dropped"], 1);
+        assert_eq!(value["result"]["rate_limit"]["wait_ms"], 25);
         let _ = std::fs::remove_file(path);
     }
 
