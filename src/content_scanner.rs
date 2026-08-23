@@ -233,6 +233,7 @@ impl ScanAccumulator {
             rate_limit_allowed: 0,
             rate_limit_dropped: 0,
             rate_limit_wait_ms: 0,
+            retry_stats: None,
         }
     }
 }

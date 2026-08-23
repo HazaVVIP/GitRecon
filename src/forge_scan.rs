@@ -344,6 +344,7 @@ pub(crate) async fn build_stream_result(
         rate_limit_allowed: 0,
         rate_limit_dropped: 0,
         rate_limit_wait_ms: 0,
+        retry_stats: None,
     }
 }
 
