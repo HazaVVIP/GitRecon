@@ -780,6 +780,9 @@ pub struct ScanOutcomeStats {
     pub failed_files: usize,
     pub archive_truncated: usize,
     pub archive_invalid: usize,
+    pub scan_scope: Option<String>,
+    pub capabilities: Option<crate::forge::ForgeCapabilities>,
+    pub unsupported_capability: Option<String>,
     pub failed_http_statuses: BTreeMap<String, usize>,
 }
 
@@ -800,6 +803,9 @@ impl ScanOutcomeStats {
             failed_files: 0,
             archive_truncated: state.archive_truncated,
             archive_invalid: state.archive_invalid,
+            scan_scope: None,
+            capabilities: None,
+            unsupported_capability: None,
             failed_http_statuses,
         }
     }

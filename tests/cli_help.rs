@@ -15,6 +15,7 @@ fn help_documents_core_operator_controls() {
         "--checkpoint-interval",
         "--partial-exposure",
         "--parallel-targets",
+        "--scan-scope",
         "--pipe",
         "--format",
     ] {

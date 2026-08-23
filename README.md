@@ -73,8 +73,11 @@ gitrecon --dir ./project --exhaustive
 # Disable binary scanning explicitly
 gitrecon --dir ./project --no-scan-binaries
 
-# Verify an authenticated forge token and scan selected repositories
-gitrecon --token "$GITHUB_TOKEN" --quiet --format sarif --output ./results
+# Verify an authenticated forge token and scan the current snapshot
+gitrecon --token "$GITHUB_TOKEN" --scan-scope snapshot --quiet --format sarif --output ./results
+
+# Request forge history mode; unsupported providers return typed unsupported_capability
+gitrecon --token "$GITHUB_TOKEN" --scan-scope history --quiet --format json --output ./results
 
 # Scan targets concurrently while preserving deterministic aggregate ordering
 gitrecon --targets targets.ndjson --parallel-targets 8 --workers 50
@@ -151,6 +154,7 @@ Replace the example quantifier with a valid regular-expression bound appropriate
 | `--false-positive-keywords LIST` | built-in list | Extend context keywords used for false-positive scoring |
 | `--max-blob-size MB` | `4` | Maximum individual blob or local file size |
 | `--max-history COMMITS` | `500` | Commit traversal depth; `0` means unlimited |
+| `--scan-scope SCOPE` | `snapshot` | Forge scope: `snapshot` is supported by default; `history` is capability-checked |
 | `--entropy-threshold FLOAT` | `4.5` | High-entropy candidate threshold |
 | `--max-timeout SEC` | `60` | Maximum adaptive request timeout |
 | `--rate N` | — | Global request rate limit; `0` means unlimited and values must be finite |

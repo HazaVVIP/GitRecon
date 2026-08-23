@@ -18,6 +18,7 @@ pub(crate) enum TargetErrorCode {
     ScanFailed,
     PartialExposure,
     AuthenticationFailed,
+    UnsupportedCapability,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -29,7 +30,10 @@ pub(crate) struct ScanSummary {
 
 pub(crate) fn classify_error(error: &str) -> TargetErrorCode {
     let lower = error.to_ascii_lowercase();
-    if lower.contains("authentication")
+    if lower.contains("unsupported capability") || lower.contains("not available for this provider")
+    {
+        TargetErrorCode::UnsupportedCapability
+    } else if lower.contains("authentication")
         || lower.contains("invalid or expired")
         || lower.contains("access denied")
         || lower.contains("http 401")
@@ -54,6 +58,14 @@ mod tests {
         assert!(matches!(
             classify_error("Access denied (HTTP 403)"),
             TargetErrorCode::AuthenticationFailed
+        ));
+    }
+
+    #[test]
+    fn unsupported_forge_capability_has_dedicated_error_code() {
+        assert!(matches!(
+            classify_error("Unsupported capability: forge scan scope 'history' is not available for this provider"),
+            TargetErrorCode::UnsupportedCapability
         ));
     }
 

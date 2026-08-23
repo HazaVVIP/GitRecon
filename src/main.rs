@@ -60,7 +60,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use clap::Parser;
-use forge::Forge;
+use forge::{Forge, ForgeScanScope};
 use forge_factory::create_forge_client;
 use futures::StreamExt;
 use outcome::{classify_error, ScanSummary, TargetErrorCode, TargetOutcome, TargetStatus};
@@ -755,6 +755,10 @@ struct Cli {
     #[arg(long = "max-history", default_value = "500", value_name = "COMMITS")]
     max_history: usize,
 
+    /// Forge content scope: snapshot is the default-branch state; history is rejected unless supported.
+    #[arg(long = "scan-scope", value_enum, default_value = "snapshot")]
+    scan_scope: ForgeScanScope,
+
     /// Shannon-entropy threshold for high-entropy candidate detection (default: 4.5).
     #[arg(
         long = "entropy-threshold",
@@ -1089,6 +1093,7 @@ fn build_forge_file_scan_config(
         repository_name: String::new(),
         max_blob_bytes: args.max_blob_size * 1024 * 1024,
         workers: args.workers,
+        scan_scope: args.scan_scope,
         scan_binaries: !args.no_scan_binaries,
         exhaustive: args.exhaustive,
         entropy_threshold: args.entropy_threshold,
@@ -1255,6 +1260,16 @@ async fn collect_github_repositories(
     Ok(all_repos.iter().map(github_repo_to_repository).collect())
 }
 
+fn reject_unsupported_forge_scope(result: &streamer::StreamResult) -> anyhow::Result<()> {
+    if let Some(capability) = result.outcome_stats.unsupported_capability.as_deref() {
+        anyhow::bail!(
+            "Unsupported capability: forge scan scope '{}' is not available for this provider",
+            capability
+        );
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_lines)]
 async fn run_token_scan(
     args: &Cli,
@@ -1339,6 +1354,8 @@ async fn run_token_scan(
         temp_prefix: "gitrecon_token_scan",
     })
     .await;
+
+    reject_unsupported_forge_scope(&stream_r)?;
 
     // ── 6. Terminal summary ──────────────────────
     if verbose && !args.pipe {
@@ -1451,6 +1468,8 @@ async fn run_gitlab_token_scan(
         temp_prefix: "gitrecon_gitlab_scan",
     })
     .await;
+
+    reject_unsupported_forge_scope(&stream_r)?;
 
     // ── 6. Terminal summary ──────────────────────
     if verbose && !args.pipe {
@@ -1568,6 +1587,8 @@ async fn run_bitbucket_token_scan(
     })
     .await;
 
+    reject_unsupported_forge_scope(&stream_r)?;
+
     // ── 6. Terminal summary ──────────────────────
     if verbose && !args.pipe {
         rep.print_findings_summary(&stream_r.findings);
@@ -1683,6 +1704,8 @@ async fn run_gitea_token_scan(
         temp_prefix: "gitrecon_gitea_scan",
     })
     .await;
+
+    reject_unsupported_forge_scope(&stream_r)?;
 
     // ── 6. Terminal summary ──────────────────────
     if verbose && !args.pipe {
@@ -1804,6 +1827,8 @@ async fn run_azure_token_scan(
         temp_prefix: "gitrecon_azure_scan",
     })
     .await;
+
+    reject_unsupported_forge_scope(&stream_r)?;
 
     // ── 6. Terminal summary ──────────────────────
     if verbose && !args.pipe {
@@ -2330,6 +2355,17 @@ fn validate_runtime_numeric_options(args: &Cli) -> Result<(), String> {
                 MAX_RATE_RPS, rate
             ));
         }
+    }
+    let forge_token_selected = args.token.is_some()
+        || args.gitlab_token.is_some()
+        || args.bitbucket_token.is_some()
+        || args.gitea_token.is_some()
+        || args.azure_token.is_some();
+    if args.scan_scope == ForgeScanScope::History && !forge_token_selected {
+        return Err(
+            "--scan-scope history is only valid with a forge token target; URL and directory scans use snapshot scope"
+                .to_string(),
+        );
     }
     Ok(())
 }

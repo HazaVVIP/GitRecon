@@ -352,6 +352,7 @@ pub(crate) async fn build_stream_result(
 pub(crate) struct FileScanConfig {
     pub(crate) workspace: PathBuf,
     pub(crate) repository_name: String,
+    pub(crate) scan_scope: crate::forge::ForgeScanScope,
     pub(crate) max_blob_bytes: usize,
     pub(crate) workers: usize,
     pub(crate) scan_binaries: bool,
@@ -524,80 +525,95 @@ where
         + 'static,
     Fut: Future<Output = anyhow::Result<Vec<u8>>> + Send,
 {
-    for (repo_idx, repo) in selected_repos.iter().enumerate() {
-        if scan_config.stop_flag.load(Ordering::Relaxed) {
-            break;
-        }
-        let scan_request = RepositoryScanRequest::new(repo.clone(), repo_idx, selected_repos.len());
-        if scan_config.verbose {
-            println!("  ▶  {}", scan_request.progress_label());
-        }
-        let head_sha = match forge.get_head_sha(repo, &repo.default_branch).await {
-            Ok(head_sha) => head_sha,
-            Err(error) => {
-                if scan_config.verbose {
-                    eprintln!(
-                        "    ⚠   Cannot resolve HEAD for {}: {}",
-                        repo.full_name, error
-                    );
-                }
-                continue;
-            }
-        };
-        let tree = match forge.get_tree(repo, &repo.default_branch).await {
-            Ok(tree) => tree,
-            Err(error) => {
-                if scan_config.verbose {
-                    eprintln!("    ⚠   Cannot get tree for {}: {}", repo.full_name, error);
-                }
-                continue;
-            }
-        };
-        let Some(repo_workspace) =
-            workspace_lifecycle.repository_path(&scan_request.workspace_name())
-        else {
-            continue;
-        };
-        let _ = std::fs::create_dir_all(&repo_workspace);
-        let blob_count = tree
-            .iter()
-            .filter(|entry| entry.obj_type == "blob")
-            .filter(|entry| {
-                entry
-                    .size
-                    .is_none_or(|size| size <= scan_config.max_blob_bytes as u64)
-            })
-            .count();
-        if scan_config.verbose && blob_count > 0 {
-            println!("      Reconstructing {} files into workspace", blob_count);
-        }
-        let forge_ref = forge.clone();
-        let repo_for_blob = repo.clone();
-        let fetch_blob_for_repo = fetch_blob.clone();
-        let failed = reconstruct_blobs_with_stats(
-            tree,
-            repo_workspace.clone(),
-            scan_config.max_blob_bytes,
-            scan_config.workers,
-            move |entry| {
-                let forge = forge_ref.clone();
-                let repo = repo_for_blob.clone();
-                let fetch_blob = fetch_blob_for_repo.clone();
-                let head_sha = head_sha.clone();
-                async move { fetch_blob(forge, repo, entry, head_sha).await }
-            },
-            Some(scan_config.outcome_stats.clone()),
-        )
-        .await;
+    let capabilities = forge.capabilities();
+    {
+        let mut stats = scan_config.outcome_stats.lock().await;
+        stats.scan_scope = Some(scan_config.scan_scope.as_str().to_string());
+        stats.capabilities = Some(capabilities.clone());
+    }
+    if scan_config.scan_scope == crate::forge::ForgeScanScope::History && !capabilities.history {
         scan_config
-            .blobs_failed
-            .fetch_add(failed, Ordering::Relaxed);
-        scan_workspace_files(FileScanConfig {
-            workspace: repo_workspace,
-            repository_name: repo.full_name.clone(),
-            ..scan_config.clone()
-        })
-        .await;
+            .outcome_stats
+            .lock()
+            .await
+            .unsupported_capability = Some("history".to_string());
+    } else {
+        for (repo_idx, repo) in selected_repos.iter().enumerate() {
+            if scan_config.stop_flag.load(Ordering::Relaxed) {
+                break;
+            }
+            let scan_request =
+                RepositoryScanRequest::new(repo.clone(), repo_idx, selected_repos.len());
+            if scan_config.verbose {
+                println!("  ▶  {}", scan_request.progress_label());
+            }
+            let head_sha = match forge.get_head_sha(repo, &repo.default_branch).await {
+                Ok(head_sha) => head_sha,
+                Err(error) => {
+                    if scan_config.verbose {
+                        eprintln!(
+                            "    ⚠   Cannot resolve HEAD for {}: {}",
+                            repo.full_name, error
+                        );
+                    }
+                    continue;
+                }
+            };
+            let tree = match forge.get_tree(repo, &repo.default_branch).await {
+                Ok(tree) => tree,
+                Err(error) => {
+                    if scan_config.verbose {
+                        eprintln!("    ⚠   Cannot get tree for {}: {}", repo.full_name, error);
+                    }
+                    continue;
+                }
+            };
+            let Some(repo_workspace) =
+                workspace_lifecycle.repository_path(&scan_request.workspace_name())
+            else {
+                continue;
+            };
+            let _ = std::fs::create_dir_all(&repo_workspace);
+            let blob_count = tree
+                .iter()
+                .filter(|entry| entry.obj_type == "blob")
+                .filter(|entry| {
+                    entry
+                        .size
+                        .is_none_or(|size| size <= scan_config.max_blob_bytes as u64)
+                })
+                .count();
+            if scan_config.verbose && blob_count > 0 {
+                println!("      Reconstructing {} files into workspace", blob_count);
+            }
+            let forge_ref = forge.clone();
+            let repo_for_blob = repo.clone();
+            let fetch_blob_for_repo = fetch_blob.clone();
+            let failed = reconstruct_blobs_with_stats(
+                tree,
+                repo_workspace.clone(),
+                scan_config.max_blob_bytes,
+                scan_config.workers,
+                move |entry| {
+                    let forge = forge_ref.clone();
+                    let repo = repo_for_blob.clone();
+                    let fetch_blob = fetch_blob_for_repo.clone();
+                    let head_sha = head_sha.clone();
+                    async move { fetch_blob(forge, repo, entry, head_sha).await }
+                },
+                Some(scan_config.outcome_stats.clone()),
+            )
+            .await;
+            scan_config
+                .blobs_failed
+                .fetch_add(failed, Ordering::Relaxed);
+            scan_workspace_files(FileScanConfig {
+                workspace: repo_workspace,
+                repository_name: repo.full_name.clone(),
+                ..scan_config.clone()
+            })
+            .await;
+        }
     }
     let mut result = build_stream_result(
         started_at,
@@ -726,6 +742,7 @@ mod tests {
         scan_workspace_files(FileScanConfig {
             workspace: workspace.clone(),
             repository_name: "acme/example".to_string(),
+            scan_scope: crate::forge::ForgeScanScope::Snapshot,
             max_blob_bytes: 1024,
             workers: 2,
             scan_binaries: true,
@@ -959,6 +976,7 @@ mod tests {
             FileScanConfig {
                 workspace: PathBuf::new(),
                 repository_name: String::new(),
+                scan_scope: crate::forge::ForgeScanScope::Snapshot,
                 max_blob_bytes: 1024 * 1024,
                 workers: 2,
                 scan_binaries: true,
@@ -1002,10 +1020,15 @@ mod tests {
         assert_eq!(result.object_source_stats.forge, 2);
         assert_eq!(result.outcome_stats.failed_files, 0);
         assert_eq!(result.outcome_stats.skipped_files, 0);
+        assert_eq!(result.outcome_stats.scan_scope.as_deref(), Some("snapshot"));
+        let capabilities = result.outcome_stats.capabilities.as_ref().unwrap();
+        assert!(capabilities.snapshot);
+        assert!(!capabilities.history);
+        assert_eq!(result.outcome_stats.unsupported_capability, None);
     }
 
     #[tokio::test]
-    async fn run_repository_scan_loop_handles_empty_selection() {
+    async fn run_repository_scan_loop_reports_unsupported_history_scope() {
         let workspace = WorkspaceLifecycle::new(
             &std::env::temp_dir(),
             "gitrecon-empty-selection",
@@ -1019,6 +1042,7 @@ mod tests {
             FileScanConfig {
                 workspace: PathBuf::new(),
                 repository_name: String::new(),
+                scan_scope: crate::forge::ForgeScanScope::History,
                 max_blob_bytes: 1024,
                 workers: 1,
                 scan_binaries: true,
@@ -1046,6 +1070,12 @@ mod tests {
         assert_eq!(result.blobs_scanned, 0);
         assert_eq!(result.blobs_failed, 0);
         assert_eq!(result.bytes_scanned, 0);
+        assert_eq!(result.outcome_stats.scan_scope.as_deref(), Some("history"));
+        assert_eq!(
+            result.outcome_stats.unsupported_capability.as_deref(),
+            Some("history")
+        );
+        assert!(!result.outcome_stats.capabilities.as_ref().unwrap().history);
     }
 
     #[tokio::test]

@@ -232,13 +232,13 @@ Pertahankan bounded extraction, tetapi ubah silent truncation menjadi telemetry.
 
 ### Implementasi P1-05 (sub-bagian typed archive limits)
 
-ZIP/JAR extraction sekarang memiliki telemetry typed untuk batas jumlah entry, oversized per-file/total budget, dan nested archive depth. GZIP decompression membedakan payload malformed dari output yang melewati batas. `ContentScanner`, forge snapshot outcomes, terminal output, JSON reports, dan stream checkpoints mempertahankan `archive_truncated` secara additive. Regression tests menggunakan fixture kecil untuk entry-count, total/per-file size, malformed/oversized GZIP, nested-depth, checkpoint round-trip, dan provider/local scan paths. Pekerjaan yang tersisa adalah decompression-ratio guard eksplisit, klasifikasi invalid archive yang lebih rinci, dan meneruskan telemetry ke URL binary normalization agar semua pipeline memiliki outcome detail yang identik.
+ZIP/JAR extraction sekarang memiliki telemetry typed untuk batas jumlah entry, oversized per-file/total budget, dan nested archive depth. GZIP decompression membedakan payload malformed dari output yang melewati batas. `ContentScanner`, forge snapshot outcomes, terminal output, JSON reports, dan stream checkpoints mempertahankan `archive_truncated` secara additive. Regression tests menggunakan fixture kecil untuk entry-count, total/per-file size, malformed/oversized GZIP, expansion-ratio, nested-depth, checkpoint round-trip, dan provider/local scan paths. Pekerjaan yang tersisa adalah klasifikasi invalid archive yang lebih rinci dan meneruskan telemetry ke URL binary normalization agar semua pipeline memiliki outcome detail yang identik.
 
 ## P1-06 — Definisikan capability dan history mode untuk forge
 
-**Status:** `TODO`  
-**Dependensi:** P1-01, P1-04  
-**Area:** `src/forge.rs`, `src/forge_factory.rs`, `src/*_api.rs`, `src/forge_scan.rs`
+**Status:** `IN PROGRESS`
+**Dependensi:** P1-01, P1-04
+**Area:** `src/forge.rs`, `src/forge_factory.rs`, `src/*_api.rs`, `src/forge_scan.rs`, `src/main.rs`, `src/outcome.rs`
 
 Dokumentasikan dan modelkan perbedaan `snapshot` versus `history` scan. Tambahkan capability discovery untuk branches, tags, commits, deleted blobs, and provider-specific history support. Implementasikan history mode bertahap, dimulai dari GitHub dan GitLab, tanpa mengklaim parity sebelum coverage benar-benar tersedia.
 
@@ -249,6 +249,10 @@ Dokumentasikan dan modelkan perbedaan `snapshot` versus `history` scan. Tambahka
 - History mode memiliki bounded traversal, deduplication, deleted-path mapping, and coverage metrics.
 - Provider yang belum mendukung history mengembalikan typed `unsupported_capability`, bukan silent success.
 - README usage examples membedakan snapshot dan history.
+
+### Implementasi P1-06 (scope dan capability foundation)
+
+`ForgeScanScope` sekarang memodelkan `snapshot` dan `history`, dengan `--scan-scope snapshot` sebagai default yang backward-compatible. Trait `Forge` memiliki capability contract snapshot-only yang dapat dioverride provider setelah traversal history benar-benar tersedia. Forge reports menyimpan `scan_scope`, capability map, dan `unsupported_capability`; permintaan history pada provider snapshot-only tidak lagi menjadi silent success dan dipetakan ke `unsupported_capability`. Bounded history traversal, deleted-path mapping, deduplication, dan capability implementations per provider masih menjadi pekerjaan berikutnya.
 
 ## P1-07 — Bangun deterministic remote acquisition test harness
 

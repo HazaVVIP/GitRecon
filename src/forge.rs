@@ -6,6 +6,8 @@
 //! (GitHub, GitLab, Bitbucket, Gitea, Azure DevOps).
 
 use async_trait::async_trait;
+use clap::ValueEnum;
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 // ════════════════════════════════════════════════
@@ -166,6 +168,55 @@ pub struct RateLimitInfo {
     pub limit: u32,
 }
 
+/// Repository content scope requested from a forge integration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum ForgeScanScope {
+    /// Scan the provider's current default-branch snapshot.
+    Snapshot,
+    /// Traverse bounded repository history when the provider advertises support.
+    History,
+}
+
+impl ForgeScanScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Snapshot => "snapshot",
+            Self::History => "history",
+        }
+    }
+}
+
+/// Provider capabilities relevant to snapshot and history scans.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForgeCapabilities {
+    pub snapshot: bool,
+    pub history: bool,
+    pub branches: bool,
+    pub tags: bool,
+    pub commits: bool,
+    pub deleted_blobs: bool,
+}
+
+impl ForgeCapabilities {
+    pub fn snapshot_only() -> Self {
+        Self {
+            snapshot: true,
+            history: false,
+            branches: false,
+            tags: false,
+            commits: false,
+            deleted_blobs: false,
+        }
+    }
+}
+
+impl Default for ForgeCapabilities {
+    fn default() -> Self {
+        Self::snapshot_only()
+    }
+}
+
 // ════════════════════════════════════════════════
 // FORGE TRAIT
 // ════════════════════════════════════════════════
@@ -246,6 +297,15 @@ pub trait Forge: Send + Sync {
                 reset_in,
                 limit: 0, // Unknown total
             })
+    }
+
+    /// Advertise capabilities supported by this provider implementation.
+    ///
+    /// The default is deliberately snapshot-only. Providers must override this
+    /// method only when their history traversal and deleted-blob semantics are
+    /// implemented and covered by provider-mock tests.
+    fn capabilities(&self) -> ForgeCapabilities {
+        ForgeCapabilities::snapshot_only()
     }
 
     /// Get the platform identifier.
