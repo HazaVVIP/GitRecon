@@ -410,6 +410,45 @@ fn validate_dry_run_target(target: &Target) -> anyhow::Result<()> {
     }
 }
 
+async fn run_cache_clear(args: &Cli) -> anyhow::Result<()> {
+    if args.no_cache {
+        if args.pipe {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "type": "cache_clear",
+                    "enabled": false,
+                    "cleared": false,
+                    "reason": "disabled_by_flag"
+                })
+            );
+        } else {
+            println!("Cache: disabled (--no-cache); nothing cleared");
+        }
+        return Ok(());
+    }
+
+    let cache = cache::ObjectCache::new(args.cache_ttl as i64, false)
+        .map_err(|error| anyhow::anyhow!("Failed to initialize cache: {error}"))?;
+    cache
+        .clear()
+        .await
+        .map_err(|error| anyhow::anyhow!("Failed to clear cache: {error}"))?;
+    if args.pipe {
+        println!(
+            "{}",
+            serde_json::json!({
+                "type": "cache_clear",
+                "enabled": true,
+                "cleared": true
+            })
+        );
+    } else {
+        println!("Cache cleared");
+    }
+    Ok(())
+}
+
 async fn run_cache_stats(args: &Cli) -> anyhow::Result<()> {
     if args.no_cache {
         if args.pipe {
@@ -955,8 +994,12 @@ struct Cli {
 
     // PERF-005: SQLite cache layer
     /// Print cache statistics and exit without scanning a target.
-    #[arg(long = "cache-stats")]
+    #[arg(long = "cache-stats", conflicts_with = "cache_clear")]
     cache_stats: bool,
+
+    /// Clear all cache entries and exit without scanning a target.
+    #[arg(long = "cache-clear", conflicts_with = "cache_stats")]
+    cache_clear: bool,
 
     /// Disable cache (bypass all cache operations)
     #[arg(long = "no-cache")]
@@ -2577,9 +2620,14 @@ async fn main() {
         std::process::exit(0);
     }
 
-    if args.cache_stats {
-        if let Err(error) = run_cache_stats(&args).await {
-            eprintln!("  ✘  Cache stats failed: {}", error);
+    if args.cache_stats || args.cache_clear {
+        let result = if args.cache_clear {
+            run_cache_clear(&args).await
+        } else {
+            run_cache_stats(&args).await
+        };
+        if let Err(error) = result {
+            eprintln!("  ✘  Cache command failed: {}", error);
             std::process::exit(1);
         }
         return;

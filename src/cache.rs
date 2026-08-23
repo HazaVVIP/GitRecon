@@ -473,9 +473,12 @@ impl ObjectCache {
         }
     }
 
-    /// Clear all cache entries
-    #[allow(dead_code)]
+    /// Clear all cache entries.
     pub async fn clear(&self) -> Result<()> {
+        if self.no_cache {
+            return Ok(());
+        }
+
         let conn = match self.pool.get().ok() {
             Some(c) => c,
             None => return Ok(()), // Failed to get connection, assume cleared
