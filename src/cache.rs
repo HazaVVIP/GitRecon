@@ -302,7 +302,7 @@ impl ObjectCache {
             .get()
             .context("Failed to get connection for cache removal")?;
         let tx = conn
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .context("Failed to start cache removal transaction")?;
         let old_len: Option<i64> = tx
             .query_row(
@@ -585,6 +585,37 @@ mod tests {
         let stats = cache.stats().await;
         assert_eq!(stats.total_entries, 32);
         let expected_bytes: i64 = (0..32).map(|i| format!("payload-{i}").len() as i64).sum();
+        assert_eq!(stats.total_bytes, expected_bytes);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_remove_preserves_metadata() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache =
+            Arc::new(ObjectCache::new_at_path(temp.path().join("cache.db"), 0, false).unwrap());
+        cache.put("shared", b"shared-payload", None).await;
+        for index in 0..31 {
+            let key = format!("entry-{index}");
+            let payload = format!("payload-{index}");
+            cache.put(&key, payload.as_bytes(), None).await;
+        }
+
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let cache = Arc::clone(&cache);
+            tasks.push(tokio::spawn(async move { cache.remove("shared").await }));
+        }
+        let mut removed = 0;
+        for task in tasks {
+            if task.await.unwrap().unwrap() {
+                removed += 1;
+            }
+        }
+
+        assert_eq!(removed, 1);
+        let stats = cache.stats().await;
+        assert_eq!(stats.total_entries, 31);
+        let expected_bytes: i64 = (0..31).map(|i| format!("payload-{i}").len() as i64).sum();
         assert_eq!(stats.total_bytes, expected_bytes);
     }
 
