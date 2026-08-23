@@ -62,8 +62,19 @@ The following defaults are deliberate and should not be changed casually:
 | Stream workers | 50 | `--workers` |
 | Memory limit | 256 MB | `--mem-limit` |
 | Cache TTL | 7 days | `--cache-ttl`, `--no-cache` |
+| Cache inspection | `--cache-stats` without a target; `--pipe` emits JSON | — |
 | TLS verification | Enabled | `--insecure` only for controlled investigations |
 | Parallel target concurrency | Maximum 1000 | `--parallel-targets N` within the validated range |
+
+## Cache Inspection
+
+Use `--cache-stats` to inspect the persistent cache without providing a target or starting a scan. The command reports current entries, live size, pending expiration count, and cumulative eviction entries/bytes. Add `--pipe` for one machine-readable JSON object; add `--no-cache` to confirm that cache operations are disabled without opening the SQLite database.
+
+```bash
+gitrecon --cache-stats
+gitrecon --cache-stats --pipe
+gitrecon --cache-stats --no-cache --pipe
+```
 
 ## Scanner Benchmarking
 

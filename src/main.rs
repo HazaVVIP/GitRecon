@@ -410,6 +410,54 @@ fn validate_dry_run_target(target: &Target) -> anyhow::Result<()> {
     }
 }
 
+async fn run_cache_stats(args: &Cli) -> anyhow::Result<()> {
+    if args.no_cache {
+        if args.pipe {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "type": "cache_stats",
+                    "enabled": false,
+                    "reason": "disabled_by_flag"
+                })
+            );
+        } else {
+            println!("Cache: disabled (--no-cache)");
+        }
+        return Ok(());
+    }
+
+    let cache = cache::ObjectCache::new(args.cache_ttl as i64, false)
+        .map_err(|error| anyhow::anyhow!("Failed to initialize cache: {error}"))?;
+    let stats = cache.stats().await;
+    if args.pipe {
+        println!(
+            "{}",
+            serde_json::json!({
+                "type": "cache_stats",
+                "enabled": true,
+                "total_entries": stats.total_entries,
+                "total_bytes": stats.total_bytes,
+                "expired_entries": stats.expired_entries,
+                "evicted_entries": stats.evicted_entries,
+                "evicted_bytes": stats.evicted_bytes,
+                "size_human": stats.size_human()
+            })
+        );
+    } else {
+        println!("Cache: enabled");
+        println!("  Entries          : {}", stats.total_entries);
+        println!("  Size             : {}", stats.size_human());
+        println!("  Expired pending  : {}", stats.expired_entries);
+        println!("  Evicted entries  : {}", stats.evicted_entries);
+        println!(
+            "  Evicted bytes    : {}",
+            cache::CacheStats::format_bytes(stats.evicted_bytes)
+        );
+    }
+    Ok(())
+}
+
 fn validate_dry_run_inputs(
     args: &Cli,
     effective_url: Option<&str>,
@@ -906,6 +954,10 @@ struct Cli {
     retry_strategy: String,
 
     // PERF-005: SQLite cache layer
+    /// Print cache statistics and exit without scanning a target.
+    #[arg(long = "cache-stats")]
+    cache_stats: bool,
+
     /// Disable cache (bypass all cache operations)
     #[arg(long = "no-cache")]
     no_cache: bool,
@@ -2523,6 +2575,14 @@ async fn main() {
         println!("Example:");
         println!("  {{\"patterns\":[{{\"id\":\"internal_token\",\"severity\":\"HIGH\",\"description\":\"Internal API token\",\"regex\":\"int_tok_[A-Za-z0-9]{{32}}\"}}]}}");
         std::process::exit(0);
+    }
+
+    if args.cache_stats {
+        if let Err(error) = run_cache_stats(&args).await {
+            eprintln!("  ✘  Cache stats failed: {}", error);
+            std::process::exit(1);
+        }
+        return;
     }
 
     // A-6: --pipe mode
