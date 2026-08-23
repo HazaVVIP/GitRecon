@@ -519,11 +519,13 @@ Pertahankan local normal-versus-exhaustive benchmark, lalu tambah remote acquisi
 
 ## P3-06 — Dokumentasi capability matrix dan limitations
 
-**Status:** `TODO`  
-**Dependensi:** P1-04, P1-06, P1-05, P3-03  
+**Status:** `IN PROGRESS`
+**Dependensi:** P1-04, P1-06, P1-05, P3-03
 **Area:** `README.md`, `DEVELOPMENT.md`, `docs/limitations.md`
 
-Buat satu capability matrix yang membedakan URL exposure, local snapshot, forge snapshot, forge history, binary/archive, custom patterns, checkpoint, cache, dan platform support. Tambahkan `docs/limitations.md` untuk referensi pack reader dan batas coverage.
+### Implementasi P3-06 (sub-bagian capability matrix)
+
+`docs/limitations.md` sekarang memuat matrix yang memisahkan URL exposure, local snapshot, forge snapshot, forge history, binary/archive, custom patterns, checkpoint, cache, structured output, multi-target, dan platform installer. Dokumen tersebut juga menjelaskan batas deleted-content provider, resource limits, object/cache verification, platform asset versus source fallback, serta interpretasi clean result. README dan DEVELOPMENT menautkan dokumen ini. Status tetap `IN PROGRESS` karena capability matrix masih perlu disinkronkan dengan release multi-platform aktual setelah P3-03 selesai.
 
 ### Acceptance criteria
 
