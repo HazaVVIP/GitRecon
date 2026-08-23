@@ -489,9 +489,13 @@ Perluas release setelah cross-platform support diuji: Linux x86_64 tetap diperta
 
 ## P3-04 — Structured telemetry dan coverage report
 
-**Status:** `TODO`  
-**Dependensi:** P1-01, P1-05, P1-07, P1-08  
+**Status:** `IN PROGRESS`
+**Dependensi:** P1-01, P1-05, P1-07, P1-08
 **Area:** `src/reporter.rs`, `src/streamer.rs`, benchmark tools
+
+### Implementasi P3-04 (sub-bagian operational report telemetry)
+
+URL dan token JSON reports kini secara additive menyertakan `files_saved`, `files_save_failed`, object cache `hits`/`misses`/`stats`, serta rate-limit `allowed`/`dropped`/`wait_ms`, sementara object-source dan typed outcome metrics yang sudah ada tetap dipertahankan. Regression tests memverifikasi kedua report paths dan memastikan field zero-value tetap hadir tanpa mengubah findings. Remaining work: stage timing, request-attempt/retry counters, dan queue/concurrency metrics yang lebih granular.
 
 Tambahkan stage timing, request attempts, retry counts, acquisition source, skip/failure reason, truncation, memory-budget events, coverage limits, dan queue/concurrency metrics ke JSON report secara additive. Pastikan findings tetap menjadi fokus utama dan telemetry tidak membocorkan secret.
 
