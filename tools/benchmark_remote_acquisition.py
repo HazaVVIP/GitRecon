@@ -128,6 +128,10 @@ def run_once(binary: Path, target: str) -> dict[str, Any]:
         result = report.get("result", {})
         source_stats = result.get("object_sources", {})
         outcome_stats = result.get("outcomes", {})
+        cache_stats = result.get("cache")
+        retry_stats = result.get("retry")
+        blobs_scanned = result.get("blobs_scanned", 0)
+        bytes_scanned = result.get("bytes_scanned", 0)
         if not any(
             source_stats.get(key, 0) > 0 for key in ("pack", "cache", "loose_http")
         ):
@@ -138,6 +142,12 @@ def run_once(binary: Path, target: str) -> dict[str, Any]:
         return {
             "elapsed_s": elapsed,
             "peak_rss_bytes": peak_rss_bytes,
+            "throughput": {
+                "bytes_per_s": bytes_scanned / elapsed if elapsed else 0.0,
+                "blobs_per_s": blobs_scanned / elapsed if elapsed else 0.0,
+            },
+            "cache": cache_stats,
+            "retry": retry_stats,
             "findings": len(result.get("findings", [])),
             "objects": {
                 "pack": source_stats.get("pack", 0),
@@ -145,8 +155,8 @@ def run_once(binary: Path, target: str) -> dict[str, Any]:
                 "loose_http": source_stats.get("loose_http", 0),
             },
             "outcomes": {
-                "blobs_scanned": result.get("blobs_scanned", 0),
-                "bytes_scanned": result.get("bytes_scanned", 0),
+                "blobs_scanned": blobs_scanned,
+                "bytes_scanned": bytes_scanned,
                 "blobs_failed": outcome_stats.get("blobs_failed", 0),
                 "skipped_files": outcome_stats.get("skipped_files", 0),
             },
@@ -192,6 +202,8 @@ def main() -> None:
         for sample in samples
         if sample["peak_rss_bytes"] is not None
     ]
+    throughput_bytes_values = [sample["throughput"]["bytes_per_s"] for sample in samples]
+    throughput_blobs_values = [sample["throughput"]["blobs_per_s"] for sample in samples]
     median_elapsed = statistics.median(elapsed_values)
     print(
         json.dumps(
@@ -216,6 +228,10 @@ def main() -> None:
                     "max_elapsed_s": max(elapsed_values),
                     "elapsed_variance_s2": statistics.pvariance(elapsed_values),
                     "peak_rss_bytes": max(peak_rss_values) if peak_rss_values else None,
+                    "mean_throughput_bytes_per_s": statistics.mean(throughput_bytes_values),
+                    "median_throughput_bytes_per_s": statistics.median(throughput_bytes_values),
+                    "mean_throughput_blobs_per_s": statistics.mean(throughput_blobs_values),
+                    "median_throughput_blobs_per_s": statistics.median(throughput_blobs_values),
                     "relative_spread": (
                         (max(elapsed_values) - min(elapsed_values)) / median_elapsed
                         if median_elapsed
