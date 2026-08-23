@@ -67,11 +67,15 @@ Azure repository listing sekarang menggunakan project-scoped API base dan mengik
 
 ### Item baru P0-07 — GitLab namespace dan tree completeness
 
-**Status:** `TODO`
+**Status:** `IN PROGRESS` — nested namespace, per-directory pagination, and continuation fallback implemented locally
 **Dependensi:** P0-04, P1-06
 **Area:** `src/gitlab_api.rs`, provider mock tests
 
 Pertahankan full nested namespace GitLab saat membentuk project identity dan ikuti pagination pada setiap directory tree request. History path-based behavior dan keterbatasan deleted blob harus tetap dilaporkan secara eksplisit.
+
+### Implementasi P0-07 (sub-bagian namespace dan tree completeness)
+
+GitLab project parsing sekarang memisahkan namespace dari nama repository pada slash terakhir, sehingga `group/subgroup/repository` tetap dapat digunakan sebagai project path penuh. Directory tree requests meneruskan branch yang di-encode, meminta `per_page=100`, dan mengikuti `x-next-page`; Link header `rel="next"` menjadi fallback bila tersedia. Stale, malformed, atau non-advancing continuation tidak menyebabkan loop. Regression fixtures mencakup nested namespace, dua halaman tree, encoded project path, branch query, provider header, Link fallback, serta stale/malformed page values. History path-based retrieval dan batas deleted-content tetap tidak diubah. Final P0-07 masih membutuhkan full quality gates dan review protected PR.
 
 **Acceptance criteria:** `group/subgroup/repository` dapat di-address dengan benar; directory yang melampaui satu halaman seluruhnya dipindai; empty page dan malformed pagination header tidak menyebabkan loop; history deleted-path coverage tetap dibedakan dari deleted-content scanning.
 

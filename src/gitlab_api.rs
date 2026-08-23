@@ -178,51 +178,62 @@ impl Forge for GitLabForgeClient {
 
     async fn get_tree(&self, repo: &Repository, branch: &str) -> anyhow::Result<Vec<TreeEntry>> {
         let project_encoded = Self::encode_path(&format!("{}/{}", repo.owner, repo.name));
+        let branch_encoded = Self::encode_path(branch);
 
-        // GitLab API doesn't have recursive=true for tree endpoint
-        // We need to traverse manually
+        // GitLab API does not have recursive=true for tree endpoint. Traverse
+        // directories manually and follow the provider's per-directory pages.
         let mut all_entries = Vec::new();
         let mut stack = vec!["".to_string()];
 
         while let Some(current_path) = stack.pop() {
             let path_encoded = Self::encode_path(&current_path);
-            let url = if current_path.is_empty() {
-                format!(
-                    "{}/projects/{}/repository/tree?ref={}",
-                    self.api_base, project_encoded, branch
-                )
-            } else {
-                format!(
-                    "{}/projects/{}/repository/tree?ref={}&path={}",
-                    self.api_base, project_encoded, branch, path_encoded
-                )
-            };
+            let mut page = 1usize;
 
-            let resp = self.get_with_rate_limit(&url).await?;
+            loop {
+                let url = if current_path.is_empty() {
+                    format!(
+                        "{}/projects/{}/repository/tree?ref={}&per_page=100&page={}",
+                        self.api_base, project_encoded, branch_encoded, page
+                    )
+                } else {
+                    format!(
+                        "{}/projects/{}/repository/tree?ref={}&path={}&per_page=100&page={}",
+                        self.api_base, project_encoded, branch_encoded, path_encoded, page
+                    )
+                };
 
-            if !resp.ok() {
-                // If we get a 404, the path might not exist (empty directory or deleted)
-                continue;
-            }
+                let resp = self.get_with_rate_limit(&url).await?;
 
-            let json: serde_json::Value = serde_json::from_slice(&resp.body)?;
-            let arr = json
-                .as_array()
-                .ok_or_else(|| anyhow::anyhow!("Expected JSON array from tree endpoint"))?;
+                if !resp.ok() {
+                    // If we get a 404, the path might not exist (empty directory or deleted)
+                    break;
+                }
 
-            for entry in arr {
-                if let Some(gl_entry) = parse_tree_entry(entry, &current_path) {
-                    if gl_entry.obj_type == "tree" {
-                        stack.push(gl_entry.path.clone());
-                    } else {
-                        all_entries.push(TreeEntry {
-                            path: gl_entry.path,
-                            obj_type: gl_entry.obj_type,
-                            sha: gl_entry.sha,
-                            size: gl_entry.size,
-                            mode: None,
-                        });
+                let next_page = next_page_from_response(&resp.headers, page);
+                let json: serde_json::Value = serde_json::from_slice(&resp.body)?;
+                let arr = json
+                    .as_array()
+                    .ok_or_else(|| anyhow::anyhow!("Expected JSON array from tree endpoint"))?;
+
+                for entry in arr {
+                    if let Some(gl_entry) = parse_tree_entry(entry, &current_path) {
+                        if gl_entry.obj_type == "tree" {
+                            stack.push(gl_entry.path.clone());
+                        } else {
+                            all_entries.push(TreeEntry {
+                                path: gl_entry.path,
+                                obj_type: gl_entry.obj_type,
+                                sha: gl_entry.sha,
+                                size: gl_entry.size,
+                                mode: None,
+                            });
+                        }
                     }
+                }
+
+                match next_page {
+                    Some(next) => page = next,
+                    None => break,
                 }
             }
         }
@@ -424,19 +435,35 @@ fn parse_next_link(header: &str) -> Option<String> {
     crate::provider_transport::parse_next_link(header)
 }
 
+fn next_page_from_response(
+    headers: &std::collections::HashMap<String, String>,
+    current_page: usize,
+) -> Option<usize> {
+    let header_page = headers
+        .get("x-next-page")
+        .and_then(|value| value.trim().parse::<usize>().ok());
+    let link_page = headers.get("link").and_then(|header| {
+        let next = parse_next_link(header)?;
+        url::Url::parse(&next)
+            .ok()?
+            .query_pairs()
+            .find(|(key, _)| key == "page")
+            .and_then(|(_, value)| value.parse::<usize>().ok())
+    });
+    header_page
+        .filter(|page| *page > current_page)
+        .or_else(|| link_page.filter(|page| *page > current_page))
+}
+
 fn parse_retry_after(headers: &std::collections::HashMap<String, String>) -> Option<u64> {
     crate::provider_transport::parse_retry_after(headers)
 }
 
 fn parse_repo(v: &serde_json::Value) -> Option<GlProject> {
     let path_with_namespace = v["path_with_namespace"].as_str()?;
-    let parts: Vec<&str> = path_with_namespace.split('/').collect();
-    if parts.len() < 2 {
-        return None;
-    }
-
-    let owner = parts[0].to_string();
-    let name = parts[1].to_string();
+    let (owner, name) = path_with_namespace.rsplit_once('/')?;
+    let owner = owner.to_string();
+    let name = name.to_string();
     let full_name = path_with_namespace.to_string();
     let private =
         v["visibility"].as_str() == Some("private") || v["visibility"].as_str() == Some("internal");
@@ -793,6 +820,44 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_repo_preserves_nested_group_namespace() {
+        let v = serde_json::json!({
+            "path_with_namespace": "corp/platform/secret-repo",
+            "visibility": "private",
+            "default_branch": "main",
+            "http_url_to_repo": "https://gitlab.com/corp/platform/secret-repo.git"
+        });
+        let repo = parse_repo(&v).unwrap();
+        assert_eq!(repo.owner, "corp/platform");
+        assert_eq!(repo.name, "secret-repo");
+        assert_eq!(repo.full_name, "corp/platform/secret-repo");
+    }
+
+    #[test]
+    fn test_next_page_from_response_accepts_progressing_header_or_link() {
+        let mut headers = std::collections::HashMap::new();
+        headers.insert("x-next-page".to_string(), "3".to_string());
+        assert_eq!(next_page_from_response(&headers, 2), Some(3));
+
+        headers.clear();
+        headers.insert(
+            "link".to_string(),
+            r#"<https://gitlab.example/tree?page=4>; rel="next""#.to_string(),
+        );
+        assert_eq!(next_page_from_response(&headers, 3), Some(4));
+
+        headers.insert("x-next-page".to_string(), "2".to_string());
+        assert_eq!(next_page_from_response(&headers, 3), Some(4));
+
+        headers.insert("x-next-page".to_string(), "not-a-page".to_string());
+        headers.insert(
+            "link".to_string(),
+            r#"<https://gitlab.example/tree?page=2>; rel="next""#.to_string(),
+        );
+        assert_eq!(next_page_from_response(&headers, 3), None);
+    }
+
+    #[test]
     fn test_parse_tree_entry_blob() {
         let v = serde_json::json!({
             "name": "README.md",
@@ -836,6 +901,47 @@ mod tests {
         format!("http://{address}")
     }
 
+    async fn spawn_tree_pagination_server() -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let pages = [
+                (
+                    1,
+                    r#"[{"name":"first.txt","type":"blob","id":"blob-one","size":5}]"#,
+                    Some("2"),
+                ),
+                (
+                    2,
+                    r#"[{"name":"second.txt","type":"blob","id":"blob-two","size":6}]"#,
+                    None,
+                ),
+            ];
+            for (page, body, next_page) in pages {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0u8; 4096];
+                let read = socket.read(&mut request).await.unwrap();
+                let request = String::from_utf8_lossy(&request[..read]);
+                assert!(request.contains("projects/corp%2Fplatform%2Frepo/repository/tree"));
+                assert!(request.contains("ref=main"));
+                assert!(request.contains("per_page=100"));
+                assert!(request.contains(&format!("page={page}")));
+                let continuation = next_page
+                    .map(|value| format!("X-Next-Page: {value}\r\n"))
+                    .unwrap_or_default();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n{continuation}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        format!("http://{address}")
+    }
+
     #[tokio::test]
     async fn mock_server_contract_covers_gitlab_identity_success() {
         let base_url =
@@ -865,6 +971,34 @@ mod tests {
         let error = whoami(&client, &api_base).await.unwrap_err().to_string();
         assert!(error.contains("HTTP 403") || error.contains("Access denied"));
     }
+    #[tokio::test]
+    async fn mock_server_contract_follows_tree_pagination_for_nested_project() {
+        use crate::forge::Forge;
+
+        let base_url = spawn_tree_pagination_server().await;
+        let (client, api_base) =
+            build_gitlab_client(HttpConfig::default(), "synthetic-token", Some(&base_url)).unwrap();
+        let forge = GitLabForgeClient::new(client, api_base);
+        let repo = Repository {
+            full_name: "corp/platform/repo".to_string(),
+            owner: "corp/platform".to_string(),
+            name: "repo".to_string(),
+            private: true,
+            default_branch: "main".to_string(),
+            clone_url: "https://gitlab.example/corp/platform/repo.git".to_string(),
+            platform: Platform::GitLab,
+            stars: None,
+            forks: None,
+            description: None,
+            updated_at: None,
+        };
+
+        let tree = forge.get_tree(&repo, "main").await.unwrap();
+        assert_eq!(tree.len(), 2);
+        assert_eq!(tree[0].path, "first.txt");
+        assert_eq!(tree[1].path, "second.txt");
+    }
+
     #[tokio::test]
     async fn mock_server_contract_fetches_gitlab_blob_content() {
         let base_url = spawn_contract_server(200, "fixture-value").await;
