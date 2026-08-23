@@ -330,14 +330,4 @@ mod tests {
         assert_eq!(result.bytes_scanned, 13);
         assert_eq!(result.tech_stack, vec!["Rust"]);
     }
-
-    #[allow(dead_code)]
-    fn _compile_dyn_pattern_type() -> DynPattern {
-        DynPattern {
-            id: "fixture".to_string(),
-            sev: "LOW".to_string(),
-            desc: "fixture".to_string(),
-            regex: Regex::new("fixture").unwrap(),
-        }
-    }
 }
