@@ -173,6 +173,8 @@ pub enum ReportContext<'a> {
     Token {
         login: &'a str,
         repo_count: usize,
+        provider: Option<&'a str>,
+        selectors: Option<&'a [String]>,
     },
     Stream {
         target: &'a str,
@@ -202,9 +204,14 @@ impl Reporter {
                     detect,
                     map,
                 } => self.save_json(path, target, Some(detect), Some(map), Some(stream)),
-                ReportContext::Token { login, repo_count } => {
-                    self.save_token_report(path, login, repo_count, stream)
-                }
+                ReportContext::Token {
+                    login,
+                    repo_count,
+                    provider,
+                    selectors,
+                } => self.save_token_report_with_scope(
+                    path, login, repo_count, provider, selectors, stream,
+                ),
                 ReportContext::Stream { target } => {
                     self.save_json(path, target, None, None, Some(stream))
                 }
@@ -907,6 +914,18 @@ impl Reporter {
         repo_count: usize,
         stream_r: &StreamResult,
     ) -> std::io::Result<()> {
+        self.save_token_report_with_scope(path, login, repo_count, None, None, stream_r)
+    }
+
+    pub fn save_token_report_with_scope(
+        &self,
+        path: &str,
+        login: &str,
+        repo_count: usize,
+        provider: Option<&str>,
+        selectors: Option<&[String]>,
+        stream_r: &StreamResult,
+    ) -> std::io::Result<()> {
         let now = chrono::Utc::now().to_rfc3339();
         let counts = stream_r.severity_counts();
         let (ai_total, ai_categories) = Self::ai_summary(&stream_r.findings);
@@ -916,7 +935,11 @@ impl Reporter {
             "mode":       "token",
             "timestamp":  now,
             "token_user": login,
+            "provider": provider,
             "repo_count": repo_count,
+            "scope": {
+                "selectors": selectors,
+            },
             "result": {
                 "risk_score":      stream_r.risk_score(),
                 "secrets_total":   stream_r.findings.len(),
@@ -1614,6 +1637,39 @@ mod tests {
             .expect("save markdown");
         rep.save_html(&html_str, "target", Some(&stream))
             .expect("save html");
+    }
+
+    #[test]
+    fn save_token_json_includes_provider_and_selector_scope() {
+        let rep = Reporter::new(true, &ui::theme::Theme::default());
+        let stream = unicode_stream_result();
+        let path = std::env::temp_dir().join(format!(
+            "gitrecon_token_scope_report_{}.json",
+            std::process::id()
+        ));
+        let path_str = path.to_string_lossy().to_string();
+        let selectors = vec![
+            "corp/platform/*".to_string(),
+            "corp/legacy/repo".to_string(),
+        ];
+
+        rep.save_token_report_with_scope(
+            &path_str,
+            "fixture-user",
+            2,
+            Some("gitlab"),
+            Some(&selectors),
+            &stream,
+        )
+        .expect("save scoped token JSON report");
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(value["provider"], "gitlab");
+        assert_eq!(value["scope"]["selectors"][0], "corp/platform/*");
+        assert_eq!(value["scope"]["selectors"][1], "corp/legacy/repo");
+        assert!(value.to_string().contains("fixture-user"));
+        assert!(!value.to_string().contains("synthetic-token"));
+        let _ = std::fs::remove_file(path);
     }
 
     // ── Sprint 2 — output escaping ───────────────────────────────────────────

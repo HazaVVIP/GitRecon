@@ -94,13 +94,17 @@ Teruskan `--false-positive-keywords` melalui local directory dan forge workspace
 `--false-positive-keywords` sekarang diparsing melalui satu helper canonical dan diteruskan ke local directory serta forge snapshot/history melalui immutable scan configuration. URL, local, dan forge memakai fixture sintetis yang sama pada policy normal dan exhaustive; binary/archive paths tetap menerima scanner tanpa filtering keyword text. PR #35 (`0c3f04c1`) dan post-merge CI run `32669132214` selesai sukses dengan 613 unit test Rust lulus.
 ### Item baru P1-10 — Provider-aware token target schema dan selectors
 
-**Status:** `TODO`
+**Status:** `IN PROGRESS — schema, selectors, mixed-target dispatch, and JSON scope metadata implemented; provider fixture coverage and protected delivery pending`
 **Dependensi:** P0-05, P1-06
 **Area:** `src/targets.rs`, `src/main.rs`, provider adapters, report outcome
 
 Perluas target-file token entry dengan provider discriminator yang backward-compatible terhadap GitHub shorthand. Tambahkan selector repository/project/group yang dapat dipakai dalam mode non-interactive dan menghasilkan scope report yang deterministic serta redacted.
 
 **Acceptance criteria:** Target file dapat mengekspresikan GitHub, GitLab, Bitbucket, Gitea, dan Azure secara eksplisit; token tidak muncul pada target label/error; selector exact dan glob tervalidasi; unsupported provider/selector menghasilkan error typed; selected scope tersimpan di report.
+
+### Implementasi P1-10 (sub-bagian schema dan selector contract)
+
+`Target::Token` sekarang menerima `provider` eksplisit (`github`, `gitlab`, `bitbucket`, `gitea`, atau `azure`) serta `selectors` exact/glob; field legacy `repos` tetap diterima dan digabung secara deterministic. Mixed target dispatch meneruskan target ke adapter provider yang dipilih, filter repository tidak pernah menghasilkan sukses kosong, dan token JSON report menyimpan provider serta selector scope tanpa nilai token. Pekerjaan lanjutan mencakup provider-specific fixture dispatch dan parity scope untuk format report non-JSON.
 
 ### Item baru P1-11 — Bounded acquisition size
 
