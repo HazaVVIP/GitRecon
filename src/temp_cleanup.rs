@@ -112,8 +112,6 @@ pub fn sweep_orphan_temp_dirs(max_age: Duration) {
 #[derive(Debug, Clone)]
 pub struct TempDirGuard {
     path: Option<PathBuf>,
-    #[allow(dead_code)]
-    registered: bool,
 }
 
 impl TempDirGuard {
@@ -125,17 +123,7 @@ impl TempDirGuard {
         if let Ok(mut g) = CLEANUP_PATHS.lock() {
             g.push(path.clone());
         }
-        Self {
-            path: Some(path),
-            registered: true,
-        }
-    }
-
-    /// Register this guard with the global cleanup system.
-    /// Kept for API compatibility — construction already registers.
-    #[allow(dead_code)]
-    pub fn register(&mut self) {
-        self.registered = true;
+        Self { path: Some(path) }
     }
 
     /// Manually release the guard without cleanup.
