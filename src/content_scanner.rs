@@ -3,7 +3,7 @@
 //! URL streaming keeps its object-specific orchestration in `streamer.rs`, while
 //! this module owns the reusable content policy used by filesystem-backed paths.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -16,6 +16,7 @@ pub(crate) struct ContentScanOutcome {
     pub(crate) bytes: usize,
     pub(crate) archive_truncated: usize,
     pub(crate) archive_invalid: usize,
+    pub(crate) archive_issues: BTreeMap<String, usize>,
     pub(crate) failed: bool,
     pub(crate) stopped: bool,
 }
@@ -27,6 +28,7 @@ impl ContentScanOutcome {
             bytes: 0,
             archive_truncated: 0,
             archive_invalid: 0,
+            archive_issues: BTreeMap::new(),
             failed: true,
             stopped: false,
         }
@@ -38,6 +40,7 @@ impl ContentScanOutcome {
             bytes: 0,
             archive_truncated: 0,
             archive_invalid: 0,
+            archive_issues: BTreeMap::new(),
             failed: false,
             stopped: true,
         }
@@ -49,6 +52,7 @@ impl ContentScanOutcome {
             bytes: 0,
             archive_truncated: 0,
             archive_invalid: 0,
+            archive_issues: BTreeMap::new(),
             failed: false,
             stopped: false,
         }
@@ -122,6 +126,7 @@ impl ContentScanner {
                     bytes: data.len(),
                     archive_truncated: 0,
                     archive_invalid: 0,
+                    archive_issues: BTreeMap::new(),
                     failed: false,
                     stopped: false,
                 };
@@ -143,6 +148,7 @@ impl ContentScanner {
                 bytes: data.len(),
                 archive_truncated: telemetry.truncation_total(),
                 archive_invalid: telemetry.archive_invalid,
+                archive_issues: telemetry.archive_issues,
                 failed: false,
                 stopped: false,
             };
@@ -156,6 +162,7 @@ impl ContentScanner {
             bytes: data.len(),
             archive_truncated: 0,
             archive_invalid: 0,
+            archive_issues: BTreeMap::new(),
             failed: false,
             stopped: false,
         }
@@ -188,6 +195,7 @@ pub(crate) struct ScanAccumulator {
     pub(crate) bytes_scanned: usize,
     pub(crate) archive_truncated: usize,
     pub(crate) archive_invalid: usize,
+    pub(crate) archive_issues: BTreeMap<String, usize>,
 }
 
 impl ScanAccumulator {
@@ -201,6 +209,9 @@ impl ScanAccumulator {
         }
         self.archive_truncated += outcome.archive_truncated;
         self.archive_invalid += outcome.archive_invalid;
+        for (issue, count) in outcome.archive_issues {
+            *self.archive_issues.entry(issue).or_default() += count;
+        }
         if outcome.bytes > 0 {
             self.blobs_scanned += 1;
             self.bytes_scanned += outcome.bytes;
@@ -230,6 +241,7 @@ impl ScanAccumulator {
             outcome_stats: crate::streamer::ScanOutcomeStats {
                 archive_truncated: self.archive_truncated,
                 archive_invalid: self.archive_invalid,
+                archive_invalid_reasons: self.archive_issues,
                 ..Default::default()
             },
             rate_limit_allowed: 0,
@@ -315,6 +327,23 @@ mod tests {
         assert_eq!(outcome.findings[0].pattern_id, "custom_binary");
         assert_eq!(outcome.findings[0].severity, "CRITICAL");
         assert_eq!(outcome.findings[0].description, "Custom binary marker");
+    }
+
+    #[test]
+    fn archive_issue_reasons_survive_shared_scanner_adapter() {
+        use std::io::{Cursor, Write};
+        use zip::{write::SimpleFileOptions, ZipWriter};
+
+        let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+        writer
+            .start_file("../outside.txt", SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(b"fixture").unwrap();
+        let archive = writer.finish().unwrap().into_inner();
+
+        let scanner = ContentScanner::new(Arc::new(Vec::new()), false, 4.5, 1024, true);
+        let outcome = scanner.scan(&archive, "fixture.zip", true, &[]);
+        assert_eq!(outcome.archive_issues.get("traversal"), Some(&1));
     }
 
     #[test]

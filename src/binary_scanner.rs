@@ -8,7 +8,7 @@
 //! - Magic bytes detection for file type identification
 
 use once_cell::sync::Lazy;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::io::{Cursor, Read};
 
 use crate::streamer::DynPattern;
@@ -163,12 +163,23 @@ pub(crate) fn is_binary_extension(path: &str) -> bool {
     }
 }
 
+fn unsupported_archive_extension(path: &str) -> bool {
+    let ext = path.rsplit('.').next().unwrap_or("").to_lowercase();
+    matches!(
+        ext.as_str(),
+        "tar" | "tgz" | "tbz" | "tbz2" | "txz" | "bz2" | "xz" | "7z" | "rar"
+    )
+}
+
 fn binary_type_from_extension(path: &str) -> Option<BinaryType> {
     let ext = path.rsplit('.').next().unwrap_or("").to_lowercase();
     match ext.as_str() {
         "db" | "sqlite" | "sqlite3" => Some(BinaryType::SQLite),
         "zip" | "jar" | "war" | "ear" | "whl" => Some(BinaryType::ZipJar),
         "gz" => Some(BinaryType::Gzip),
+        "tar" | "tgz" | "tbz" | "tbz2" | "txz" | "bz2" | "xz" | "7z" | "rar" => {
+            Some(BinaryType::Unknown)
+        }
         _ => None,
     }
 }
@@ -222,8 +233,38 @@ const MAX_ZIP_FILES: usize = 500;
 /// Maximum nested archive depth accepted during recursive binary scanning.
 const MAX_NESTED_ARCHIVE_DEPTH: usize = 8;
 
+/// Typed archive limit or invalid-input reason emitted by binary scanning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ArchiveIssue {
+    Malformed,
+    Traversal,
+    Depth,
+    EntryCount,
+    EntrySize,
+    ExpansionSize,
+    GzipOutput,
+    GzipRatio,
+    UnsupportedFormat,
+}
+
+impl ArchiveIssue {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Malformed => "malformed",
+            Self::Traversal => "traversal",
+            Self::Depth => "depth",
+            Self::EntryCount => "entry_count",
+            Self::EntrySize => "entry_size",
+            Self::ExpansionSize => "expansion_size",
+            Self::GzipOutput => "gzip_output",
+            Self::GzipRatio => "gzip_ratio",
+            Self::UnsupportedFormat => "unsupported_format",
+        }
+    }
+}
+
 /// Typed limits telemetry emitted by binary/archive scanning.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct BinaryScanTelemetry {
     pub(crate) zip_entries_limited: usize,
     pub(crate) zip_files_oversized: usize,
@@ -231,15 +272,23 @@ pub(crate) struct BinaryScanTelemetry {
     pub(crate) gzip_output_limited: usize,
     pub(crate) gzip_ratio_limited: usize,
     pub(crate) archive_invalid: usize,
+    pub(crate) archive_issues: BTreeMap<String, usize>,
 }
 
 impl BinaryScanTelemetry {
-    pub(crate) fn truncation_total(self) -> usize {
+    pub(crate) fn truncation_total(&self) -> usize {
         self.zip_entries_limited
             + self.zip_files_oversized
             + self.zip_depth_limited
             + self.gzip_output_limited
             + self.gzip_ratio_limited
+    }
+
+    pub(crate) fn record_issue(&mut self, issue: ArchiveIssue) {
+        *self
+            .archive_issues
+            .entry(issue.as_str().to_string())
+            .or_default() += 1;
     }
 
     fn absorb(&mut self, other: Self) {
@@ -249,6 +298,9 @@ impl BinaryScanTelemetry {
         self.gzip_output_limited += other.gzip_output_limited;
         self.gzip_ratio_limited += other.gzip_ratio_limited;
         self.archive_invalid += other.archive_invalid;
+        for (issue, count) in other.archive_issues {
+            *self.archive_issues.entry(issue).or_default() += count;
+        }
     }
 }
 
@@ -286,39 +338,58 @@ fn extract_zip_files_with_limits(
 
     let Ok(mut archive) = ZipArchive::new(cursor) else {
         telemetry.archive_invalid = 1;
+        telemetry.record_issue(ArchiveIssue::Malformed);
         return (files, telemetry);
     };
     let archive_len = archive.len();
     let file_count = archive_len.min(max_file_count);
     telemetry.zip_entries_limited = archive_len.saturating_sub(file_count);
+    if telemetry.zip_entries_limited > 0 {
+        telemetry.record_issue(ArchiveIssue::EntryCount);
+    }
 
     for i in 0..file_count {
         if total_size >= max_total_size {
             telemetry.zip_entries_limited += file_count.saturating_sub(i);
+            if file_count > i {
+                telemetry.record_issue(ArchiveIssue::ExpansionSize);
+            }
             break;
         }
 
         let Ok(mut file) = archive.by_index(i) else {
+            telemetry.archive_invalid += 1;
+            telemetry.record_issue(ArchiveIssue::Malformed);
             continue;
         };
         if file.is_dir() {
+            continue;
+        }
+        let file_name = file.name().to_string();
+        if file_name.starts_with('/') || file_name.split('/').any(|part| part == "..") {
+            telemetry.record_issue(ArchiveIssue::Traversal);
             continue;
         }
 
         let file_size = file.size() as usize;
         if file_size > max_file_size {
             telemetry.zip_files_oversized += 1;
+            telemetry.record_issue(ArchiveIssue::EntrySize);
             continue;
         }
         if total_size.saturating_add(file_size) > max_total_size {
             telemetry.zip_files_oversized += 1;
+            telemetry.record_issue(ArchiveIssue::ExpansionSize);
             continue;
         }
 
         let mut buffer = Vec::with_capacity(file_size);
         if file.read_to_end(&mut buffer).is_ok() {
             total_size += buffer.len();
-            files.push((file.name().to_string(), buffer));
+            files.push((file_name, buffer));
+        } else {
+            telemetry.archive_invalid += 1;
+            telemetry.record_issue(ArchiveIssue::Malformed);
         }
     }
 
@@ -392,6 +463,7 @@ pub fn scan_binary_blob(
 /// The built-in matcher remains unchanged and custom patterns are evaluated on
 /// every printable-string view, including recursively extracted archive and
 /// decompressed GZIP content.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn scan_binary_blob_with_patterns(
     data: &[u8],
     filename: &str,
@@ -456,6 +528,7 @@ fn scan_binary_blob_with_patterns_at_depth(
         BinaryType::ZipJar => {
             if depth >= MAX_NESTED_ARCHIVE_DEPTH {
                 telemetry.zip_depth_limited += 1;
+                telemetry.record_issue(ArchiveIssue::Depth);
                 return findings;
             }
             // Extract and scan inner files recursively
@@ -542,6 +615,9 @@ fn scan_binary_blob_with_patterns_at_depth(
             }
         }
         BinaryType::Unknown => {
+            if unsupported_archive_extension(filename) {
+                telemetry.record_issue(ArchiveIssue::UnsupportedFormat);
+            }
             // Try to extract printable strings anyway
             let strings = extract_printable_strings(data, 4);
             for s in strings {
@@ -571,12 +647,15 @@ fn scan_binary_blob_with_patterns_at_depth(
                 )),
                 Err(GzipDecompressionFailure::OutputLimited) => {
                     telemetry.gzip_output_limited += 1;
+                    telemetry.record_issue(ArchiveIssue::GzipOutput);
                 }
                 Err(GzipDecompressionFailure::RatioLimited) => {
                     telemetry.gzip_ratio_limited += 1;
+                    telemetry.record_issue(ArchiveIssue::GzipRatio);
                 }
                 Err(GzipDecompressionFailure::Malformed) => {
                     telemetry.archive_invalid += 1;
+                    telemetry.record_issue(ArchiveIssue::Malformed);
                 }
             }
             let strings = extract_printable_strings(data, 4);
@@ -928,6 +1007,17 @@ mod tests {
     }
 
     #[test]
+    fn classify_unsupported_archive_extension_as_binary() {
+        let dispatch = classify_binary(b"plain tar payload", "fixture.tar", 8192, 10);
+        assert_eq!(dispatch.binary_type, BinaryType::Unknown);
+        assert_eq!(
+            dispatch.confidence,
+            BinaryDetectionConfidence::ExtensionFallback
+        );
+        assert!(dispatch.is_binary());
+    }
+
+    #[test]
     fn classify_exact_null_threshold_as_text() {
         let mut data = vec![0u8; 10];
         data.extend_from_slice(b"ordinary text");
@@ -1208,10 +1298,12 @@ mod tests {
         let (_, count_limited) = extract_zip_files_with_limits(&archive, 100, 2, 100);
         assert_eq!(count_limited.zip_entries_limited, 1);
         assert_eq!(count_limited.zip_files_oversized, 0);
+        assert_eq!(count_limited.archive_issues.get("entry_count"), Some(&1));
 
         let (_, size_limited) = extract_zip_files_with_limits(&archive, 5, 10, 100);
         assert_eq!(size_limited.zip_entries_limited, 0);
         assert_eq!(size_limited.zip_files_oversized, 2);
+        assert_eq!(size_limited.archive_issues.get("expansion_size"), Some(&2));
     }
 
     #[test]
@@ -1230,6 +1322,7 @@ mod tests {
         assert_eq!(zip_telemetry.zip_files_oversized, 1);
         let (_, invalid_zip) = extract_zip_files_with_limits(b"not a zip", 100, 10, 100);
         assert_eq!(invalid_zip.archive_invalid, 1);
+        assert_eq!(invalid_zip.archive_issues.get("malformed"), Some(&1));
 
         let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
         encoder.write_all(b"0123456789").unwrap();
@@ -1252,6 +1345,35 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_archive_format_keeps_printable_fallback() {
+        let (findings, telemetry) = scan_binary_blob_with_patterns_and_telemetry(
+            b"tar fixture CUSTOM_ARCHIVE_MARKER",
+            "fixture.tar",
+            1024,
+            &[],
+        );
+        assert!(findings.is_empty());
+        assert_eq!(telemetry.archive_issues.get("unsupported_format"), Some(&1));
+    }
+
+    #[test]
+    fn zip_traversal_entry_is_rejected_with_typed_reason() {
+        use std::io::Write;
+        use zip::{write::SimpleFileOptions, ZipWriter};
+
+        let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+        writer
+            .start_file("../outside.txt", SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(b"should not be extracted").unwrap();
+        let archive = writer.finish().unwrap().into_inner();
+
+        let (files, telemetry) = extract_zip_files_with_limits(&archive, 100, 10, 100);
+        assert!(files.is_empty());
+        assert_eq!(telemetry.archive_issues.get("traversal"), Some(&1));
+    }
+
+    #[test]
     fn nested_archive_depth_limit_is_reported() {
         use std::io::Write;
         use zip::{write::SimpleFileOptions, ZipWriter};
@@ -1269,6 +1391,14 @@ mod tests {
             scan_binary_blob_with_patterns_and_telemetry(&nested, "nested.zip", 1024 * 1024, &[]);
         assert!(telemetry.zip_depth_limited > 0);
         assert!(telemetry.truncation_total() >= telemetry.zip_depth_limited);
+        assert!(
+            telemetry
+                .archive_issues
+                .get("depth")
+                .copied()
+                .unwrap_or_default()
+                > 0
+        );
     }
 
     #[test]

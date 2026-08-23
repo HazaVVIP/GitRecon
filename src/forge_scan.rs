@@ -465,10 +465,19 @@ pub(crate) async fn scan_workspace_files(config: FileScanConfig) {
                 );
             }
         }
-        if outcome.archive_truncated > 0 || outcome.archive_invalid > 0 {
+        if outcome.archive_truncated > 0
+            || outcome.archive_invalid > 0
+            || !outcome.archive_issues.is_empty()
+        {
             let mut stats = config.outcome_stats.lock().await;
             stats.archive_truncated += outcome.archive_truncated;
             stats.archive_invalid += outcome.archive_invalid;
+            for (issue, count) in &outcome.archive_issues {
+                *stats
+                    .archive_invalid_reasons
+                    .entry(issue.clone())
+                    .or_default() += count;
+            }
         }
         accumulator.absorb(outcome, technologies);
         let existing_findings = config.all_findings.lock().await.len();
@@ -637,6 +646,12 @@ async fn scan_history_repositories<F, Fut>(
                 stats.history_entries_scanned += 1;
                 stats.archive_truncated += outcome.archive_truncated;
                 stats.archive_invalid += outcome.archive_invalid;
+                for (issue, count) in &outcome.archive_issues {
+                    *stats
+                        .archive_invalid_reasons
+                        .entry(issue.clone())
+                        .or_default() += count;
+                }
             }
             if outcome.bytes > 0 {
                 config.blobs_scanned.fetch_add(1, Ordering::Relaxed);
