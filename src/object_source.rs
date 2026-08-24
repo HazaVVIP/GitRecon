@@ -5,10 +5,12 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use crate::cache::ObjectCache;
 use crate::git_parser::{obj_path, ObjectParser};
 use crate::http_client::HttpClient;
+use crate::resource_budget::{ResourceBudget, ResourceStage};
 
 const CACHE_NAMESPACE: &str = "raw-object-v1";
 
@@ -30,6 +32,7 @@ pub(crate) enum AcquisitionOutcome {
     NotFound,
     Oversized,
     HttpStatus(u16),
+    ResourceBudget,
 }
 
 pub(crate) struct ObjectSourceConfig<'a> {
@@ -41,6 +44,7 @@ pub(crate) struct ObjectSourceConfig<'a> {
     pub(crate) save_enabled: bool,
     pub(crate) cache_hits: &'a AtomicUsize,
     pub(crate) cache_misses: &'a AtomicUsize,
+    pub(crate) resource_budget: Arc<ResourceBudget>,
 }
 
 pub(crate) struct ObjectSource<'a> {
@@ -54,6 +58,11 @@ impl<'a> ObjectSource<'a> {
 
     pub(crate) async fn acquire(&self, sha1: &str) -> Result<ObjectEnvelope, AcquisitionOutcome> {
         if let Some(bytes) = self.config.pack_objects.get(sha1) {
+            let _reservation = self
+                .config
+                .resource_budget
+                .try_reserve(ResourceStage::Acquisition, bytes.len())
+                .ok_or(AcquisitionOutcome::ResourceBudget)?;
             return Ok(ObjectEnvelope {
                 bytes: bytes.clone(),
                 source: ObjectSourceKind::Pack,
@@ -64,6 +73,11 @@ impl<'a> ObjectSource<'a> {
         if let Some(cache) = self.config.cache {
             if let Some(bytes) = cache.get(&cache_key).await {
                 if ObjectParser.parse(&bytes, sha1).is_some() {
+                    let _reservation = self
+                        .config
+                        .resource_budget
+                        .try_reserve(ResourceStage::Acquisition, bytes.len())
+                        .ok_or(AcquisitionOutcome::ResourceBudget)?;
                     self.config.cache_hits.fetch_add(1, Ordering::Relaxed);
                     return Ok(ObjectEnvelope {
                         bytes,
@@ -78,7 +92,11 @@ impl<'a> ObjectSource<'a> {
         }
 
         let url = format!("{}/{}", self.config.git_url, obj_path(sha1));
-        let response = self.config.client.get(&url).await;
+        let response = self
+            .config
+            .client
+            .get_with_resource_budget(&url, Arc::clone(&self.config.resource_budget))
+            .await;
         if !response.ok() {
             if response.status == 0
                 && response
@@ -87,6 +105,9 @@ impl<'a> ObjectSource<'a> {
                     .is_some_and(|error| error.contains("max_size"))
             {
                 return Err(AcquisitionOutcome::Oversized);
+            }
+            if response.status == 0 && response.error.as_deref() == Some("resource_budget") {
+                return Err(AcquisitionOutcome::ResourceBudget);
             }
             return if response.status == 404 {
                 Err(AcquisitionOutcome::NotFound)
@@ -141,6 +162,7 @@ mod tests {
     use crate::cache::ObjectCache;
     use crate::git_parser::ObjectParser;
     use crate::http_client::{HttpClient, HttpConfig, RetryStrategy};
+    use crate::resource_budget::ResourceBudget;
 
     type HttpFixture = (u16, Vec<(String, String)>, Vec<u8>);
 
@@ -221,6 +243,7 @@ mod tests {
             save_enabled: false,
             cache_hits,
             cache_misses,
+            resource_budget: std::sync::Arc::new(ResourceBudget::new(0)),
         })
     }
 
@@ -240,6 +263,7 @@ mod tests {
             save_enabled: false,
             cache_hits: &cache_hits,
             cache_misses: &cache_misses,
+            resource_budget: std::sync::Arc::new(ResourceBudget::new(0)),
         });
 
         let envelope = source.acquire("abc123").await.unwrap();
@@ -247,6 +271,66 @@ mod tests {
         assert_eq!(envelope.source, ObjectSourceKind::Pack);
         assert_eq!(cache_hits.load(Ordering::Relaxed), 0);
         assert_eq!(cache_misses.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn acquisition_budget_denial_is_typed_for_pack_source() {
+        let mut pack_objects = HashMap::new();
+        pack_objects.insert("abc123".to_string(), vec![1, 2, 3]);
+        let client = HttpClient::new(HttpConfig::default()).unwrap();
+        let cache_hits = AtomicUsize::new(0);
+        let cache_misses = AtomicUsize::new(0);
+        let resource_budget = std::sync::Arc::new(ResourceBudget::new(2));
+        let source = ObjectSource::new(ObjectSourceConfig {
+            client: &client,
+            git_url: "http://127.0.0.1:1/.git/objects",
+            pack_objects: &pack_objects,
+            cache: None,
+            max_blob_size: 1024,
+            save_enabled: false,
+            cache_hits: &cache_hits,
+            cache_misses: &cache_misses,
+            resource_budget: resource_budget.clone(),
+        });
+
+        assert!(matches!(
+            source.acquire("abc123").await,
+            Err(AcquisitionOutcome::ResourceBudget)
+        ));
+        assert_eq!(
+            resource_budget.stats().by_stage["acquisition"].denied_reservations,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn acquisition_budget_denial_is_typed_for_streamed_http_source() {
+        let base_url = spawn_http_without_content_length(vec![b'x'; 8]).await;
+        let client = HttpClient::new(HttpConfig::default()).unwrap();
+        let pack_objects = HashMap::new();
+        let cache_hits = AtomicUsize::new(0);
+        let cache_misses = AtomicUsize::new(0);
+        let resource_budget = std::sync::Arc::new(ResourceBudget::new(4));
+        let source = ObjectSource::new(ObjectSourceConfig {
+            client: &client,
+            git_url: &base_url,
+            pack_objects: &pack_objects,
+            cache: None,
+            max_blob_size: 1024,
+            save_enabled: false,
+            cache_hits: &cache_hits,
+            cache_misses: &cache_misses,
+            resource_budget: resource_budget.clone(),
+        });
+
+        assert!(matches!(
+            source.acquire("streamed-sha").await,
+            Err(AcquisitionOutcome::ResourceBudget)
+        ));
+        assert_eq!(
+            resource_budget.stats().by_stage["acquisition"].denied_reservations,
+            1
+        );
     }
 
     #[tokio::test]
@@ -484,6 +568,7 @@ mod tests {
             save_enabled: true,
             cache_hits: &cache_hits,
             cache_misses: &cache_misses,
+            resource_budget: std::sync::Arc::new(ResourceBudget::new(0)),
         });
         let saved = saved_source.acquire(&saved_sha).await.unwrap();
         assert_eq!(saved.source, ObjectSourceKind::LooseHttp);

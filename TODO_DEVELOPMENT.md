@@ -154,7 +154,7 @@ SARIF menyimpan telemetry pada `runs[0].properties.gitrecon`; NDJSON menambahkan
 **Dependensi:** P1-08, P3-04, P3-05
 **Area:** `src/resource_budget.rs`, `src/scan_scheduler.rs`, `src/stream_types.rs`, benchmark tools
 
-Resource budget sekarang memiliki vocabulary stabil untuk acquisition, object scan, archive, workspace reconstruction, file scan, dan target fan-out; setiap stage melaporkan current/peak/denied secara additive, sementara reservation aktual pada slice ini tetap ObjectScan agar tidak mengklaim penggunaan palsu. URL scheduler sekarang mengekspos request/grant, queue count/wait, active peak, configured current limit, limit adjustments, serta adjustment/throttle/headroom events.
+Resource budget sekarang memiliki vocabulary stabil untuk acquisition, object scan, archive, workspace reconstruction, file scan, dan target fan-out; setiap stage melaporkan current/peak/denied secara additive. URL acquisition kini benar-benar me-reserve lifecycle buffer HTTP/pack/cache dan memetakan denial menjadi typed resource skip; archive, workspace reconstruction, file scan, dan target fan-out tetap akan diinstrumentasi incremental agar tidak mengklaim penggunaan palsu. URL scheduler mengekspos request/grant, queue count/wait, active peak, configured current limit, limit adjustments, serta adjustment/throttle/headroom events.
 
 **Acceptance criteria:** Cancellation me-release reservation pada setiap stage; exhaustive tetap bounded; report membedakan resource denial dari clean result; benchmark dapat membandingkan throughput, peak RSS, queue wait, dan cache/retry behavior tanpa wall-clock threshold naif.
 

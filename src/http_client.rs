@@ -16,6 +16,7 @@ use tokio::time::sleep;
 
 // PERF-004: Use the dedicated rate limiter module
 use crate::rate_limiter::TokenBucket;
+use crate::resource_budget::{ResourceBudget, ResourceStage};
 use crate::stream_types::RetryReportStats;
 
 // E-4: Expanded USER_AGENTS to 25+ entries
@@ -438,6 +439,24 @@ impl HttpClient {
 
     /// Perform a GET request with smart status-code-aware retry.
     pub async fn get(&self, url: &str) -> Response {
+        self.get_with_budget(url, None).await
+    }
+
+    /// Perform a GET while accounting for the response body in the shared
+    /// acquisition budget. The normal GET path remains allocation-compatible.
+    pub(crate) async fn get_with_resource_budget(
+        &self,
+        url: &str,
+        resource_budget: Arc<ResourceBudget>,
+    ) -> Response {
+        self.get_with_budget(url, Some(resource_budget)).await
+    }
+
+    async fn get_with_budget(
+        &self,
+        url: &str,
+        resource_budget: Option<Arc<ResourceBudget>>,
+    ) -> Response {
         // PERF-004: Token bucket rate limiting (atomic, thread-safe)
         if let Some(ref tb) = self.token_bucket {
             tb.acquire().await;
@@ -453,7 +472,7 @@ impl HttpClient {
 
         loop {
             self.retry_metrics.attempts.fetch_add(1, Ordering::Relaxed);
-            match self.do_get(url).await {
+            match self.do_get(url, resource_budget.clone()).await {
                 Ok(r) => {
                     // PERF-002: Status-code-aware retry logic
                     match r.status {
@@ -667,7 +686,11 @@ impl HttpClient {
         }
     }
 
-    async fn do_get(&self, url: &str) -> Result<Response, reqwest::Error> {
+    async fn do_get(
+        &self,
+        url: &str,
+        resource_budget: Option<Arc<ResourceBudget>>,
+    ) -> Result<Response, reqwest::Error> {
         // E-4: UA pool selection
         let ua = if !self.cfg.ua_pool.is_empty() {
             let mut rng = rand::rng();
@@ -794,9 +817,29 @@ impl HttpClient {
             }
         }
 
+        let content_length = resp.content_length().map(|length| length as usize);
+        let mut acquisition_reservations = Vec::new();
+        if let (Some(budget), Some(length)) = (resource_budget.as_ref(), content_length) {
+            let reservation_size = length.min(max_size);
+            if let Some(reservation) =
+                budget.try_reserve(ResourceStage::Acquisition, reservation_size)
+            {
+                acquisition_reservations.push(reservation);
+            } else {
+                return Ok(Response {
+                    url: url.to_string(),
+                    status: 0,
+                    body: bytes::Bytes::new(),
+                    headers,
+                    elapsed_ms,
+                    error: Some("resource_budget".to_string()),
+                });
+            }
+        }
+
         let mut body_bytes: Vec<u8> = Vec::with_capacity(
-            resp.content_length()
-                .map(|c| (c as usize).min(max_size))
+            content_length
+                .map(|length| length.min(max_size))
                 .unwrap_or(8192),
         );
         let mut stream = resp.bytes_stream();
@@ -806,6 +849,25 @@ impl HttpClient {
             if would_be > max_size {
                 // Same-shape error return as the Content-Length preflight above.
                 let remaining = max_size.saturating_sub(body_bytes.len());
+                if content_length.is_none() && remaining > 0 {
+                    if let Some(budget) = resource_budget.as_ref() {
+                        if let Some(reservation) =
+                            budget.try_reserve(ResourceStage::Acquisition, remaining)
+                        {
+                            acquisition_reservations.push(reservation);
+                        } else {
+                            return Ok(Response {
+                                url: url.to_string(),
+                                status: 0,
+                                body: bytes::Bytes::from(body_bytes),
+                                headers,
+                                elapsed_ms,
+                                error: Some("resource_budget".to_string()),
+                            });
+                        }
+                    }
+                }
+                body_bytes.reserve_exact(remaining);
                 body_bytes.extend_from_slice(&chunk[..remaining]);
                 return Ok(Response {
                     url: url.to_string(),
@@ -819,6 +881,25 @@ impl HttpClient {
                     )),
                 });
             }
+            if content_length.is_none() {
+                if let Some(budget) = resource_budget.as_ref() {
+                    if let Some(reservation) =
+                        budget.try_reserve(ResourceStage::Acquisition, chunk.len())
+                    {
+                        acquisition_reservations.push(reservation);
+                    } else {
+                        return Ok(Response {
+                            url: url.to_string(),
+                            status: 0,
+                            body: bytes::Bytes::from(body_bytes),
+                            headers,
+                            elapsed_ms,
+                            error: Some("resource_budget".to_string()),
+                        });
+                    }
+                }
+            }
+            body_bytes.reserve_exact(chunk.len());
             body_bytes.extend_from_slice(&chunk);
         }
 
