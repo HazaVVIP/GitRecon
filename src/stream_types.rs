@@ -92,6 +92,8 @@ pub struct ScanOutcomeStats {
     pub archive_invalid_reasons: BTreeMap<String, usize>,
     pub resource_peak_bytes: usize,
     pub resource_denied_reservations: usize,
+    pub resource_by_stage: BTreeMap<String, crate::resource_budget::ResourceStageStats>,
+    pub scheduler: crate::scan_scheduler::SchedulerTelemetry,
     pub scan_scope: Option<String>,
     pub capabilities: Option<ForgeCapabilities>,
     pub unsupported_capability: Option<String>,

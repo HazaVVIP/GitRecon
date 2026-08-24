@@ -136,7 +136,7 @@ Binary scanner sekarang menghasilkan `archive_invalid_reasons` additive untuk ma
 
 ### Item baru P2-08 — Report-format telemetry parity
 
-**Status:** `IN PROGRESS — additive envelopes implemented for SARIF, NDJSON, CSV, Markdown, and HTML; protected delivery pending`
+**Status:** `DONE — merged via PR #40 (`8d24fc99`); post-merge CI `32674137153` succeeded`
 **Dependensi:** P3-04, P1-05
 **Area:** `src/reporter.rs`, schema tests, documentation
 
@@ -146,15 +146,15 @@ Tambahkan additive scan-level metadata ke SARIF run properties dan format lain m
 
 ### Implementasi P2-08 (sub-bagian additive report envelopes)
 
-SARIF menyimpan telemetry pada `runs[0].properties.gitrecon`; NDJSON menambahkan reserved metadata record pertama; CSV mempertahankan header/row lama dan menulis `<report>.meta.json`; Markdown dan HTML menampilkan section metadata yang escaped. Envelope menggunakan schema version dan hanya memuat operational scope/counter, bukan token atau finding match. Regression lintas lima format telah ditambahkan; PR dan post-merge CI masih menunggu delivery increment ini.
+SARIF menyimpan telemetry pada `runs[0].properties.gitrecon`; NDJSON menambahkan reserved metadata record pertama; CSV mempertahankan header/row lama dan menulis `<report>.meta.json`; Markdown dan HTML menampilkan section metadata yang escaped. Envelope menggunakan schema version dan hanya memuat operational scope/counter, bukan token atau finding match. Regression lintas lima format telah ditambahkan; PR #40 (`8d24fc99`) dan post-merge CI `32674137153` selesai sukses.
 
 ### Item baru P2-09 — Stage-aware resource and scheduler telemetry
 
-**Status:** `TODO`
+**Status:** `IN PROGRESS — slice pertama: stage-aware budget dan URL scheduler telemetry; reservation boundary stage lain tetap dikerjakan incremental**
 **Dependensi:** P1-08, P3-04, P3-05
 **Area:** `src/resource_budget.rs`, `src/scan_scheduler.rs`, `src/stream_types.rs`, benchmark tools
 
-Perluas resource stages dari ObjectScan ke acquisition, decompression/archive, file scan, workspace reconstruction, dan target fan-out. Expose configured/current/peak concurrency, queue wait, active permits, adjustment/throttle events, dan denied reservations.
+Resource budget sekarang memiliki vocabulary stabil untuk acquisition, object scan, archive, workspace reconstruction, file scan, dan target fan-out; setiap stage melaporkan current/peak/denied secara additive, sementara reservation aktual pada slice ini tetap ObjectScan agar tidak mengklaim penggunaan palsu. URL scheduler sekarang mengekspos request/grant, queue count/wait, active peak, configured current limit, limit adjustments, serta adjustment/throttle/headroom events.
 
 **Acceptance criteria:** Cancellation me-release reservation pada setiap stage; exhaustive tetap bounded; report membedakan resource denial dari clean result; benchmark dapat membandingkan throughput, peak RSS, queue wait, dan cache/retry behavior tanpa wall-clock threshold naif.
 
