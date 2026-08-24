@@ -381,34 +381,16 @@ impl HttpClient {
     }
 
     /// PERF-002: Parse Retry-After header for 429 responses.
-    /// Supports both delay-seconds and HTTP-date formats.
+    /// Supports delay-seconds and all HTTP-date forms through the shared
+    /// provider transport parser, then applies the client strategy ceiling.
     fn parse_retry_after(
         headers: &std::collections::HashMap<String, String>,
         strategy: RetryStrategy,
     ) -> Duration {
-        headers
-            .get("retry-after")
-            .and_then(|v| {
-                // Try parsing as seconds first
-                if let Ok(secs) = v.parse::<u64>() {
-                    return Some(Duration::from_secs(
-                        secs.min(strategy.max_backoff().as_secs()),
-                    ));
-                }
-                // Try parsing as HTTP-date (e.g., "Wed, 21 Oct 2015 07:28:00 GMT")
-                if let Ok(dt) = chrono::DateTime::parse_from_rfc2822(v) {
-                    let delay = (dt.timestamp() as u64)
-                        .saturating_sub(chrono::Utc::now().timestamp() as u64);
-                    return Some(Duration::from_secs(
-                        delay.min(strategy.max_backoff().as_secs()),
-                    ));
-                }
-                None
-            })
-            .unwrap_or_else(|| {
-                // Default backoff for 429 when no Retry-After header
-                Duration::from_secs(5)
-            })
+        let fallback = Duration::from_secs(5).min(strategy.max_backoff());
+        crate::provider_transport::parse_retry_after_duration(headers, chrono::Utc::now())
+            .unwrap_or(fallback)
+            .min(strategy.max_backoff())
     }
 
     /// PERF-002: Calculate exponential backoff delay based on attempt number.
@@ -1250,5 +1232,31 @@ mod tests {
         assert_eq!(RetryStrategy::Aggressive.max_retries(), 10);
         assert_eq!(RetryStrategy::Standard.max_retries(), 3);
         assert_eq!(RetryStrategy::Conservative.max_retries(), 1);
+    }
+
+    #[test]
+    fn retry_after_uses_bounded_fallback_and_strategy_cap() {
+        let empty = std::collections::HashMap::new();
+        assert_eq!(
+            HttpClient::parse_retry_after(&empty, RetryStrategy::Standard),
+            Duration::from_secs(5)
+        );
+
+        let mut headers = std::collections::HashMap::new();
+        headers.insert("retry-after".to_string(), "999".to_string());
+        assert_eq!(
+            HttpClient::parse_retry_after(&headers, RetryStrategy::Aggressive),
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            HttpClient::parse_retry_after(&headers, RetryStrategy::Conservative),
+            Duration::from_secs(10)
+        );
+
+        headers.insert("retry-after".to_string(), "malformed".to_string());
+        assert_eq!(
+            HttpClient::parse_retry_after(&headers, RetryStrategy::Standard),
+            Duration::from_secs(5)
+        );
     }
 }

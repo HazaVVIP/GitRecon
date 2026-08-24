@@ -80,14 +80,14 @@ impl GitHubForgeClient {
                         .unwrap_or(false));
 
             if is_rate_limited {
-                let wait_s = parse_retry_after(&resp.headers).unwrap_or(60).min(300);
+                let wait = parse_retry_after(&resp.headers);
                 log::warn!(
                     "GitHub rate-limited (HTTP {}); sleeping {}s before retry {}/3",
                     resp.status,
-                    wait_s,
+                    wait.as_secs(),
                     attempt + 1,
                 );
-                tokio::time::sleep(std::time::Duration::from_secs(wait_s)).await;
+                tokio::time::sleep(wait).await;
                 continue;
             }
 
@@ -107,13 +107,12 @@ impl GitHubForgeClient {
     }
 }
 
-/// Sprint 5 (S5.5) helper: parse `Retry-After` header from a HashMap<String, String>.
-/// Accepts either an integer number of seconds or an HTTP-date; if the value is a
-/// date we return None (callers substitute a sensible default). We do NOT try to
-/// interpret X-RateLimit-Reset as an epoch here — that's forge-specific formatting
-/// and each impl handles it in `update_rate_limit`.
-fn parse_retry_after(headers: &std::collections::HashMap<String, String>) -> Option<u64> {
-    crate::provider_transport::parse_retry_after(headers)
+/// Sprint 5 (S5.5) helper: parse `Retry-After` using the shared wire parser.
+/// `X-RateLimit-Reset` remains forge-specific and is handled separately.
+fn parse_retry_after(headers: &std::collections::HashMap<String, String>) -> Duration {
+    crate::provider_transport::parse_retry_after_duration(headers, chrono::Utc::now())
+        .unwrap_or(Duration::from_secs(60))
+        .min(Duration::from_secs(300))
 }
 
 #[async_trait]
