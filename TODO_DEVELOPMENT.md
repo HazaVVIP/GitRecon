@@ -160,11 +160,11 @@ Resource budget sekarang memiliki vocabulary stabil untuk acquisition, object sc
 
 ### Item baru P2-10 — Shared date-aware transport parsing
 
-**Status:** `TODO`
+**Status:** `IN PROGRESS — shared parser dan adopsi HTTP/GitHub/GitLab selesai pada slice pertama; provider lain tetap ditinjau incremental**
 **Dependensi:** P0-04, P2-04
 **Area:** `src/provider_transport.rs`, `src/http_client.rs`, provider adapters
 
-Satukan parsing numeric dan HTTP-date `Retry-After` dengan clock-safe tests, sementara reset semantics tetap provider-specific. Retry telemetry harus membedakan status retryable, terminal failure, network error, dan exhausted retry.
+Parser bersama sekarang menerima numeric delay-seconds dan tiga bentuk HTTP-date dengan fixed-clock tests; HTTP client, GitHub, dan GitLab mempertahankan fallback/cap provider masing-masing. Reset semantics tetap provider-specific dan tidak ada perubahan pada retry ceiling atau status policy.
 
 **Acceptance criteria:** Numeric/date header menghasilkan delay yang bounded dan deterministic; malformed date memakai fallback documented; semua built-in provider memakai helper yang sama kecuali override yang beralasan; existing retry policy tidak berubah tanpa test evidence.
 
