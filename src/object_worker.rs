@@ -54,6 +54,7 @@ pub(crate) async fn fetch_and_process(
         save_enabled: save_dir.is_some(),
         cache_hits: &cache_hits,
         cache_misses: &cache_misses,
+        resource_budget: Arc::clone(&resource_budget),
     });
     let envelope = match source.acquire(sha1).await {
         Ok(envelope) => envelope,
@@ -76,6 +77,11 @@ pub(crate) async fn fetch_and_process(
         Err(AcquisitionOutcome::HttpStatus(status)) => {
             return WorkerResult::BlobFailed {
                 kind: FailureKind::HttpStatus(status),
+            };
+        }
+        Err(AcquisitionOutcome::ResourceBudget) => {
+            return WorkerResult::Skipped {
+                reason: SkipReason::ResourceBudget,
             };
         }
     };
