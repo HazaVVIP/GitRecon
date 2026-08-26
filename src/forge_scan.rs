@@ -440,12 +440,12 @@ pub(crate) async fn scan_workspace_files(config: FileScanConfig) {
     if oversized_files > 0 {
         config.outcome_stats.lock().await.skipped_oversized += oversized_files;
     }
-    let mut candidates: Vec<PathBuf> = all_files
+    let mut candidates: Vec<(PathBuf, usize)> = all_files
         .into_iter()
         .filter(|(_, size)| *size <= config.max_blob_bytes as u64)
-        .map(|(path, _)| path)
+        .map(|(path, size)| (path, size.min(config.max_blob_bytes as u64) as usize))
         .collect();
-    candidates.sort_by_key(|path| {
+    candidates.sort_by_key(|(path, _)| {
         if crate::streamer::is_ai_sensitive_path(&path.to_string_lossy()) {
             0
         } else {
@@ -460,28 +460,35 @@ pub(crate) async fn scan_workspace_files(config: FileScanConfig) {
     let mut accumulator = ScanAccumulator::default();
     let false_positive_keywords = config.false_positive_keywords.clone();
     let file_stream = futures::stream::iter(candidates)
-        .map(|path| {
+        .map(|(path, declared_size)| {
             let stop_flag = config.stop_flag.clone();
             let false_positive_keywords = false_positive_keywords.clone();
             let outcome_stats = config.outcome_stats.clone();
             let scanner = scanner.clone();
             let workspace = config.workspace.clone();
             let repository_name = config.repository_name.clone();
+            let resource_budget = config.resource_budget.clone();
             async move {
                 if stop_flag.load(Ordering::Relaxed) {
                     outcome_stats.lock().await.skipped_stop_requested += 1;
-                    return (ContentScanOutcome::stopped(), Vec::new());
+                    return (ContentScanOutcome::stopped(), Vec::new(), false);
                 }
+                let Some(_file_reservation) =
+                    resource_budget.try_reserve(ResourceStage::FileScan, declared_size)
+                else {
+                    outcome_stats.lock().await.skipped_resource_budget += 1;
+                    return (ContentScanOutcome::empty(), Vec::new(), true);
+                };
                 let data = match tokio::fs::read(&path).await {
                     Ok(data) => data,
                     Err(_) => {
                         outcome_stats.lock().await.failed_files += 1;
-                        return (ContentScanOutcome::failed(), Vec::new());
+                        return (ContentScanOutcome::failed(), Vec::new(), false);
                     }
                 };
                 if data.is_empty() {
                     outcome_stats.lock().await.skipped_files += 1;
-                    return (ContentScanOutcome::empty(), Vec::new());
+                    return (ContentScanOutcome::empty(), Vec::new(), false);
                 }
                 let relative_path = path
                     .strip_prefix(&workspace)
@@ -495,12 +502,15 @@ pub(crate) async fn scan_workspace_files(config: FileScanConfig) {
                 if !is_binary {
                     crate::detect_tech_from_path(&relative_path, &mut technologies);
                 }
-                (outcome, technologies)
+                (outcome, technologies, false)
             }
         })
         .buffer_unordered(config.workers.max(1));
     futures::pin_mut!(file_stream);
-    while let Some((outcome, technologies)) = file_stream.next().await {
+    while let Some((outcome, technologies, resource_denied)) = file_stream.next().await {
+        if resource_denied {
+            continue;
+        }
         if outcome.stopped {
             continue;
         }
@@ -1067,6 +1077,54 @@ mod tests {
         assert_eq!(outcome_stats.failed_files, 0);
         drop(outcome_stats);
         drop(findings);
+        fs::remove_dir_all(workspace).expect("test workspace should be removable");
+    }
+
+    #[tokio::test]
+    async fn scan_workspace_files_reports_file_budget_denial_before_read() {
+        let workspace =
+            std::env::temp_dir().join(format!("gitrecon-file-budget-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&workspace);
+        fs::create_dir_all(&workspace).expect("test workspace should be creatable");
+        fs::write(workspace.join("config.txt"), b"CUSTOM_ABCD1234").unwrap();
+
+        let all_findings = Arc::new(Mutex::new(Vec::new()));
+        let outcome_stats = Arc::new(Mutex::new(ScanOutcomeStats::default()));
+        let budget = Arc::new(crate::resource_budget::ResourceBudget::new(4));
+        scan_workspace_files(FileScanConfig {
+            workspace: workspace.clone(),
+            repository_name: "acme/example".to_string(),
+            scan_scope: crate::forge::ForgeScanScope::Snapshot,
+            max_history: 500,
+            max_blob_bytes: 1024,
+            workers: 1,
+            scan_binaries: true,
+            exhaustive: false,
+            entropy_threshold: 4.5,
+            false_positive_keywords: Vec::new(),
+            live: false,
+            pipe: false,
+            verbose: false,
+            max_findings: 0,
+            stop_on_critical: false,
+            extra_patterns: Arc::new(Vec::new()),
+            stop_flag: Arc::new(AtomicBool::new(false)),
+            all_findings: all_findings.clone(),
+            tech_stack_set: Arc::new(Mutex::new(HashSet::new())),
+            blobs_scanned: Arc::new(AtomicUsize::new(0)),
+            blobs_failed: Arc::new(AtomicUsize::new(0)),
+            bytes_scanned: Arc::new(AtomicUsize::new(0)),
+            outcome_stats: outcome_stats.clone(),
+            resource_budget: budget.clone(),
+        })
+        .await;
+
+        assert!(all_findings.lock().await.is_empty());
+        assert_eq!(outcome_stats.lock().await.skipped_resource_budget, 1);
+        let resource_stats = budget.stats();
+        assert_eq!(resource_stats.current_bytes, 0);
+        assert_eq!(resource_stats.by_stage["file_scan"].peak_bytes, 0);
+        assert_eq!(resource_stats.by_stage["file_scan"].denied_reservations, 1);
         fs::remove_dir_all(workspace).expect("test workspace should be removable");
     }
 
