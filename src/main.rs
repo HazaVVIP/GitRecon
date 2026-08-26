@@ -52,6 +52,7 @@ mod scanner_policy;
 mod stream_types;
 mod streamer;
 mod streamer_config;
+mod target_fanout;
 mod target_utils;
 mod targets;
 mod temp_cleanup; // SEC-004: Temp file cleanup
@@ -3245,6 +3246,7 @@ async fn main() {
     };
 
     let mut all_results: Vec<TargetOutcome> = Vec::new();
+    let fanout_gate = target_fanout::TargetFanoutGate::new(args.parallel_targets);
     if args.parallel_targets > 1 {
         let args_ref = &args;
         let rep_ref = &rep;
@@ -3255,7 +3257,9 @@ async fn main() {
         let mut parallel_results = futures::stream::iter(targets.iter().cloned().enumerate())
             .map(|(index, target)| {
                 let patterns = extra_patterns.clone();
+                let fanout_gate = fanout_gate.clone();
                 async move {
+                    let _fanout_permit = fanout_gate.acquire().await;
                     let outcome = match target {
                         Target::Url { url, fuzz } => {
                             run_url_target(
@@ -3358,9 +3362,13 @@ async fn main() {
     // A-1: Generate aggregate report if multiple targets were processed
     if targets.len() > 1 && !all_results.is_empty() {
         let aggregate_path = format!("{}/aggregate_report.json", args.output);
-        if let Err(e) =
-            reporter::save_aggregate_report(&aggregate_path, targets.len(), &all_results)
-        {
+        let fanout_snapshot = (args.parallel_targets > 1).then(|| fanout_gate.snapshot());
+        if let Err(e) = reporter::save_aggregate_report(
+            &aggregate_path,
+            targets.len(),
+            &all_results,
+            fanout_snapshot.as_ref(),
+        ) {
             if verbose {
                 eprintln!("  ⚠   Could not save aggregate report: {}", e);
             }
