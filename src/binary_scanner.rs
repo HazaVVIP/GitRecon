@@ -629,7 +629,7 @@ fn scan_binary_blob_with_patterns_at_depth(
                 telemetry.record_issue(ArchiveIssue::Depth);
                 return findings;
             }
-            // Extract and scan inner files recursively
+            // Extract and scan inner files recursively under the shared archive budget.
             let (files, extraction_telemetry, _archive_reservations) =
                 extract_zip_files_with_telemetry_and_budget(data, resource_budget);
             telemetry.absorb(extraction_telemetry);
