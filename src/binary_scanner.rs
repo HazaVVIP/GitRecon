@@ -11,6 +11,7 @@ use once_cell::sync::Lazy;
 use std::collections::{BTreeMap, HashSet};
 use std::io::{Cursor, Read};
 
+use crate::resource_budget::{ResourceBudget, ResourceReservation, ResourceStage};
 use crate::streamer::DynPattern;
 
 /// Magic byte signatures for common binary formats
@@ -245,6 +246,7 @@ pub(crate) enum ArchiveIssue {
     GzipOutput,
     GzipRatio,
     UnsupportedFormat,
+    ResourceBudget,
 }
 
 impl ArchiveIssue {
@@ -259,6 +261,7 @@ impl ArchiveIssue {
             Self::GzipOutput => "gzip_output",
             Self::GzipRatio => "gzip_ratio",
             Self::UnsupportedFormat => "unsupported_format",
+            Self::ResourceBudget => "resource_budget",
         }
     }
 }
@@ -272,6 +275,7 @@ pub(crate) struct BinaryScanTelemetry {
     pub(crate) gzip_output_limited: usize,
     pub(crate) gzip_ratio_limited: usize,
     pub(crate) archive_invalid: usize,
+    pub(crate) resource_budget_denied: usize,
     pub(crate) archive_issues: BTreeMap<String, usize>,
 }
 
@@ -285,6 +289,9 @@ impl BinaryScanTelemetry {
     }
 
     pub(crate) fn record_issue(&mut self, issue: ArchiveIssue) {
+        if issue == ArchiveIssue::ResourceBudget {
+            self.resource_budget_denied += 1;
+        }
         *self
             .archive_issues
             .entry(issue.as_str().to_string())
@@ -298,6 +305,7 @@ impl BinaryScanTelemetry {
         self.gzip_output_limited += other.gzip_output_limited;
         self.gzip_ratio_limited += other.gzip_ratio_limited;
         self.archive_invalid += other.archive_invalid;
+        self.resource_budget_denied += other.resource_budget_denied;
         for (issue, count) in other.archive_issues {
             *self.archive_issues.entry(issue).or_default() += count;
         }
@@ -307,39 +315,62 @@ impl BinaryScanTelemetry {
 /// Maximum size for individual file extraction (10MB)
 const MAX_FILE_EXTRACTION_SIZE: usize = 10 * 1024 * 1024;
 
-/// Extract files from ZIP/JAR archive with size limits
-///
-/// Recursively extracts files from ZIP/JAR archives, respecting:
-/// - Total extraction size limit (100MB)
-/// - Per-file size limit (10MB)
-/// - Maximum file count (500)
-/// - Recursive ZIP scanning (nested archives)
-fn extract_zip_files_with_telemetry(data: &[u8]) -> (Vec<(String, Vec<u8>)>, BinaryScanTelemetry) {
-    extract_zip_files_with_limits(
+type ArchiveExtraction = (
+    Vec<(String, Vec<u8>)>,
+    BinaryScanTelemetry,
+    Vec<ResourceReservation>,
+);
+
+/// Extract files from ZIP/JAR archive with size limits.
+fn extract_zip_files_with_telemetry_and_budget(
+    data: &[u8],
+    resource_budget: Option<&std::sync::Arc<ResourceBudget>>,
+) -> ArchiveExtraction {
+    extract_zip_files_with_limits_and_budget(
         data,
         MAX_EXTRACTION_SIZE,
         MAX_ZIP_FILES,
         MAX_FILE_EXTRACTION_SIZE,
+        resource_budget,
     )
 }
 
+#[cfg(test)]
 fn extract_zip_files_with_limits(
     data: &[u8],
     max_total_size: usize,
     max_file_count: usize,
     max_file_size: usize,
 ) -> (Vec<(String, Vec<u8>)>, BinaryScanTelemetry) {
+    let (files, telemetry, _reservations) = extract_zip_files_with_limits_and_budget(
+        data,
+        max_total_size,
+        max_file_count,
+        max_file_size,
+        None,
+    );
+    (files, telemetry)
+}
+
+fn extract_zip_files_with_limits_and_budget(
+    data: &[u8],
+    max_total_size: usize,
+    max_file_count: usize,
+    max_file_size: usize,
+    resource_budget: Option<&std::sync::Arc<ResourceBudget>>,
+) -> ArchiveExtraction {
     use zip::read::ZipArchive;
 
     let mut files = Vec::new();
     let mut telemetry = BinaryScanTelemetry::default();
+    let mut reservations = Vec::new();
     let mut total_size = 0usize;
     let cursor = Cursor::new(data);
 
     let Ok(mut archive) = ZipArchive::new(cursor) else {
         telemetry.archive_invalid = 1;
         telemetry.record_issue(ArchiveIssue::Malformed);
-        return (files, telemetry);
+        return (files, telemetry, reservations);
     };
     let archive_len = archive.len();
     let file_count = archive_len.min(max_file_count);
@@ -383,9 +414,18 @@ fn extract_zip_files_with_limits(
             continue;
         }
 
+        let reservation = resource_budget
+            .and_then(|budget| budget.try_reserve(ResourceStage::Archive, file_size));
+        if resource_budget.is_some() && reservation.is_none() {
+            telemetry.record_issue(ArchiveIssue::ResourceBudget);
+            continue;
+        }
         let mut buffer = Vec::with_capacity(file_size);
         if file.read_to_end(&mut buffer).is_ok() {
             total_size += buffer.len();
+            if let Some(reservation) = reservation {
+                reservations.push(reservation);
+            }
             files.push((file_name, buffer));
         } else {
             telemetry.archive_invalid += 1;
@@ -393,7 +433,7 @@ fn extract_zip_files_with_limits(
         }
     }
 
-    (files, telemetry)
+    (files, telemetry, reservations)
 }
 
 /// Maximum decompressed GZIP output accepted for scanning.
@@ -407,10 +447,7 @@ enum GzipDecompressionFailure {
     Malformed,
     OutputLimited,
     RatioLimited,
-}
-
-fn decompress_gzip_with_status(data: &[u8]) -> Result<Vec<u8>, GzipDecompressionFailure> {
-    decompress_gzip_with_limits(data, MAX_GZIP_OUTPUT_SIZE, MAX_GZIP_EXPANSION_RATIO)
+    ResourceBudget,
 }
 
 #[cfg(test)]
@@ -421,29 +458,56 @@ fn decompress_gzip_with_limit(
     decompress_gzip_with_limits(data, max_output_size, MAX_GZIP_EXPANSION_RATIO)
 }
 
+#[cfg(test)]
 fn decompress_gzip_with_limits(
     data: &[u8],
     max_output_size: usize,
     max_expansion_ratio: usize,
 ) -> Result<Vec<u8>, GzipDecompressionFailure> {
+    let (decompressed, _reservations) =
+        decompress_gzip_with_limits_and_budget(data, max_output_size, max_expansion_ratio, None)?;
+    Ok(decompressed)
+}
+
+fn decompress_gzip_with_limits_and_budget(
+    data: &[u8],
+    max_output_size: usize,
+    max_expansion_ratio: usize,
+    resource_budget: Option<&std::sync::Arc<ResourceBudget>>,
+) -> Result<(Vec<u8>, Vec<ResourceReservation>), GzipDecompressionFailure> {
     use flate2::read::GzDecoder;
 
     let decoder = GzDecoder::new(Cursor::new(data));
     let mut limited = decoder.take((max_output_size + 1) as u64);
     let mut decompressed = Vec::new();
+    let mut reservations = Vec::new();
     let ratio_limit = data.len().saturating_mul(max_expansion_ratio);
-    match limited.read_to_end(&mut decompressed) {
-        Ok(_) if decompressed.len() > max_output_size => {
-            Err(GzipDecompressionFailure::OutputLimited)
+    let mut chunk = [0u8; 8192];
+
+    loop {
+        let read = limited
+            .read(&mut chunk)
+            .map_err(|_| GzipDecompressionFailure::Malformed)?;
+        if read == 0 {
+            break;
         }
-        Ok(_) if decompressed.len() > ratio_limit => Err(GzipDecompressionFailure::RatioLimited),
-        Ok(_) => Ok(decompressed),
-        Err(_) if decompressed.len() > max_output_size => {
-            Err(GzipDecompressionFailure::OutputLimited)
+        if let Some(budget) = resource_budget {
+            let Some(reservation) = budget.try_reserve(ResourceStage::Archive, read) else {
+                return Err(GzipDecompressionFailure::ResourceBudget);
+            };
+            reservations.push(reservation);
         }
-        Err(_) if decompressed.len() > ratio_limit => Err(GzipDecompressionFailure::RatioLimited),
-        Err(_) => Err(GzipDecompressionFailure::Malformed),
+        decompressed.reserve_exact(read);
+        decompressed.extend_from_slice(&chunk[..read]);
     }
+
+    if decompressed.len() > max_output_size {
+        return Err(GzipDecompressionFailure::OutputLimited);
+    }
+    if decompressed.len() > ratio_limit {
+        return Err(GzipDecompressionFailure::RatioLimited);
+    }
+    Ok((decompressed, reservations))
 }
 
 /// Scan binary blob for secrets with enhanced detection
@@ -479,6 +543,38 @@ pub(crate) fn scan_binary_blob_with_patterns_and_telemetry(
     max_blob_size: usize,
     extra_patterns: &[DynPattern],
 ) -> (Vec<(String, String, String, String)>, BinaryScanTelemetry) {
+    scan_binary_blob_with_patterns_and_telemetry_optional_budget(
+        data,
+        filename,
+        max_blob_size,
+        extra_patterns,
+        None,
+    )
+}
+
+pub(crate) fn scan_binary_blob_with_patterns_and_telemetry_with_budget(
+    data: &[u8],
+    filename: &str,
+    max_blob_size: usize,
+    extra_patterns: &[DynPattern],
+    resource_budget: &std::sync::Arc<ResourceBudget>,
+) -> (Vec<(String, String, String, String)>, BinaryScanTelemetry) {
+    scan_binary_blob_with_patterns_and_telemetry_optional_budget(
+        data,
+        filename,
+        max_blob_size,
+        extra_patterns,
+        Some(resource_budget),
+    )
+}
+
+fn scan_binary_blob_with_patterns_and_telemetry_optional_budget(
+    data: &[u8],
+    filename: &str,
+    max_blob_size: usize,
+    extra_patterns: &[DynPattern],
+    resource_budget: Option<&std::sync::Arc<ResourceBudget>>,
+) -> (Vec<(String, String, String, String)>, BinaryScanTelemetry) {
     let mut telemetry = BinaryScanTelemetry::default();
     let findings = scan_binary_blob_with_patterns_at_depth(
         data,
@@ -487,6 +583,7 @@ pub(crate) fn scan_binary_blob_with_patterns_and_telemetry(
         extra_patterns,
         0,
         &mut telemetry,
+        resource_budget,
     );
     (findings, telemetry)
 }
@@ -498,6 +595,7 @@ fn scan_binary_blob_with_patterns_at_depth(
     extra_patterns: &[DynPattern],
     depth: usize,
     telemetry: &mut BinaryScanTelemetry,
+    resource_budget: Option<&std::sync::Arc<ResourceBudget>>,
 ) -> Vec<(String, String, String, String)> {
     let mut findings = Vec::new();
 
@@ -532,7 +630,8 @@ fn scan_binary_blob_with_patterns_at_depth(
                 return findings;
             }
             // Extract and scan inner files recursively
-            let (files, extraction_telemetry) = extract_zip_files_with_telemetry(data);
+            let (files, extraction_telemetry, _archive_reservations) =
+                extract_zip_files_with_telemetry_and_budget(data, resource_budget);
             telemetry.absorb(extraction_telemetry);
             for (inner_path, inner_data) in files {
                 // Skip recursive extraction for non-binary files (check magic bytes)
@@ -547,6 +646,7 @@ fn scan_binary_blob_with_patterns_at_depth(
                             extra_patterns,
                             depth + 1,
                             telemetry,
+                            resource_budget,
                         );
                         findings.extend(inner_findings);
                     }
@@ -559,6 +659,7 @@ fn scan_binary_blob_with_patterns_at_depth(
                             extra_patterns,
                             depth + 1,
                             telemetry,
+                            resource_budget,
                         );
                         findings.extend(inner_findings);
                     }
@@ -636,15 +737,24 @@ fn scan_binary_blob_with_patterns_at_depth(
         BinaryType::Gzip => {
             // Scan decompressed content recursively, then retain the legacy raw
             // string fallback for malformed or unusual GZIP payloads.
-            match decompress_gzip_with_status(data) {
-                Ok(decompressed) => findings.extend(scan_binary_blob_with_patterns_at_depth(
-                    &decompressed,
-                    &format!("{}:gzip", filename),
-                    max_blob_size,
-                    extra_patterns,
-                    depth + 1,
-                    telemetry,
-                )),
+            match decompress_gzip_with_limits_and_budget(
+                data,
+                MAX_GZIP_OUTPUT_SIZE,
+                MAX_GZIP_EXPANSION_RATIO,
+                resource_budget,
+            ) {
+                Ok((decompressed, _archive_reservations)) => {
+                    findings.extend(scan_binary_blob_with_patterns_at_depth(
+                        &decompressed,
+                        &format!("{}:gzip", filename),
+                        max_blob_size,
+                        extra_patterns,
+                        depth + 1,
+                        telemetry,
+                        resource_budget,
+                    ));
+                }
+
                 Err(GzipDecompressionFailure::OutputLimited) => {
                     telemetry.gzip_output_limited += 1;
                     telemetry.record_issue(ArchiveIssue::GzipOutput);
@@ -656,6 +766,9 @@ fn scan_binary_blob_with_patterns_at_depth(
                 Err(GzipDecompressionFailure::Malformed) => {
                     telemetry.archive_invalid += 1;
                     telemetry.record_issue(ArchiveIssue::Malformed);
+                }
+                Err(GzipDecompressionFailure::ResourceBudget) => {
+                    telemetry.record_issue(ArchiveIssue::ResourceBudget);
                 }
             }
             let strings = extract_printable_strings(data, 4);
@@ -1251,6 +1364,62 @@ mod tests {
         assert!(findings
             .iter()
             .any(|finding| finding.0 == "custom_archive" && finding.1 == "ARCHIVE_AB12"));
+    }
+
+    #[test]
+    fn archive_budget_denials_are_typed_and_released() {
+        use flate2::{write::GzEncoder, Compression};
+        use std::io::Write;
+        use std::sync::Arc;
+        use zip::{write::SimpleFileOptions, ZipWriter};
+
+        let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+        writer
+            .start_file("config.txt", SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(b"ARCHIVE_AB12").unwrap();
+        let archive = writer.finish().unwrap().into_inner();
+
+        let zip_budget = Arc::new(ResourceBudget::new(4));
+        let (_, zip_telemetry) = scan_binary_blob_with_patterns_and_telemetry_with_budget(
+            &archive,
+            "fixture.zip",
+            1024,
+            &[],
+            &zip_budget,
+        );
+        assert_eq!(zip_telemetry.resource_budget_denied, 1);
+        assert_eq!(
+            zip_telemetry.archive_issues.get("resource_budget"),
+            Some(&1)
+        );
+        assert_eq!(zip_budget.stats().current_bytes, 0);
+        assert_eq!(
+            zip_budget.stats().by_stage["archive"].denied_reservations,
+            1
+        );
+
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(b"ARCHIVE_GZIP_MARKER").unwrap();
+        let compressed = encoder.finish().unwrap();
+        let gzip_budget = Arc::new(ResourceBudget::new(4));
+        let (_, gzip_telemetry) = scan_binary_blob_with_patterns_and_telemetry_with_budget(
+            &compressed,
+            "fixture.gz",
+            1024,
+            &[],
+            &gzip_budget,
+        );
+        assert_eq!(gzip_telemetry.resource_budget_denied, 1);
+        assert_eq!(
+            gzip_telemetry.archive_issues.get("resource_budget"),
+            Some(&1)
+        );
+        assert_eq!(gzip_budget.stats().current_bytes, 0);
+        assert_eq!(
+            gzip_budget.stats().by_stage["archive"].denied_reservations,
+            1
+        );
     }
 
     #[test]
