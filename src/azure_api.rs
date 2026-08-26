@@ -497,7 +497,6 @@ impl AzureForgeClient {
 pub struct AzRepo {
     pub id: String,
     pub name: String,
-    #[allow(dead_code)]
     pub private: bool,
     pub default_branch: String,
     pub clone_url: String,
