@@ -1379,6 +1379,9 @@ fn build_forge_file_scan_config(
         outcome_stats: Arc::new(tokio::sync::Mutex::new(
             streamer::ScanOutcomeStats::default(),
         )),
+        resource_budget: Arc::new(crate::resource_budget::ResourceBudget::new(
+            args.mem_limit.saturating_mul(1024 * 1024),
+        )),
     };
     (started_at, scan_config)
 }
