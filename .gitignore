@@ -12,6 +12,13 @@ gitrecon_output/
 *.checkpoint
 *.checkpoint.json
 
+# Python and test-generated artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+*.profraw
+
 # Operating-system and editor metadata
 .DS_Store
 Thumbs.db
