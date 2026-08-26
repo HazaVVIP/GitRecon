@@ -60,9 +60,23 @@ pub(crate) fn parse_retry_after_duration(
     ))
 }
 
+/// Parse and bound a provider Retry-After value while retaining caller policy.
+/// Providers choose their own fallback and maximum; this helper only prevents
+/// repeated fallback/cap composition from drifting between adapters.
+pub(crate) fn parse_bounded_retry_after_duration(
+    headers: &HashMap<String, String>,
+    now: DateTime<Utc>,
+    fallback: Duration,
+    maximum: Duration,
+) -> Duration {
+    parse_retry_after_duration(headers, now)
+        .unwrap_or(fallback)
+        .min(maximum)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{parse_next_link, parse_retry_after_duration};
+    use super::{parse_bounded_retry_after_duration, parse_next_link, parse_retry_after_duration};
     use chrono::{DateTime, Utc};
     use std::collections::HashMap;
     use std::time::Duration;
@@ -99,6 +113,34 @@ mod tests {
                 "value: {value}"
             );
         }
+    }
+
+    #[test]
+    fn bounded_parser_preserves_fallback_and_cap_policy() {
+        let now = DateTime::parse_from_rfc3339("2026-08-24T00:00:00Z")
+            .expect("fixed test clock")
+            .with_timezone(&Utc);
+        let mut headers = HashMap::new();
+        headers.insert("retry-after".to_string(), "500".to_string());
+        assert_eq!(
+            parse_bounded_retry_after_duration(
+                &headers,
+                now,
+                Duration::from_secs(60),
+                Duration::from_secs(300)
+            ),
+            Duration::from_secs(300)
+        );
+        headers.insert("retry-after".to_string(), "not-a-date".to_string());
+        assert_eq!(
+            parse_bounded_retry_after_duration(
+                &headers,
+                now,
+                Duration::from_secs(60),
+                Duration::from_secs(300)
+            ),
+            Duration::from_secs(60)
+        );
     }
 
     #[test]

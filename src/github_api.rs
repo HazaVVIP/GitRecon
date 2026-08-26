@@ -110,9 +110,12 @@ impl GitHubForgeClient {
 /// Sprint 5 (S5.5) helper: parse `Retry-After` using the shared wire parser.
 /// `X-RateLimit-Reset` remains forge-specific and is handled separately.
 fn parse_retry_after(headers: &std::collections::HashMap<String, String>) -> Duration {
-    crate::provider_transport::parse_retry_after_duration(headers, chrono::Utc::now())
-        .unwrap_or(Duration::from_secs(60))
-        .min(Duration::from_secs(300))
+    crate::provider_transport::parse_bounded_retry_after_duration(
+        headers,
+        chrono::Utc::now(),
+        Duration::from_secs(60),
+        Duration::from_secs(300),
+    )
 }
 
 #[async_trait]
