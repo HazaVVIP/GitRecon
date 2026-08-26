@@ -37,16 +37,20 @@ pub(crate) fn save_aggregate_report(
     path: &str,
     total_targets: usize,
     results: &[TargetOutcome],
+    target_fanout: Option<&crate::target_fanout::TargetFanoutTelemetry>,
 ) -> std::io::Result<()> {
-    let body = serde_json::to_string_pretty(&serde_json::json!({
+    let mut envelope = serde_json::json!({
         "tool": "GitRecon",
         "version": env!("CARGO_PKG_VERSION"),
         "timestamp": chrono::Utc::now().to_rfc3339(),
         "total_targets": total_targets,
         "scanned_targets": results.len(),
         "results": results,
-    }))
-    .unwrap_or_default();
+    });
+    if let Some(target_fanout) = target_fanout {
+        envelope["target_fanout"] = serde_json::to_value(target_fanout).unwrap_or_default();
+    }
+    let body = serde_json::to_string_pretty(&envelope).unwrap_or_default();
     std::fs::write(path, body)
 }
 
@@ -1530,7 +1534,7 @@ mod tests {
             risk_score: 7,
         };
         let outcome = TargetOutcome::success("target", "URL", &summary);
-        save_aggregate_report(path.to_str().unwrap(), 3, &[outcome])
+        save_aggregate_report(path.to_str().unwrap(), 3, &[outcome], None)
             .expect("aggregate report should be written");
         let value: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
@@ -1538,6 +1542,39 @@ mod tests {
         assert_eq!(value["total_targets"], 3);
         assert_eq!(value["scanned_targets"], 1);
         assert_eq!(value["results"][0]["findings_count"], 2);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn save_aggregate_report_includes_target_fanout_telemetry() {
+        let path = std::env::temp_dir().join(format!(
+            "gitrecon-aggregate-fanout-report-{}.json",
+            std::process::id()
+        ));
+        let summary = crate::outcome::ScanSummary {
+            report_path: "out/target_report.json".to_string(),
+            findings_count: 1,
+            risk_score: 4,
+        };
+        let outcome = TargetOutcome::success("target", "URL", &summary);
+        let telemetry = crate::target_fanout::TargetFanoutTelemetry {
+            configured_limit: 2,
+            current_active: 0,
+            peak_active: 2,
+            current_waiters: 0,
+            queue_wait_count: 1,
+            queue_wait_ms: 3,
+            permits_granted: 3,
+            targets_started: 3,
+            targets_completed: 3,
+        };
+        save_aggregate_report(path.to_str().unwrap(), 3, &[outcome], Some(&telemetry))
+            .expect("aggregate report should be written");
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(value["results"][0]["findings_count"], 1);
+        assert_eq!(value["target_fanout"]["configured_limit"], 2);
+        assert_eq!(value["target_fanout"]["queue_wait_count"], 1);
         let _ = std::fs::remove_file(path);
     }
 
