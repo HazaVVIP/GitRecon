@@ -1447,13 +1447,24 @@ impl Streamer {
                     ordered_processed_sha1s(&tracker)
                 };
 
-                let accumulator = state.to_checkpoint(
-                    self.cache_hits.load(Ordering::Relaxed),
-                    self.cache_misses.load(Ordering::Relaxed),
-                    self.rate_limit_allowed.load(Ordering::Relaxed),
-                    self.rate_limit_dropped.load(Ordering::Relaxed),
-                    self.rate_limit_wait_ms.load(Ordering::Relaxed),
-                );
+                let resource_stats = resource_budget.stats();
+                let mut scheduler_stats = concurrency_gate.telemetry();
+                if let Some(adaptive) = adaptive_concurrency.as_ref() {
+                    let (adjustments, throttles, headroom) = adaptive.telemetry();
+                    scheduler_stats.adjustment_events = adjustments;
+                    scheduler_stats.throttle_events = throttles;
+                    scheduler_stats.headroom_events = headroom;
+                }
+                let accumulator =
+                    state.to_checkpoint(crate::scan_accumulator::CheckpointTelemetry {
+                        cache_hits: self.cache_hits.load(Ordering::Relaxed),
+                        cache_misses: self.cache_misses.load(Ordering::Relaxed),
+                        rate_limit_allowed: self.rate_limit_allowed.load(Ordering::Relaxed),
+                        rate_limit_dropped: self.rate_limit_dropped.load(Ordering::Relaxed),
+                        rate_limit_wait_ms: self.rate_limit_wait_ms.load(Ordering::Relaxed),
+                        resource_stats,
+                        scheduler_stats,
+                    });
                 let new_checkpoint = Checkpoint {
                     version: checkpoint::CheckpointVersion::latest(),
                     target: target_for_checkpoint.clone(),
@@ -1524,13 +1535,23 @@ impl Streamer {
                 let tracker = processed_sha1s_tracker.lock().await;
                 ordered_processed_sha1s(&tracker)
             };
-            let accumulator = state.to_checkpoint(
-                self.cache_hits.load(Ordering::Relaxed),
-                self.cache_misses.load(Ordering::Relaxed),
-                self.rate_limit_allowed.load(Ordering::Relaxed),
-                self.rate_limit_dropped.load(Ordering::Relaxed),
-                self.rate_limit_wait_ms.load(Ordering::Relaxed),
-            );
+            let resource_stats = resource_budget.stats();
+            let mut scheduler_stats = concurrency_gate.telemetry();
+            if let Some(adaptive) = adaptive_concurrency.as_ref() {
+                let (adjustments, throttles, headroom) = adaptive.telemetry();
+                scheduler_stats.adjustment_events = adjustments;
+                scheduler_stats.throttle_events = throttles;
+                scheduler_stats.headroom_events = headroom;
+            }
+            let accumulator = state.to_checkpoint(crate::scan_accumulator::CheckpointTelemetry {
+                cache_hits: self.cache_hits.load(Ordering::Relaxed),
+                cache_misses: self.cache_misses.load(Ordering::Relaxed),
+                rate_limit_allowed: self.rate_limit_allowed.load(Ordering::Relaxed),
+                rate_limit_dropped: self.rate_limit_dropped.load(Ordering::Relaxed),
+                rate_limit_wait_ms: self.rate_limit_wait_ms.load(Ordering::Relaxed),
+                resource_stats,
+                scheduler_stats,
+            });
 
             let final_checkpoint = Checkpoint {
                 version: checkpoint::CheckpointVersion::latest(),
@@ -1574,9 +1595,27 @@ impl Streamer {
 
         let mut outcome_stats = ScanOutcomeStats::from_state(&state);
         let resource_stats = resource_budget.stats();
-        outcome_stats.resource_peak_bytes = resource_stats.peak_bytes;
-        outcome_stats.resource_denied_reservations = resource_stats.denied_reservations;
-        outcome_stats.resource_by_stage = resource_stats.by_stage;
+        outcome_stats.resource_peak_bytes =
+            state.resource_peak_bytes.max(resource_stats.peak_bytes);
+        outcome_stats.resource_denied_reservations = state
+            .resource_denied_reservations
+            .saturating_add(resource_stats.denied_reservations);
+        let mut resource_by_stage = state.resource_by_stage.clone();
+        for (stage, live) in resource_stats.by_stage {
+            let merged = resource_by_stage.entry(stage).or_insert(
+                crate::resource_budget::ResourceStageStats {
+                    current_bytes: 0,
+                    peak_bytes: 0,
+                    denied_reservations: 0,
+                },
+            );
+            merged.current_bytes = live.current_bytes;
+            merged.peak_bytes = merged.peak_bytes.max(live.peak_bytes);
+            merged.denied_reservations = merged
+                .denied_reservations
+                .saturating_add(live.denied_reservations);
+        }
+        outcome_stats.resource_by_stage = resource_by_stage;
         let mut scheduler_stats = concurrency_gate.telemetry();
         if let Some(adaptive) = adaptive_concurrency.as_ref() {
             let (adjustments, throttles, headroom) = adaptive.telemetry();
@@ -1584,6 +1623,39 @@ impl Streamer {
             scheduler_stats.throttle_events = throttles;
             scheduler_stats.headroom_events = headroom;
         }
+        scheduler_stats.acquire_requests = state
+            .scheduler
+            .acquire_requests
+            .saturating_add(scheduler_stats.acquire_requests);
+        scheduler_stats.queued_acquires = state
+            .scheduler
+            .queued_acquires
+            .saturating_add(scheduler_stats.queued_acquires);
+        scheduler_stats.queue_wait_ms = state
+            .scheduler
+            .queue_wait_ms
+            .saturating_add(scheduler_stats.queue_wait_ms);
+        scheduler_stats.permits_granted = state
+            .scheduler
+            .permits_granted
+            .saturating_add(scheduler_stats.permits_granted);
+        scheduler_stats.active_peak = state.scheduler.active_peak.max(scheduler_stats.active_peak);
+        scheduler_stats.limit_adjustments = state
+            .scheduler
+            .limit_adjustments
+            .saturating_add(scheduler_stats.limit_adjustments);
+        scheduler_stats.adjustment_events = state
+            .scheduler
+            .adjustment_events
+            .saturating_add(scheduler_stats.adjustment_events);
+        scheduler_stats.throttle_events = state
+            .scheduler
+            .throttle_events
+            .saturating_add(scheduler_stats.throttle_events);
+        scheduler_stats.headroom_events = state
+            .scheduler
+            .headroom_events
+            .saturating_add(scheduler_stats.headroom_events);
         outcome_stats.scheduler = scheduler_stats;
         let elapsed = t0.elapsed().as_secs_f64();
         let mut ts: Vec<_> = state.tech_stack.iter().cloned().collect();
@@ -5769,7 +5841,15 @@ mod tests {
         original.record_source(ObjectSourceKind::Cache);
         original.record_source(ObjectSourceKind::LooseHttp);
 
-        let snapshot = original.to_checkpoint(11, 13, 17, 2, 125);
+        let snapshot = original.to_checkpoint(crate::scan_accumulator::CheckpointTelemetry {
+            cache_hits: 11,
+            cache_misses: 13,
+            rate_limit_allowed: 17,
+            rate_limit_dropped: 2,
+            rate_limit_wait_ms: 125,
+            resource_stats: crate::resource_budget::ResourceBudget::new(0).stats(),
+            scheduler_stats: Default::default(),
+        });
         assert_eq!(snapshot.tech_stack, vec!["Rust", "SQLite"]);
         let encoded = serde_json::to_string(&snapshot).unwrap();
         let restored_snapshot: checkpoint::StreamAccumulatorCheckpoint =
@@ -5790,6 +5870,91 @@ mod tests {
         assert_eq!(snapshot.skipped_resource_budget, 1);
         assert_eq!(resumed.failed_by_kind, original.failed_by_kind);
         assert_eq!(resumed.objects_by_source, original.objects_by_source);
+    }
+
+    #[test]
+    fn checkpoint_telemetry_preserves_history_without_in_flight_state() {
+        let mut original = State {
+            resource_peak_bytes: 11,
+            resource_denied_reservations: 4,
+            ..Default::default()
+        };
+        original.resource_by_stage.insert(
+            "object_scan".to_string(),
+            crate::resource_budget::ResourceStageStats {
+                current_bytes: 99,
+                peak_bytes: 11,
+                denied_reservations: 4,
+            },
+        );
+        original.scheduler = checkpoint::SchedulerCheckpointTelemetry {
+            acquire_requests: 7,
+            queued_acquires: 3,
+            queue_wait_ms: 17,
+            permits_granted: 6,
+            active_peak: 4,
+            limit_adjustments: 2,
+            adjustment_events: 2,
+            throttle_events: 1,
+            headroom_events: 1,
+        };
+
+        let budget = Arc::new(crate::resource_budget::ResourceBudget::new(10));
+        let reservation = budget
+            .try_reserve(crate::resource_budget::ResourceStage::ObjectScan, 6)
+            .expect("test reservation should fit");
+        assert!(budget
+            .try_reserve(crate::resource_budget::ResourceStage::ObjectScan, 5)
+            .is_none());
+        let live_resource = budget.stats();
+        let live_scheduler = crate::scan_scheduler::SchedulerTelemetry {
+            acquire_requests: 5,
+            queued_acquires: 2,
+            queue_wait_ms: 13,
+            permits_granted: 4,
+            active_peak: 6,
+            limit_adjustments: 1,
+            adjustment_events: 1,
+            throttle_events: 0,
+            headroom_events: 1,
+            current_limit: 8,
+        };
+
+        let snapshot = original.to_checkpoint(crate::scan_accumulator::CheckpointTelemetry {
+            cache_hits: 0,
+            cache_misses: 0,
+            rate_limit_allowed: 0,
+            rate_limit_dropped: 0,
+            rate_limit_wait_ms: 0,
+            resource_stats: live_resource,
+            scheduler_stats: live_scheduler,
+        });
+        drop(reservation);
+
+        assert_eq!(snapshot.resource_peak_bytes, 11);
+        assert_eq!(snapshot.resource_denied_reservations, 5);
+        assert_eq!(snapshot.resource_by_stage["object_scan"].current_bytes, 0);
+        assert_eq!(snapshot.resource_by_stage["object_scan"].peak_bytes, 11);
+        assert_eq!(
+            snapshot.resource_by_stage["object_scan"].denied_reservations,
+            5
+        );
+        assert_eq!(snapshot.scheduler.acquire_requests, 12);
+        assert_eq!(snapshot.scheduler.queued_acquires, 5);
+        assert_eq!(snapshot.scheduler.queue_wait_ms, 30);
+        assert_eq!(snapshot.scheduler.active_peak, 6);
+        assert_eq!(snapshot.scheduler.limit_adjustments, 3);
+
+        let encoded = serde_json::to_string(&snapshot).unwrap();
+        let restored: checkpoint::StreamAccumulatorCheckpoint =
+            serde_json::from_str(&encoded).unwrap();
+        let mut resumed = State::default();
+        resumed.restore_checkpoint(restored);
+        assert_eq!(resumed.resource_peak_bytes, 11);
+        assert_eq!(resumed.resource_denied_reservations, 5);
+        assert_eq!(resumed.resource_by_stage["object_scan"].current_bytes, 0);
+        assert_eq!(resumed.scheduler.acquire_requests, 12);
+        assert_eq!(resumed.scheduler.active_peak, 6);
     }
 
     // unique_findings / unique_count

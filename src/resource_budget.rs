@@ -49,7 +49,7 @@ impl ResourceStage {
 }
 
 /// Per-stage snapshot of global budget activity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ResourceStageStats {
     pub(crate) current_bytes: usize,
     pub(crate) peak_bytes: usize,

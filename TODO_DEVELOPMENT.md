@@ -150,7 +150,7 @@ SARIF menyimpan telemetry pada `runs[0].properties.gitrecon`; NDJSON menambahkan
 
 ### Item baru P2-09 — Stage-aware resource and scheduler telemetry
 
-**Status:** `IN PROGRESS — resource budget, URL scheduler, acquisition, ZIP/GZIP archive, workspace reconstruction, forge file-scan, dan target-fan-out control telemetry selesai; checkpoint equivalence serta byte-level fan-out accounting tetap incremental**
+**Status:** `IN PROGRESS — resource budget, URL scheduler, acquisition, ZIP/GZIP archive, workspace reconstruction, forge file-scan, target-fan-out control telemetry, dan checkpoint equivalence selesai; benchmark observability masih menjadi acceptance slice berikutnya. Byte-level fan-out accounting tetap tidak diklaim karena belum ada boundary alokasi nyata**
 **Dependensi:** P1-08, P3-04, P3-05
 **Area:** `src/resource_budget.rs`, `src/scan_scheduler.rs`, `src/stream_types.rs`, benchmark tools
 
