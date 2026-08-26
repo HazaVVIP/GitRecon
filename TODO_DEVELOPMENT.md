@@ -150,11 +150,11 @@ SARIF menyimpan telemetry pada `runs[0].properties.gitrecon`; NDJSON menambahkan
 
 ### Item baru P2-09 — Stage-aware resource and scheduler telemetry
 
-**Status:** `IN PROGRESS — slice pertama: stage-aware budget dan URL scheduler telemetry; reservation boundary stage lain tetap dikerjakan incremental**
+**Status:** `IN PROGRESS — resource budget, URL scheduler, acquisition, dan ZIP/GZIP archive reservation selesai; workspace/file-scan/fan-out boundaries tetap incremental**
 **Dependensi:** P1-08, P3-04, P3-05
 **Area:** `src/resource_budget.rs`, `src/scan_scheduler.rs`, `src/stream_types.rs`, benchmark tools
 
-Resource budget sekarang memiliki vocabulary stabil untuk acquisition, object scan, archive, workspace reconstruction, file scan, dan target fan-out; setiap stage melaporkan current/peak/denied secara additive. URL acquisition kini benar-benar me-reserve lifecycle buffer HTTP/pack/cache dan memetakan denial menjadi typed resource skip; archive, workspace reconstruction, file scan, dan target fan-out tetap akan diinstrumentasi incremental agar tidak mengklaim penggunaan palsu. URL scheduler mengekspos request/grant, queue count/wait, active peak, configured current limit, limit adjustments, serta adjustment/throttle/headroom events.
+Resource budget sekarang memiliki vocabulary stabil untuk acquisition, object scan, archive, workspace reconstruction, file scan, dan target fan-out; setiap stage melaporkan current/peak/denied secara additive. URL acquisition kini benar-benar me-reserve lifecycle buffer HTTP/pack/cache, sedangkan ZIP/GZIP archive expansion me-reserve output sebelum buffer dibuat dan mempertahankan guard selama recursive scan; denial dipetakan menjadi typed resource skip dan tetap terlihat dalam archive telemetry. Workspace reconstruction, file scan, dan target fan-out masih akan diinstrumentasi incremental agar tidak mengklaim penggunaan palsu. URL scheduler mengekspos request/grant, queue count/wait, active peak, configured current limit, limit adjustments, serta adjustment/throttle/headroom events.
 
 **Acceptance criteria:** Cancellation me-release reservation pada setiap stage; exhaustive tetap bounded; report membedakan resource denial dari clean result; benchmark dapat membandingkan throughput, peak RSS, queue wait, dan cache/retry behavior tanpa wall-clock threshold naif.
 

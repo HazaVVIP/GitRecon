@@ -865,6 +865,7 @@ pub(crate) enum WorkerResult {
         bytes: usize,
         save_result: Option<bool>, // None = not attempted, Some(true) = saved, Some(false) = failed
         archive_issues: BTreeMap<String, usize>,
+        resource_budget_denied: usize,
         source: ObjectSourceKind,
     },
     BlobFailed {
@@ -1300,9 +1301,13 @@ impl Streamer {
                     bytes,
                     save_result,
                     archive_issues,
+                    resource_budget_denied,
                     source,
                 } => {
                     state.blobs_scanned += 1;
+                    for _ in 0..resource_budget_denied {
+                        state.record_skip(SkipReason::ResourceBudget);
+                    }
                     for (issue, count) in archive_issues {
                         *state.archive_invalid_reasons.entry(issue).or_default() += count;
                     }
@@ -1744,16 +1749,19 @@ pub(crate) fn process_blob_content(
             // and finally retains the legacy null-byte signal for unknown data.
             let dispatch = binary_scanner::classify_binary(&obj.data, &filename, 8192, 10);
             let mut archive_issues = BTreeMap::new();
+            let mut archive_resource_denials = 0usize;
             if dispatch.is_binary() {
                 // S-3: Enhanced binary file scanning
                 let bin_type = dispatch.binary_type;
                 let (binary_findings, binary_telemetry) =
-                    binary_scanner::scan_binary_blob_with_patterns_and_telemetry(
+                    binary_scanner::scan_binary_blob_with_patterns_and_telemetry_with_budget(
                         &obj.data,
                         &filename,
                         max_scan_bytes,
                         &extra_patterns,
+                        &resource_budget,
                     );
+                archive_resource_denials = binary_telemetry.resource_budget_denied;
                 archive_issues = binary_telemetry.archive_issues;
 
                 // Handle different binary types
@@ -1783,6 +1791,7 @@ pub(crate) fn process_blob_content(
                             bytes: raw_bytes,
                             save_result,
                             archive_issues: archive_issues.clone(),
+                            resource_budget_denied: archive_resource_denials,
                             source: ObjectSourceKind::LooseHttp,
                         };
                     }
@@ -1811,6 +1820,7 @@ pub(crate) fn process_blob_content(
                             bytes: raw_bytes,
                             save_result,
                             archive_issues: archive_issues.clone(),
+                            resource_budget_denied: archive_resource_denials,
                             source: ObjectSourceKind::LooseHttp,
                         };
                     }
@@ -1839,6 +1849,7 @@ pub(crate) fn process_blob_content(
                             bytes: raw_bytes,
                             save_result,
                             archive_issues: archive_issues.clone(),
+                            resource_budget_denied: archive_resource_denials,
                             source: ObjectSourceKind::LooseHttp,
                         };
                     }
@@ -1868,6 +1879,7 @@ pub(crate) fn process_blob_content(
                         bytes: raw_bytes,
                         save_result,
                         archive_issues: archive_issues.clone(),
+                        resource_budget_denied: archive_resource_denials,
                         source: ObjectSourceKind::LooseHttp,
                     };
                 }
@@ -1897,6 +1909,7 @@ pub(crate) fn process_blob_content(
                         bytes: raw_bytes,
                         save_result,
                         archive_issues: archive_issues.clone(),
+                        resource_budget_denied: archive_resource_denials,
                         source: ObjectSourceKind::LooseHttp,
                     };
                 }
@@ -1907,6 +1920,7 @@ pub(crate) fn process_blob_content(
                     bytes: raw_bytes,
                     save_result,
                     archive_issues: archive_issues.clone(),
+                    resource_budget_denied: archive_resource_denials,
                     source: ObjectSourceKind::LooseHttp,
                 };
             }
@@ -1935,6 +1949,7 @@ pub(crate) fn process_blob_content(
                     bytes: raw_bytes,
                     save_result,
                     archive_issues: archive_issues.clone(),
+                    resource_budget_denied: archive_resource_denials,
                     source: ObjectSourceKind::LooseHttp,
                 };
             }
@@ -1992,6 +2007,7 @@ pub(crate) fn process_blob_content(
                 bytes: raw_bytes,
                 save_result,
                 archive_issues: archive_issues.clone(),
+                resource_budget_denied: archive_resource_denials,
                 source: ObjectSourceKind::LooseHttp,
             }
         }
@@ -2054,6 +2070,7 @@ pub(crate) fn attach_source(result: WorkerResult, source: ObjectSourceKind) -> W
             bytes,
             save_result,
             archive_issues,
+            resource_budget_denied,
             ..
         } => WorkerResult::BlobScanned {
             findings,
@@ -2061,6 +2078,7 @@ pub(crate) fn attach_source(result: WorkerResult, source: ObjectSourceKind) -> W
             bytes,
             save_result,
             archive_issues,
+            resource_budget_denied,
             source,
         },
         other => other,
