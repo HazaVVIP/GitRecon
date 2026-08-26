@@ -404,6 +404,43 @@ pub struct StreamAccumulatorCheckpoint {
     pub rate_limit_dropped: usize,
     #[serde(default)]
     pub rate_limit_wait_ms: u64,
+    /// P2-09: Historical resource telemetry accumulated before a resume.
+    /// `current_bytes` is intentionally never persisted; a new process starts with
+    /// no in-flight reservations.
+    #[serde(default)]
+    pub resource_peak_bytes: usize,
+    #[serde(default)]
+    pub resource_denied_reservations: usize,
+    #[serde(default)]
+    pub resource_by_stage: BTreeMap<String, crate::resource_budget::ResourceStageStats>,
+    /// P2-09: Historical scheduler events/counters accumulated before a resume.
+    /// Active gauges and the current limit are reconstructed from the live gate.
+    #[serde(default)]
+    pub scheduler: SchedulerCheckpointTelemetry,
+}
+
+/// Historical scheduler counters safe to carry across a process restart.
+/// In-flight state and the current limit are deliberately excluded.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SchedulerCheckpointTelemetry {
+    #[serde(default)]
+    pub acquire_requests: usize,
+    #[serde(default)]
+    pub queued_acquires: usize,
+    #[serde(default)]
+    pub queue_wait_ms: u64,
+    #[serde(default)]
+    pub permits_granted: usize,
+    #[serde(default)]
+    pub active_peak: usize,
+    #[serde(default)]
+    pub limit_adjustments: usize,
+    #[serde(default)]
+    pub adjustment_events: usize,
+    #[serde(default)]
+    pub throttle_events: usize,
+    #[serde(default)]
+    pub headroom_events: usize,
 }
 
 /// BUG-STAB-011: Minimal finding representation for checkpoint storage
@@ -1735,6 +1772,10 @@ mod tests {
                 rate_limit_allowed: 9,
                 rate_limit_dropped: 1,
                 rate_limit_wait_ms: 125,
+                resource_peak_bytes: 0,
+                resource_denied_reservations: 0,
+                resource_by_stage: BTreeMap::new(),
+                scheduler: SchedulerCheckpointTelemetry::default(),
             }),
             adaptive_state: None,
         };
