@@ -1,7 +1,7 @@
 # GitRecon Development TODO
 
 **Versi backlog:** setelah audit penuh v3.2.6
-**Status baseline:** `origin/main` dan local `main` sinkron pada `0c3f04c1`; worktree bersih dan post-merge CI green
+**Status baseline:** `origin/main` dan local `main` sinkron pada `fbdda26d`; worktree bersih dan post-merge Quality CI green
 **Prioritas utama:** provider correctness dan coverage integrity, feature parity lintas mode, offensive coverage, performance/resource control, lalu maintainability dan release governance
 
 Dokumen ini adalah backlog development resmi GitRecon. Item dikerjakan secara inkremental, satu paket perubahan pada satu waktu, dan setiap paket wajib mempertahankan kualitas build, test, serta perilaku offensive scanning yang sudah ada. `--exhaustive`, binary scanning default, object verification default, dan partial-exposure opt-in tidak boleh berubah secara tidak sengaja. Tidak boleh ada pagination loss, branch mis-selection, provider misattribution, atau silent filtering baru.
@@ -232,7 +232,7 @@ Verification tidak boleh hanya bergantung pada `index_entries`. Candidate verifi
 
 ## P0-03 — Benahi kontrak `--dry-run` di seluruh mode
 
-**Status:** `DONE` — implementation validated locally; commit pending in current package
+**Status:** `DONE` — merged, commit `514d8d33`, dan tervalidasi melalui regression suite
 **Dependensi:** tidak ada
 **Area:** `src/main.rs`, `src/url_pipeline.rs`, `src/dir_pipeline.rs`, `src/targets.rs`
 
@@ -253,7 +253,7 @@ Dry-run sekarang berhenti sebelum URL detection, repository reconnaissance, prov
 
 ## P0-04 — Validasi input numerik dan perbaiki semantics retry/HTTP
 
-**Status:** `DONE` — implementation validated locally; commit pending in current package
+**Status:** `DONE` — merged, commit `1e8fac21`, dan tervalidasi melalui regression suite
 **Dependensi:** tidak ada
 **Area:** `src/main.rs`, `src/http_client.rs`, `src/rate_limiter.rs`
 
@@ -274,7 +274,7 @@ Tambahkan validator finite dan non-negative untuk `delay`, `jitter`, `entropy-th
 
 ## P0-05 — Ganti process exit pada helper reusable dengan typed errors
 
-**Status:** `DONE` — implementation validated locally; commit pending in current package
+**Status:** `DONE` — merged, commit `b28db26d`, dan tervalidasi melalui regression suite
 **Dependensi:** P2-02 bila dilakukan bersamaan dengan core extraction
 **Area:** `src/target_utils.rs`, `src/validation.rs`, `src/outcome.rs`
 
@@ -297,7 +297,7 @@ Tambahkan validator finite dan non-negative untuk `delay`, `jitter`, `entropy-th
 
 ## P1-01 — Ekstrak `ContentScanner` dan `ScanAccumulator`
 
-**Status:** `DONE` — implementation validated locally; commit pending in current package
+**Status:** `DONE` — fondasi merged pada commit `9f050967` dan `23b6f7e1`, tervalidasi melalui regression suite
 **Dependensi:** P0-01, P0-03
 **Area:** `src/streamer.rs`, `src/dir_pipeline.rs`, `src/forge_scan.rs`, `src/scanner_factory.rs`
 
