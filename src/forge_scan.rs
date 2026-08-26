@@ -13,6 +13,7 @@ use std::time::Instant;
 use crate::binary_scanner;
 use crate::content_scanner::{ContentScanOutcome, ContentScanner, ScanAccumulator};
 use crate::forge::{Forge, ForgeScanScope, HistoryChangeStatus, Repository, TreeEntry};
+use crate::resource_budget::{ResourceBudget, ResourceStage};
 use crate::streamer::{DynPattern, Finding, ScanOutcomeStats, StreamResult};
 use crate::temp_cleanup::TempDirGuard;
 use colored::Colorize;
@@ -181,6 +182,13 @@ pub(crate) struct RepositoryScanOutcome {
     pub(crate) bytes_scanned: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReconstructionOutcome {
+    Recovered,
+    Failed,
+    ResourceSkipped,
+}
+
 impl RepositoryScanOutcome {
     pub(crate) fn from_counts(
         blobs_recovered: usize,
@@ -213,7 +221,23 @@ where
     F: Fn(E) -> Fut + Clone + Send + Sync,
     Fut: Future<Output = anyhow::Result<Vec<u8>>> + Send,
 {
-    reconstruct_blobs_with_stats(tree, workspace, max_blob_bytes, workers, fetch_blob, None).await
+    reconstruct_blobs_with_stats(
+        tree,
+        workspace,
+        max_blob_bytes,
+        workers,
+        fetch_blob,
+        None,
+        None,
+    )
+    .await
+    .failed
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct ReconstructionSummary {
+    failed: usize,
+    resource_skipped: usize,
 }
 
 async fn reconstruct_blobs_with_stats<E, F, Fut>(
@@ -223,7 +247,8 @@ async fn reconstruct_blobs_with_stats<E, F, Fut>(
     workers: usize,
     fetch_blob: F,
     outcome_stats: Option<Arc<Mutex<ScanOutcomeStats>>>,
-) -> usize
+    resource_budget: Option<Arc<ResourceBudget>>,
+) -> ReconstructionSummary
 where
     E: BlobEntry,
     F: Fn(E) -> Fut + Clone + Send + Sync,
@@ -235,6 +260,7 @@ where
         let fetch_blob = fetch_blob.clone();
         let workspace = workspace.clone();
         let outcome_stats = outcome_stats.clone();
+        let resource_budget = resource_budget.clone();
         async move {
             if entry
                 .size()
@@ -243,21 +269,39 @@ where
                 if let Some(stats) = outcome_stats.as_ref() {
                     stats.lock().await.skipped_oversized += 1;
                 }
-                return false;
+                return ReconstructionOutcome::Failed;
             }
+
+            // Hold the reservation for the fetched bytes until the workspace
+            // write completes. The declared size is an admission upper bound;
+            // unknown-size entries use the configured per-blob ceiling.
+            let reservation_bytes = entry
+                .size()
+                .map(|size| size.min(max_blob_bytes as u64) as usize)
+                .unwrap_or(max_blob_bytes);
+            let _workspace_reservation = resource_budget.as_ref().and_then(|budget| {
+                budget.try_reserve(ResourceStage::WorkspaceReconstruction, reservation_bytes)
+            });
+            if resource_budget.is_some() && _workspace_reservation.is_none() {
+                if let Some(stats) = outcome_stats.as_ref() {
+                    stats.lock().await.skipped_resource_budget += 1;
+                }
+                return ReconstructionOutcome::ResourceSkipped;
+            }
+
             let data = match fetch_blob(entry.clone()).await {
                 Ok(data) if data.len() <= max_blob_bytes => data,
                 Ok(_) => {
                     if let Some(stats) = outcome_stats.as_ref() {
                         stats.lock().await.skipped_oversized += 1;
                     }
-                    return false;
+                    return ReconstructionOutcome::Failed;
                 }
                 Err(_) => {
                     if let Some(stats) = outcome_stats.as_ref() {
                         stats.lock().await.failed_files += 1;
                     }
-                    return false;
+                    return ReconstructionOutcome::Failed;
                 }
             };
             let relative_path = match crate::normalize_repo_relative_path(entry.path()) {
@@ -266,7 +310,7 @@ where
                     if let Some(stats) = outcome_stats.as_ref() {
                         stats.lock().await.skipped_files += 1;
                     }
-                    return false;
+                    return ReconstructionOutcome::Failed;
                 }
             };
             let local_path = workspace.join(relative_path);
@@ -274,35 +318,37 @@ where
                 if let Some(stats) = outcome_stats.as_ref() {
                     stats.lock().await.skipped_files += 1;
                 }
-                return false;
+                return ReconstructionOutcome::Failed;
             }
             if let Some(parent) = local_path.parent() {
                 if std::fs::create_dir_all(parent).is_err() {
                     if let Some(stats) = outcome_stats.as_ref() {
                         stats.lock().await.failed_files += 1;
                     }
-                    return false;
+                    return ReconstructionOutcome::Failed;
                 }
             }
             if std::fs::write(local_path, data).is_err() {
                 if let Some(stats) = outcome_stats.as_ref() {
                     stats.lock().await.failed_files += 1;
                 }
-                return false;
+                return ReconstructionOutcome::Failed;
             }
-            true
+            ReconstructionOutcome::Recovered
         }
     });
     let reconstruct_stream = reconstruct_stream.buffer_unordered(workers.max(1));
 
     futures::pin_mut!(reconstruct_stream);
-    let mut failed = 0;
-    while let Some(success) = reconstruct_stream.next().await {
-        if !success {
-            failed += 1;
+    let mut summary = ReconstructionSummary::default();
+    while let Some(outcome) = reconstruct_stream.next().await {
+        match outcome {
+            ReconstructionOutcome::Recovered => {}
+            ReconstructionOutcome::Failed => summary.failed += 1,
+            ReconstructionOutcome::ResourceSkipped => summary.resource_skipped += 1,
         }
     }
-    failed
+    summary
 }
 
 /// Build the provider-neutral result for a forge repository scan.
@@ -374,6 +420,7 @@ pub(crate) struct FileScanConfig {
     pub(crate) blobs_failed: Arc<AtomicUsize>,
     pub(crate) bytes_scanned: Arc<AtomicUsize>,
     pub(crate) outcome_stats: Arc<Mutex<ScanOutcomeStats>>,
+    pub(crate) resource_budget: Arc<ResourceBudget>,
 }
 
 /// Scan all eligible files in a reconstructed repository workspace.
@@ -774,11 +821,12 @@ where
                     async move { fetch_blob(forge, repo, entry, head_sha).await }
                 },
                 Some(scan_config.outcome_stats.clone()),
+                Some(scan_config.resource_budget.clone()),
             )
             .await;
             scan_config
                 .blobs_failed
-                .fetch_add(failed, Ordering::Relaxed);
+                .fetch_add(failed.failed, Ordering::Relaxed);
             scan_workspace_files(FileScanConfig {
                 workspace: repo_workspace,
                 repository_name: repo.full_name.clone(),
@@ -797,6 +845,10 @@ where
     )
     .await;
     result.outcome_stats = scan_config.outcome_stats.lock().await.clone();
+    let resource_stats = scan_config.resource_budget.stats();
+    result.outcome_stats.resource_peak_bytes = resource_stats.peak_bytes;
+    result.outcome_stats.resource_denied_reservations = resource_stats.denied_reservations;
+    result.outcome_stats.resource_by_stage = resource_stats.by_stage;
     result.retry_stats = forge.retry_stats();
     result
 }
@@ -892,6 +944,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reconstruct_blobs_reports_workspace_budget_denial() {
+        let workspace =
+            std::env::temp_dir().join(format!("gitrecon-forge-budget-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&workspace);
+        fs::create_dir_all(&workspace).expect("test workspace should be creatable");
+
+        let tree = vec![TreeEntry {
+            path: "config/settings.toml".to_string(),
+            obj_type: "blob".to_string(),
+            sha: "budget-sha".to_string(),
+            size: Some(8),
+            mode: None,
+        }];
+        let outcome_stats = Arc::new(Mutex::new(ScanOutcomeStats::default()));
+        let budget = Arc::new(crate::resource_budget::ResourceBudget::new(4));
+        let fetch_calls = Arc::new(AtomicUsize::new(0));
+        let fetch_calls_for_worker = fetch_calls.clone();
+        let summary = super::reconstruct_blobs_with_stats(
+            tree,
+            workspace.clone(),
+            1024,
+            1,
+            move |_entry| {
+                fetch_calls_for_worker.fetch_add(1, Ordering::Relaxed);
+                async { Ok(b"should-not-fetch".to_vec()) }
+            },
+            Some(outcome_stats.clone()),
+            Some(budget.clone()),
+        )
+        .await;
+
+        assert_eq!(summary.failed, 0);
+        assert_eq!(summary.resource_skipped, 1);
+        assert_eq!(fetch_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(outcome_stats.lock().await.skipped_resource_budget, 1);
+        assert_eq!(budget.stats().current_bytes, 0);
+        assert_eq!(
+            budget.stats().by_stage["workspace_reconstruction"].denied_reservations,
+            1
+        );
+        assert!(!workspace.join("config/settings.toml").exists());
+        fs::remove_dir_all(workspace).expect("test workspace should be removable");
+    }
+
+    #[tokio::test]
     async fn scan_workspace_files_scans_binary_files_and_collects_findings() {
         let workspace =
             std::env::temp_dir().join(format!("gitrecon-file-scan-test-{}", std::process::id()));
@@ -944,6 +1041,7 @@ mod tests {
             blobs_failed: blobs_failed.clone(),
             bytes_scanned: bytes_scanned.clone(),
             outcome_stats: outcome_stats.clone(),
+            resource_budget: Arc::new(crate::resource_budget::ResourceBudget::new(0)),
         })
         .await;
 
@@ -1368,6 +1466,7 @@ mod tests {
                 blobs_failed,
                 bytes_scanned,
                 outcome_stats,
+                resource_budget: Arc::new(crate::resource_budget::ResourceBudget::new(1024 * 1024)),
             },
             |forge, repo, entry, _head_sha| async move {
                 forge.get_blob_entry(&repo, &entry).await
@@ -1393,6 +1492,11 @@ mod tests {
         assert!(capabilities.snapshot);
         assert!(!capabilities.history);
         assert_eq!(result.outcome_stats.unsupported_capability, None);
+        assert!(result.outcome_stats.resource_by_stage["workspace_reconstruction"].peak_bytes > 0);
+        assert_eq!(
+            result.outcome_stats.resource_by_stage["workspace_reconstruction"].current_bytes,
+            0
+        );
     }
 
     #[tokio::test]
@@ -1439,6 +1543,7 @@ mod tests {
                 blobs_failed: Arc::new(AtomicUsize::new(0)),
                 bytes_scanned: Arc::new(AtomicUsize::new(0)),
                 outcome_stats,
+                resource_budget: Arc::new(crate::resource_budget::ResourceBudget::new(0)),
             },
             |forge, repo, entry, _head_sha| async move {
                 forge.get_blob_entry(&repo, &entry).await
@@ -1513,6 +1618,7 @@ mod tests {
                 blobs_failed: Arc::new(AtomicUsize::new(0)),
                 bytes_scanned: Arc::new(AtomicUsize::new(0)),
                 outcome_stats,
+                resource_budget: Arc::new(crate::resource_budget::ResourceBudget::new(0)),
             },
             |forge, repo, entry, revision| async move {
                 forge.get_blob_entry_at(&repo, &entry, &revision).await
@@ -1573,6 +1679,7 @@ mod tests {
                 blobs_failed: Arc::new(AtomicUsize::new(0)),
                 bytes_scanned: Arc::new(AtomicUsize::new(0)),
                 outcome_stats: Arc::new(Mutex::new(ScanOutcomeStats::default())),
+                resource_budget: Arc::new(crate::resource_budget::ResourceBudget::new(0)),
             },
             |_forge, _repo, _entry, _head_sha| async { Ok(Vec::new()) },
             Instant::now(),
@@ -1682,6 +1789,7 @@ mod keyword_policy_tests {
             blobs_failed: Arc::new(AtomicUsize::new(0)),
             bytes_scanned: Arc::new(AtomicUsize::new(0)),
             outcome_stats: Arc::new(Mutex::new(ScanOutcomeStats::default())),
+            resource_budget: Arc::new(crate::resource_budget::ResourceBudget::new(0)),
         })
         .await;
 
