@@ -150,13 +150,13 @@ SARIF menyimpan telemetry pada `runs[0].properties.gitrecon`; NDJSON menambahkan
 
 ### Item baru P2-09 — Stage-aware resource and scheduler telemetry
 
-**Status:** `IN PROGRESS — resource budget, URL scheduler, acquisition, ZIP/GZIP archive, workspace reconstruction, forge file-scan, target-fan-out control telemetry, dan checkpoint equivalence selesai; benchmark observability masih menjadi acceptance slice berikutnya. Byte-level fan-out accounting tetap tidak diklaim karena belum ada boundary alokasi nyata**
+**Status:** `DONE` — resource budget, URL scheduler, acquisition, ZIP/GZIP archive, workspace reconstruction, forge file-scan, target-fan-out control telemetry, checkpoint equivalence, dan benchmark observability selesai. Byte-level fan-out accounting tetap tidak diklaim karena belum ada boundary alokasi nyata
 **Dependensi:** P1-08, P3-04, P3-05
 **Area:** `src/resource_budget.rs`, `src/scan_scheduler.rs`, `src/stream_types.rs`, benchmark tools
 
 Resource budget sekarang memiliki vocabulary stabil untuk acquisition, object scan, archive, workspace reconstruction, file scan, dan target fan-out; setiap stage melaporkan current/peak/denied secara additive. URL acquisition kini benar-benar me-reserve lifecycle buffer HTTP/pack/cache, ZIP/GZIP archive expansion me-reserve output sebelum buffer dibuat dan mempertahankan guard selama recursive scan, forge workspace reconstruction memegang reservation hingga fetch dan materialisasi workspace selesai, dan forge file scanning me-reserve ukuran file sebelum read hingga classification/scanning selesai. Denial dipetakan menjadi typed resource skip dan tidak dipresentasikan sebagai hasil bersih. Target fan-out kini memiliki RAII permit gate dengan configured/current/peak active, current waiters, queue wait count/milliseconds, grant, started, dan completed telemetry pada aggregate report; karena ini control-plane accounting, byte-level `target_fanout` reservation belum diklaim sampai tersedia boundary alokasi yang nyata. URL scheduler mengekspos request/grant, queue count/wait, active peak, configured current limit, limit adjustments, serta adjustment/throttle/headroom events.
 
-**Acceptance criteria:** Cancellation me-release reservation pada setiap stage; exhaustive tetap bounded; report membedakan resource denial dari clean result; benchmark dapat membandingkan throughput, peak RSS, queue wait, dan cache/retry behavior tanpa wall-clock threshold naif.
+**Acceptance criteria:** Cancellation me-release reservation pada setiap stage; exhaustive tetap bounded; report membedakan resource denial dari clean result; benchmark membandingkan throughput, peak RSS, queue wait, resource peak/denial, serta cache/retry behavior tanpa wall-clock threshold naif. Terpenuhi melalui regression/resource tests dan deterministic localhost benchmark yang menghasilkan observability per-sample serta aggregate.
 
 ### Item baru P2-10 — Shared date-aware transport parsing
 

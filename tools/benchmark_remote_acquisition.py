@@ -130,6 +130,8 @@ def run_once(binary: Path, target: str) -> dict[str, Any]:
         outcome_stats = result.get("outcomes", {})
         cache_stats = result.get("cache")
         retry_stats = result.get("retry")
+        scheduler_stats = outcome_stats.get("scheduler") or {}
+        resource_by_stage = outcome_stats.get("resource_by_stage") or {}
         blobs_scanned = result.get("blobs_scanned", 0)
         bytes_scanned = result.get("bytes_scanned", 0)
         if not any(
@@ -159,6 +161,14 @@ def run_once(binary: Path, target: str) -> dict[str, Any]:
                 "bytes_scanned": bytes_scanned,
                 "blobs_failed": outcome_stats.get("blobs_failed", 0),
                 "skipped_files": outcome_stats.get("skipped_files", 0),
+            },
+            "observability": {
+                "scheduler": scheduler_stats,
+                "resource_peak_bytes": outcome_stats.get("resource_peak_bytes", 0),
+                "resource_denied_reservations": outcome_stats.get(
+                    "resource_denied_reservations", 0
+                ),
+                "resource_by_stage": resource_by_stage,
             },
         }
 
@@ -204,6 +214,21 @@ def main() -> None:
     ]
     throughput_bytes_values = [sample["throughput"]["bytes_per_s"] for sample in samples]
     throughput_blobs_values = [sample["throughput"]["blobs_per_s"] for sample in samples]
+    scheduler_queue_wait_values = [
+        sample["observability"]["scheduler"].get("queue_wait_ms", 0)
+        for sample in samples
+    ]
+    scheduler_queued_values = [
+        sample["observability"]["scheduler"].get("queued_acquires", 0)
+        for sample in samples
+    ]
+    resource_peak_values = [
+        sample["observability"].get("resource_peak_bytes", 0) for sample in samples
+    ]
+    resource_denied_values = [
+        sample["observability"].get("resource_denied_reservations", 0)
+        for sample in samples
+    ]
     median_elapsed = statistics.median(elapsed_values)
     print(
         json.dumps(
@@ -232,6 +257,15 @@ def main() -> None:
                     "median_throughput_bytes_per_s": statistics.median(throughput_bytes_values),
                     "mean_throughput_blobs_per_s": statistics.mean(throughput_blobs_values),
                     "median_throughput_blobs_per_s": statistics.median(throughput_blobs_values),
+                    "mean_scheduler_queue_wait_ms": statistics.mean(scheduler_queue_wait_values),
+                    "median_scheduler_queue_wait_ms": statistics.median(
+                        scheduler_queue_wait_values
+                    ),
+                    "mean_scheduler_queued_acquires": statistics.mean(scheduler_queued_values),
+                    "median_scheduler_queued_acquires": statistics.median(scheduler_queued_values),
+                    "resource_peak_bytes": max(resource_peak_values),
+                    "mean_resource_peak_bytes": statistics.mean(resource_peak_values),
+                    "resource_denied_reservations": sum(resource_denied_values),
                     "relative_spread": (
                         (max(elapsed_values) - min(elapsed_values)) / median_elapsed
                         if median_elapsed
