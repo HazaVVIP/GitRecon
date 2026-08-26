@@ -67,18 +67,13 @@ impl AzureForgeClient {
         for attempt in 0..3u32 {
             let resp = self.client.get(url).await;
             if resp.status == 429 {
-                let wait_s = resp
-                    .headers
-                    .get("retry-after")
-                    .and_then(|v| v.trim().parse::<u64>().ok())
-                    .unwrap_or(60)
-                    .min(300);
+                let wait = Self::parse_retry_after(&resp.headers);
                 log::warn!(
                     "Azure DevOps rate-limited (HTTP 429); sleeping {}s before retry {}/3",
-                    wait_s,
+                    wait.as_secs(),
                     attempt + 1,
                 );
-                tokio::time::sleep(std::time::Duration::from_secs(wait_s)).await;
+                tokio::time::sleep(wait).await;
                 continue;
             }
             let mut headers = std::collections::HashMap::new();
@@ -92,6 +87,13 @@ impl AzureForgeClient {
             "Rate limit exhausted after 3 retries for {}",
             crate::validation::redact_url(url)
         )
+    }
+
+    /// Parse Retry-After using the shared numeric/date-aware wire parser.
+    fn parse_retry_after(headers: &std::collections::HashMap<String, String>) -> Duration {
+        crate::provider_transport::parse_retry_after_duration(headers, chrono::Utc::now())
+            .unwrap_or(Duration::from_secs(60))
+            .min(Duration::from_secs(300))
     }
 
     /// URL-encode a path for Azure DevOps API.

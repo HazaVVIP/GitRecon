@@ -160,13 +160,13 @@ Resource budget sekarang memiliki vocabulary stabil untuk acquisition, object sc
 
 ### Item baru P2-10 — Shared date-aware transport parsing
 
-**Status:** `IN PROGRESS — shared parser dan adopsi HTTP/GitHub/GitLab selesai pada slice pertama; provider lain tetap ditinjau incremental**
+**Status:** `DONE` — shared parser date-aware kini dipakai HTTP client dan seluruh built-in provider (GitHub, GitLab, Bitbucket, Gitea, Azure) dengan fallback, cap, retry ceiling, dan reset semantics masing-masing tetap dipertahankan
 **Dependensi:** P0-04, P2-04
 **Area:** `src/provider_transport.rs`, `src/http_client.rs`, provider adapters
 
-Parser bersama sekarang menerima numeric delay-seconds dan tiga bentuk HTTP-date dengan fixed-clock tests; HTTP client, GitHub, dan GitLab mempertahankan fallback/cap provider masing-masing. Reset semantics tetap provider-specific dan tidak ada perubahan pada retry ceiling atau status policy.
+Parser bersama menerima numeric delay-seconds dan tiga bentuk HTTP-date dengan fixed-clock tests; HTTP client serta seluruh built-in provider memakai helper yang sama. Fallback/cap provider, reset semantics, retry ceiling, dan status policy tetap provider-specific dan tidak berubah.
 
-**Acceptance criteria:** Numeric/date header menghasilkan delay yang bounded dan deterministic; malformed date memakai fallback documented; semua built-in provider memakai helper yang sama kecuali override yang beralasan; existing retry policy tidak berubah tanpa test evidence.
+**Acceptance criteria:** Numeric/date header menghasilkan delay yang bounded dan deterministic; malformed date memakai fallback documented; semua built-in provider memakai helper yang sama; existing retry policy tidak berubah tanpa test evidence. Seluruh kriteria terpenuhi melalui shared parser tests dan audit call-site provider.
 
 ### Item baru P3-07 — Cross-platform quality matrix
 
