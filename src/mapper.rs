@@ -811,13 +811,23 @@ impl Mapper {
         // hitting a cluster of inaccessible entries. Only declare partial
         // exposure if ZERO succeed — a single valid object proves the objects/
         // tree is reachable. --verify-objects raises the bar to ≥30%.
-        result.objects_accessible = if result.blob_sha1s.is_empty() {
+        // Build candidates after all discovery paths have run. An empty set is
+        // not proof that objects are reachable: it can represent metadata-only
+        // exposure or an empty/invalid object listing. The caller decides whether
+        // to surface that state through the opt-in partial-exposure flag.
+        let candidates = result.verification_candidates();
+        result.objects_accessible = if !result.pack_objects.is_empty() {
+            // A successfully parsed pack contains genuine Git object bytes.
+            // Loose-object sampling may still fail on servers that expose only
+            // pack-backed storage, so do not misclassify that reachable content
+            // as metadata-only exposure.
             true
+        } else if candidates.is_empty() {
+            false
         } else {
             // Prefer current-index entries, then graph-derived blobs, then the
             // remaining blob set. This keeps samples deterministic while covering
             // bare/no-index repositories where index_entries is empty.
-            let candidates = result.verification_candidates();
             let sample_size = candidates.len().min(10);
             let step = if sample_size > 1 {
                 candidates.len() / sample_size

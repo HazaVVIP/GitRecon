@@ -202,7 +202,8 @@ async fn run_url_target(context: UrlRunContext<'_>, url: String, fuzz: bool) -> 
                             "version": env!("CARGO_PKG_VERSION"),
                             "detection": {
                                 "confidence": dr.confidence,
-                                "label": format!("{}_PARTIAL", dr.label),
+                                "label": "PARTIAL",
+                                "original_label": dr.label,
                                 "git_url": dr.git_url,
                                 "exposure_type": "metadata_only"
                             },
