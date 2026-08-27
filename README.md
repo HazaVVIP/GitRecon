@@ -170,6 +170,10 @@ Replace the example quantifier with a valid regular-expression bound appropriate
 
 Run `gitrecon --help` for the complete option list, including forge-specific URLs, proxy rotation, user-agent pools, rate limiting, checkpoint intervals, partial-exposure reporting, themes, and webhook controls.
 
+`--partial-exposure` is disabled by default and never stops a normal scan. When explicitly enabled, it emits a `PARTIAL` report only when no valid Git object can be verified. Successfully resolved pack-backed objects count as accessible even when loose-object URLs are unavailable, preventing a valid pack exposure from being incorrectly short-circuited. The partial report uses `detection.label: "PARTIAL"` and preserves the original detector label in `detection.original_label`.
+
+Normal mode applies conservative context gates to heuristic YAML and entropy detectors. Generic fields such as `comment`, `children`, and `revalidate`, and generated JavaScript asset paths, are not reported as secrets solely because their values have high entropy. `--exhaustive` deliberately retains these broad candidates, along with placeholder-like values, so it remains a superset for investigative workflows.
+
 History mode is bounded by `--max-history` and keeps `snapshot` as the default. GitHub retrieves changed-file blob SHAs and can scan deleted blobs when the API exposes them. GitLab retrieves changed paths and fetches current content at each commit ref; deleted paths are counted and reported as history coverage, but deleted content is not scanned when GitLab provides no historical blob address. Other forge providers return typed `unsupported_capability` rather than silently producing an empty history result.
 
 ## Outputs

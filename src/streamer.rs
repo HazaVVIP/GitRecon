@@ -2878,6 +2878,26 @@ fn is_js_file(filename: &str) -> bool {
     )
 }
 
+/// Identify generated code-asset paths that can contain credential keywords
+/// such as `password` in their route name but are not secret material.
+///
+/// This is intentionally narrow: only path-shaped values ending in common
+/// source/asset extensions are excluded from normal entropy heuristics. The
+/// exhaustive policy retains them for broad investigative review.
+fn is_probable_code_asset_path(value: &str) -> bool {
+    let normalized = value.to_ascii_lowercase();
+    let has_path_separator = normalized.contains('/') || normalized.contains('\\');
+    let has_code_asset_extension = [".cjs", ".css", ".js", ".jsx", ".map", ".mjs", ".ts", ".tsx"]
+        .iter()
+        .any(|extension| normalized.ends_with(extension));
+    has_path_separator
+        && has_code_asset_extension
+        && (normalized.contains("/static/")
+            || normalized.contains("/chunks/")
+            || normalized.starts_with("static/")
+            || normalized.starts_with("assets/"))
+}
+
 /// Compute the Shannon entropy (bits per character) of `s`.
 /// Returns 0.0 for strings shorter than 4 characters.
 pub fn shannon_entropy(s: &str) -> f64 {
@@ -3007,7 +3027,7 @@ fn scan_entropy_line_with_policy(
         let quoted = m.as_str();
         // Strip the enclosing quotes
         let inner = &quoted[1..quoted.len() - 1];
-        if !include_placeholders && is_placeholder(inner) {
+        if !include_placeholders && (is_placeholder(inner) || is_probable_code_asset_path(inner)) {
             continue;
         }
         let ent = shannon_entropy(inner);
@@ -3027,6 +3047,39 @@ fn scan_entropy_line_with_policy(
             confidence_adjustment: None,
         });
     }
+}
+
+/// Return whether a YAML key names a credential-bearing field rather than a
+/// generic application field such as `comment`, `children`, or `revalidate`.
+///
+/// Normal mode uses this conservative gate for heuristic YAML detectors. The
+/// exhaustive policy intentionally bypasses it so broad investigative scans
+/// remain a superset of normal results.
+fn is_secret_yaml_key(key_name: &str) -> bool {
+    let normalized = key_name.replace('-', "_").to_ascii_lowercase();
+    let parts: Vec<&str> = normalized.split('_').collect();
+    normalized == "key"
+        || parts.iter().any(|part| {
+            matches!(
+                *part,
+                "api"
+                    | "auth"
+                    | "credential"
+                    | "credentials"
+                    | "encryption"
+                    | "pass"
+                    | "passwd"
+                    | "password"
+                    | "private"
+                    | "secret"
+                    | "token"
+            )
+        })
+        || parts.last() == Some(&"key")
+        || (normalized.ends_with("key")
+            && ["api", "access", "private", "secret", "encryption"]
+                .iter()
+                .any(|prefix| normalized.starts_with(prefix)))
 }
 
 /// Detect secrets where the value appears on the line *following* a bare YAML key
@@ -3134,6 +3187,7 @@ fn scan_yaml_nextline_secrets_with_policy(
                 };
 
                 if value.len() >= 8
+                    && (include_placeholders || is_secret_yaml_key(key_name))
                     && (include_placeholders || !is_placeholder(&value))
                     && shannon_entropy(&value) >= 2.5
                 {
@@ -3166,7 +3220,10 @@ fn scan_yaml_nextline_secrets_with_policy(
             let key_name = caps.get(1).map(|m| m.as_str()).unwrap_or("unknown");
             let value = caps.get(2).map(|m| m.as_str()).unwrap_or("");
 
-            if (include_placeholders || !is_placeholder(value)) && shannon_entropy(value) >= 2.5 {
+            if (include_placeholders || is_secret_yaml_key(key_name))
+                && (include_placeholders || !is_placeholder(value))
+                && shannon_entropy(value) >= 2.5
+            {
                 let finding = Finding {
                     filename: filename.to_string(),
                     line: i + 1, // SCAN-005: Current line (key line)
@@ -3201,6 +3258,7 @@ fn scan_yaml_nextline_secrets_with_policy(
                 if !value.is_empty()
                     && !value.starts_with('#')
                     && value.len() >= 8
+                    && (include_placeholders || is_secret_yaml_key(key_name))
                     && (include_placeholders || !is_placeholder(value))
                     && shannon_entropy(value) >= 2.5
                 {
@@ -3235,15 +3293,9 @@ fn scan_yaml_nextline_secrets_with_policy(
         if let Some(caps) = YAML_KEY_PATTERN.captures(line) {
             let key_name = caps.get(1).map(|m| m.as_str()).unwrap_or("unknown");
 
-            // Check if this looks like a secret key
-            let is_secret_like = key_name.contains("pass")
-                || key_name.contains("secret")
-                || key_name.contains("key")
-                || key_name.contains("token")
-                || key_name.contains("auth")
-                || key_name.contains("credential");
-
-            if !is_secret_like {
+            // Check if this looks like a secret key without substring-matching
+            // generic names such as `monkey` or `revalidate`.
+            if !is_secret_yaml_key(key_name) && !include_placeholders {
                 continue; // Skip non-secret-like keys
             }
 
@@ -5639,6 +5691,41 @@ mod tests {
         assert!(findings.is_empty(), "Should not flag empty YAML value");
     }
 
+    #[test]
+    fn yaml_secret_key_classifier_avoids_generic_application_fields() {
+        assert!(is_secret_yaml_key("api_key"));
+        assert!(is_secret_yaml_key("encryption-key"));
+        assert!(is_secret_yaml_key("password"));
+        assert!(!is_secret_yaml_key("revalidate"));
+        assert!(!is_secret_yaml_key("comment"));
+        assert!(!is_secret_yaml_key("children"));
+        assert!(!is_secret_yaml_key("monkey"));
+    }
+
+    #[test]
+    fn yaml_normal_mode_ignores_generic_identifier_values() {
+        let content = concat!(
+            "revalidate: normalizedRevalidateValue\n",
+            "comment: resolvedVerificationComment\n",
+            "api_key: xK9mQz3rN7wT2vB5sL0pJ4hY8uE6fA1d\n"
+        );
+        let normal =
+            scan_yaml_nextline_secrets_with_policy(content, "config.yaml", "a", false, &[], false);
+        assert!(normal.iter().all(|finding| {
+            !finding.match_str.contains("normalizedRevalidateValue")
+                && !finding.match_str.contains("resolvedVerificationComment")
+        }));
+        assert!(normal.iter().any(|finding| finding
+            .match_str
+            .contains("xK9mQz3rN7wT2vB5sL0pJ4hY8uE6fA1d")));
+
+        let exhaustive =
+            scan_yaml_nextline_secrets_with_policy(content, "config.yaml", "a", false, &[], true);
+        assert!(exhaustive
+            .iter()
+            .any(|finding| finding.match_str.contains("normalizedRevalidateValue")));
+    }
+
     // Entropy line scan
     #[test]
     fn test_scan_entropy_line_fires_for_high_entropy_secret() {
@@ -5652,6 +5739,43 @@ mod tests {
             out.iter().any(|f| f.pattern_id == "high_entropy_secret"),
             "Should fire for high-entropy quoted value in keyword context"
         );
+    }
+
+    #[test]
+    fn entropy_normal_mode_skips_generated_asset_paths_but_exhaustive_retains_them() {
+        let sha = "a".repeat(40);
+        let line =
+            r#"password = "static/chunks/app/account/update-password/page-69507205b76ee74b.js""#;
+        let lines = vec![line];
+        let mut normal = Vec::new();
+        scan_entropy_line_with_policy(
+            line,
+            0,
+            "bundle.js",
+            &sha,
+            false,
+            &lines,
+            &mut normal,
+            4.5,
+            false,
+        );
+        assert!(normal.is_empty());
+
+        let mut exhaustive = Vec::new();
+        scan_entropy_line_with_policy(
+            line,
+            0,
+            "bundle.js",
+            &sha,
+            false,
+            &lines,
+            &mut exhaustive,
+            4.5,
+            true,
+        );
+        assert!(exhaustive
+            .iter()
+            .any(|finding| finding.pattern_id == "high_entropy_secret"));
     }
 
     #[test]
