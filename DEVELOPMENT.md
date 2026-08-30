@@ -1,6 +1,6 @@
 # GitRecon Development and Release Guide
 
-**Version:** 3.2.8
+**Version:** 3.2.9
 **Status:** Production-readiness maintenance
 **Language:** Rust 2021
 
