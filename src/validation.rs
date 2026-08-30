@@ -192,12 +192,14 @@ pub fn validate_gitlab_token(token: &str) -> Result<()> {
         return Err(anyhow!("GitLab token cannot contain control characters"));
     }
 
-    // GitLab tokens are alphanumeric with underscores and hyphens (glpat- prefix)
+    // GitLab tokens use URL-safe characters. Modern glpat tokens can contain
+    // dot-separated suffixes in addition to the traditional hyphen/underscore
+    // characters, so the validator must not reject those valid tokens.
     if !trimmed
         .chars()
-        .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+        .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.'))
     {
-        return Err(anyhow!("GitLab token contains invalid characters (only alphanumeric, underscore, and hyphen allowed)"));
+        return Err(anyhow!("GitLab token contains invalid characters (only alphanumeric, underscore, hyphen, and period allowed)"));
     }
 
     // Validate length (GitLab tokens are typically 20-32 characters after glpat- prefix)
@@ -1091,6 +1093,20 @@ mod tests {
     fn test_validate_github_token_too_long() {
         let long_token = "a".repeat(MAX_TOKEN_LENGTH + 1);
         assert!(validate_github_token(&long_token).is_err());
+    }
+
+    #[test]
+    fn test_validate_gitlab_token_accepts_modern_dotted_format() {
+        // Synthetic token only; never use a real credential in tests.
+        let token = "glpat-".to_owned() + &"A".repeat(38) + ".01.synthetic";
+        assert!(validate_gitlab_token(&token).is_ok());
+        assert!(validate_gitlab_token(&format!("  {token}  ")).is_ok());
+    }
+
+    #[test]
+    fn test_validate_gitlab_token_rejects_unsafe_punctuation() {
+        let token = "glpat-".to_owned() + &"A".repeat(38) + ".01.synthetic!";
+        assert!(validate_gitlab_token(&token).is_err());
     }
 
     #[test]
