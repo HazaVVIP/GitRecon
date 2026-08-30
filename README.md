@@ -20,7 +20,7 @@ Install the latest published release binary with one command:
 curl -sSf https://raw.githubusercontent.com/HazaVVIP/GitRecon/main/install.sh | bash
 ```
 
-The installer detects the operating system and CPU architecture, downloads the matching archive from [GitHub Releases](https://github.com/HazaVVIP/GitRecon/releases), requires a matching `SHA256SUMS` entry and a local SHA-256 utility before installing the binary, and installs `gitrecon` to `/usr/local/bin`. It refuses an unverified release archive instead of silently bypassing integrity verification. The current production binary is published as **v3.2.9** for Linux `x86_64`; when a compatible release asset is unavailable, the installer falls back to a source build and may install Rust and system build dependencies.
+The installer detects the operating system and CPU architecture, downloads the matching archive from [GitHub Releases](https://github.com/HazaVVIP/GitRecon/releases), requires a matching `SHA256SUMS` entry and a local SHA-256 utility before installing the binary, and installs `gitrecon` to `/usr/local/bin`. It refuses an unverified release archive instead of silently bypassing integrity verification. The current production binary is published as **v3.2.10** for Linux `x86_64`; when a compatible release asset is unavailable, the installer falls back to a source build and may install Rust and system build dependencies.
 
 After installation, verify the command and view the available options:
 
@@ -29,7 +29,7 @@ gitrecon --version
 gitrecon --help
 ```
 
-For a pinned release or a manual checksum-verified download, use the assets listed on the [v3.2.9 release page](https://github.com/HazaVVIP/GitRecon/releases/tag/v3.2.9). The Linux archive is named `gitrecon-3.2.9-linux-x86_64.tar.gz`; verify it against the matching entry in `SHA256SUMS` before extraction.
+For a pinned release or a manual checksum-verified download, use the assets listed on the [v3.2.10 release page](https://github.com/HazaVVIP/GitRecon/releases/tag/v3.2.10). The Linux archive is named `gitrecon-3.2.10-linux-x86_64.tar.gz`; verify it against the matching entry in `SHA256SUMS` before extraction.
 
 ### Build from source
 
