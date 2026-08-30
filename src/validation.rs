@@ -95,10 +95,10 @@ pub fn validate_and_normalize_url(url_str: &str) -> Result<String> {
 
 /// Validates a GitHub Personal Access Token (PAT) format
 ///
-/// # Security Considerations
-/// - Validates token format without exposing the actual token
-/// - Prevents injection of malicious strings
-/// - Enforces length limits
+/// # Validation
+/// - Does not impose a provider-specific character grammar on the token
+/// - Does not expose the token in validation errors
+/// - Enforces only empty-value and length limits before provider authentication
 ///
 /// # Arguments
 /// * `token` - The raw token string from user input
@@ -125,22 +125,9 @@ pub fn validate_github_token(token: &str) -> Result<()> {
     // ghp_, gho_, ghu_, ghs_, ghr_ (as of 2021+)
     // We're lenient here to support various token types
 
-    // Check for suspicious characters (prevent injection)
-    if trimmed.contains(char::is_whitespace) {
-        return Err(anyhow!("GitHub token cannot contain whitespace"));
-    }
-
-    if trimmed.chars().any(|c| c == '\n' || c == '\r' || c == '\t') {
-        return Err(anyhow!("GitHub token cannot contain control characters"));
-    }
-
-    // GitHub tokens are alphanumeric and underscores
-    if !trimmed
-        .chars()
-        .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
-    {
-        return Err(anyhow!("GitHub token contains invalid characters (only alphanumeric, underscore, and hyphen allowed)"));
-    }
+    // Character-level validation is intentionally omitted. Provider-issued tokens
+    // may evolve or contain punctuation not covered by a local grammar; the
+    // provider API remains authoritative for authentication.
 
     // Validate length (GitHub tokens are typically 36-40 characters)
     if trimmed.len() < 20 {
@@ -154,10 +141,10 @@ pub fn validate_github_token(token: &str) -> Result<()> {
 
 /// Validates a GitLab Personal Access Token (PAT) format
 ///
-/// # Security Considerations
-/// - Validates token format without exposing the actual token
-/// - Prevents injection of malicious strings
-/// - Enforces length limits
+/// # Validation
+/// - Does not impose a provider-specific character grammar on the token
+/// - Does not expose the token in validation errors
+/// - Enforces only empty-value and length limits before provider authentication
 ///
 /// # Arguments
 /// * `token` - The raw token string from user input
@@ -183,24 +170,9 @@ pub fn validate_gitlab_token(token: &str) -> Result<()> {
     // GitLab PATs typically start with 'glpat-' prefix
     // but we're lenient to support various token types (e.g., deploy tokens, feed tokens)
 
-    // Check for suspicious characters (prevent injection)
-    if trimmed.contains(char::is_whitespace) {
-        return Err(anyhow!("GitLab token cannot contain whitespace"));
-    }
-
-    if trimmed.chars().any(|c| c == '\n' || c == '\r' || c == '\t') {
-        return Err(anyhow!("GitLab token cannot contain control characters"));
-    }
-
-    // GitLab tokens use URL-safe characters. Modern glpat tokens can contain
-    // dot-separated suffixes in addition to the traditional hyphen/underscore
-    // characters, so the validator must not reject those valid tokens.
-    if !trimmed
-        .chars()
-        .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.'))
-    {
-        return Err(anyhow!("GitLab token contains invalid characters (only alphanumeric, underscore, hyphen, and period allowed)"));
-    }
+    // Character-level validation is intentionally omitted. Provider-issued tokens
+    // may evolve or contain punctuation not covered by a local grammar; the
+    // provider API remains authoritative for authentication.
 
     // Validate length (GitLab tokens are typically 20-32 characters after glpat- prefix)
     // glpat- prefix with 20 characters is the standard format
@@ -1084,9 +1056,12 @@ mod tests {
     fn test_validate_github_token_invalid() {
         assert!(validate_github_token("").is_err());
         assert!(validate_github_token("short").is_err());
-        assert!(validate_github_token("token with spaces").is_err());
-        assert!(validate_github_token("token\nwith\nnewlines").is_err());
-        assert!(validate_github_token("token@with$special!chars").is_err());
+    }
+
+    #[test]
+    fn test_validate_github_token_allows_provider_defined_characters() {
+        // Synthetic token only; provider authentication remains authoritative.
+        assert!(validate_github_token("ghp-token.with+punctuation/$and spaces").is_ok());
     }
 
     #[test]
@@ -1104,9 +1079,10 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_gitlab_token_rejects_unsafe_punctuation() {
-        let token = "glpat-".to_owned() + &"A".repeat(38) + ".01.synthetic!";
-        assert!(validate_gitlab_token(&token).is_err());
+    fn test_validate_gitlab_token_allows_provider_defined_characters() {
+        // Synthetic token only; provider authentication remains authoritative.
+        let token = "glpat-token.with+punctuation/$and spaces";
+        assert!(validate_gitlab_token(token).is_ok());
     }
 
     #[test]
